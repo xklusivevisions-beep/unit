@@ -1,0 +1,98 @@
+{% extends 'base.html' %}
+{% block title %}UNIT — Delivery History{% endblock %}
+{% block content %}
+<div class="container-fluid p-4 pb-nav">
+
+  <div class="d-flex align-items-center mb-4">
+    <a href="/driver" class="text-decoration-none me-3" style="color:#555;">
+      <i class="fas fa-chevron-left"></i>
+    </a>
+    <div>
+      <div class="unit-logo" style="font-size:1.4rem;">UNIT<span>.</span></div>
+      <small class="text-secondary">Delivery History</small>
+    </div>
+  </div>
+
+  <!-- Search -->
+  <form method="POST" class="mb-4">
+    <div class="d-flex gap-2">
+      <input type="text" name="address" class="form-control"
+             placeholder="Search address or street..."
+             value="{{ query }}" required>
+      <button class="btn btn-primary px-4" style="white-space:nowrap;">
+        <i class="fas fa-search"></i>
+      </button>
+    </div>
+  </form>
+
+  {% if query and not results %}
+  <div class="text-center py-5 text-secondary">
+    <i class="fas fa-box-open fa-3x mb-3" style="color:#333;"></i>
+    <p>No delivery history found for<br><strong style="color:#fff;">{{ query }}</strong></p>
+  </div>
+
+  {% elif results %}
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h6 class="text-secondary mb-0" style="letter-spacing:0.1em;font-size:0.75rem;">
+      {{ results|length }} RECORD{{ 's' if results|length != 1 else '' }} FOUND
+    </h6>
+    <small class="text-secondary">{{ query }}</small>
+  </div>
+
+  {% for r in results %}
+  <div class="card p-3 mb-2" style="border-color:{% if r.status=='delivered' %}#00ff8844{% elif r.status=='failed' %}#ff333344{% else %}#222{% endif %};">
+    <div class="d-flex justify-content-between align-items-start mb-2">
+      <div style="flex:1;">
+        <div class="fw-bold" style="font-size:0.9rem;">{{ r.address }}</div>
+        {% if r.unit %}<small class="text-secondary">Unit {{ r.unit }}</small>{% endif %}
+      </div>
+      <span class="status-pill pill-{{ r.status }} ms-2">{{ r.status.upper() }}</span>
+    </div>
+
+    <div class="d-flex flex-wrap gap-2 mb-2">
+      {% if r.customer_name %}
+      <span style="background:#1a1a1a;color:#aaa;border-radius:8px;padding:3px 10px;font-size:0.75rem;">
+        <i class="fas fa-user me-1"></i>{{ r.customer_name }}
+      </span>
+      {% endif %}
+      {% if r.route_date %}
+      <span style="background:#1a1a1a;color:#aaa;border-radius:8px;padding:3px 10px;font-size:0.75rem;">
+        <i class="fas fa-calendar me-1"></i>{{ r.route_date }}
+      </span>
+      {% endif %}
+      {% if r.approach_sms_sent %}
+      <span style="background:#00ff8815;color:#00ff88;border-radius:8px;padding:3px 10px;font-size:0.75rem;">
+        <i class="fas fa-map-marker-alt me-1"></i>Geofence confirmed
+      </span>
+      {% endif %}
+      {% if r.sms_blast_sent %}
+      <span style="background:#0088ff15;color:#0088ff;border-radius:8px;padding:3px 10px;font-size:0.75rem;">
+        <i class="fas fa-sms me-1"></i>Customer notified
+      </span>
+      {% endif %}
+    </div>
+
+    <div class="d-flex justify-content-between">
+      <small class="text-muted">{{ r.route_name or 'Manual' }}</small>
+      <small class="text-muted">{{ r.created_at[:16] if r.created_at else '' }}</small>
+    </div>
+  </div>
+  {% endfor %}
+
+  {% else %}
+  <div class="text-center py-5 text-secondary">
+    <i class="fas fa-history fa-3x mb-3" style="color:#333;"></i>
+    <p>Search an address to see<br>its full delivery history</p>
+  </div>
+  {% endif %}
+
+</div>
+
+<div class="nav-bottom">
+  <div class="d-flex justify-content-around">
+    <a href="/driver"><i class="fas fa-home"></i>Home</a>
+    <a href="/driver/history" class="active"><i class="fas fa-history"></i>History</a>
+    <a href="/driver/route/new"><i class="fas fa-upload"></i>New Route</a>
+  </div>
+</div>
+{% endblock %}

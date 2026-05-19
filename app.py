@@ -478,6 +478,29 @@ def stop_failed(stop_id):
 
 # ─── ADDRESS SUGGESTIONS (internal DB) ────────────────────────
 
+
+@app.route('/driver/history', methods=['GET', 'POST'])
+def delivery_history():
+    if 'driver_id' not in session:
+        return redirect(url_for('driver_login'))
+    results = []
+    query = ''
+    if request.method == 'POST':
+        query = request.form.get('address', '').strip()
+        if query:
+            street = query.split(',')[0].strip()
+            db = get_db()
+            results = db.execute(
+                """SELECT s.*, r.name as route_name, r.date as route_date
+                   FROM stops s
+                   LEFT JOIN routes r ON s.route_id = r.id
+                   WHERE s.address LIKE ?
+                   ORDER BY s.created_at DESC LIMIT 50""",
+                (f'%{street}%',)
+            ).fetchall()
+            db.close()
+    return render_template('delivery_history.html', results=results, query=query)
+
 @app.route('/api/address-suggest')
 def address_suggest():
     q = request.args.get('q', '').strip()
