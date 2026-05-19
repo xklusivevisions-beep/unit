@@ -537,8 +537,27 @@ def resident_portal():
 
 # ─── ADMIN ─────────────────────────────────────────────────────
 
+ADMIN_PIN = os.environ.get('ADMIN_PIN', '9999')
+
+@app.route('/admin/login', methods=['GET', 'POST'])
+def admin_login():
+    error = None
+    if request.method == 'POST':
+        if request.form.get('pin', '').strip() == ADMIN_PIN:
+            session['admin'] = True
+            return redirect(url_for('admin'))
+        error = 'Wrong PIN'
+    return render_template('admin_login.html', error=error)
+
+@app.route('/admin/logout')
+def admin_logout():
+    session.pop('admin', None)
+    return redirect(url_for('index'))
+
 @app.route('/admin')
 def admin():
+    if not session.get('admin'):
+        return redirect(url_for('admin_login'))
     db = get_db()
     routes    = db.execute("SELECT * FROM routes ORDER BY created_at DESC LIMIT 20").fetchall()
     buildings = db.execute("SELECT * FROM buildings ORDER BY confirmed_count DESC").fetchall()
