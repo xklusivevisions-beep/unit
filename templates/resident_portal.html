@@ -19,9 +19,10 @@
     <p class="text-secondary small mb-4">Takes 60 seconds. Works for every carrier — Amazon, SpeedX, UPS, FedEx, all of them.</p>
 
     <form method="POST">
-      <div class="mb-3">
+      <div class="mb-3" style="position:relative;">
         <label>Your Building Address</label>
-        <input type="text" name="address" class="form-control" placeholder="4500 Cass Ave, Detroit, MI 48201" required>
+        <input type="text" id="address-input" name="address" class="form-control" placeholder="Start typing your address..." autocomplete="off" required>
+        <ul id="address-suggestions" style="position:absolute;z-index:1000;width:100%;background:#1a1a2e;border:1px solid #333;border-radius:8px;list-style:none;padding:0;margin:0;display:none;"></ul>
       </div>
       <div class="mb-3">
         <label>Your Unit / Apt #</label>
@@ -55,4 +56,47 @@
   </div>
   {% endif %}
 </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const input = document.getElementById('address-input');
+  const suggestions = document.getElementById('address-suggestions');
+  let debounceTimer;
+
+  input.addEventListener('input', function() {
+    clearTimeout(debounceTimer);
+    const query = this.value.trim();
+    if (query.length < 4) { suggestions.style.display = 'none'; return; }
+
+    debounceTimer = setTimeout(() => {
+      fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&addressdetails=1&limit=5&countrycodes=us`)
+        .then(r => r.json())
+        .then(data => {
+          suggestions.innerHTML = '';
+          if (!data.length) { suggestions.style.display = 'none'; return; }
+          data.forEach(item => {
+            const li = document.createElement('li');
+            li.textContent = item.display_name;
+            li.style.cssText = 'padding:10px 14px;cursor:pointer;font-size:0.85rem;color:#ccc;border-bottom:1px solid #222;';
+            li.addEventListener('mouseenter', () => li.style.background = '#252540');
+            li.addEventListener('mouseleave', () => li.style.background = 'transparent');
+            li.addEventListener('click', () => {
+              input.value = item.display_name;
+              suggestions.style.display = 'none';
+            });
+            suggestions.appendChild(li);
+          });
+          suggestions.style.display = 'block';
+        })
+        .catch(() => { suggestions.style.display = 'none'; });
+    }, 400);
+  });
+
+  document.addEventListener('click', function(e) {
+    if (!input.contains(e.target) && !suggestions.contains(e.target)) {
+      suggestions.style.display = 'none';
+    }
+  });
+</script>
 {% endblock %}
