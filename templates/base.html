@@ -121,6 +121,66 @@
   .pill-pending { background: #ffaa0022; color: #ffaa00; }
   .pill-arrived { background: #0088ff22; color: #0088ff; }
   label { color: #aaa; font-size: 0.85rem; margin-bottom: 4px; }
+
+  /* ── MOBILE RESPONSIVENESS ── */
+  @media (max-width: 768px) {
+    body { font-size: 16px; }
+
+    /* Prevent iOS auto-zoom on inputs */
+    .form-control, .form-select, input, select, textarea {
+      font-size: 16px !important;
+      padding: 14px 16px !important;
+      min-height: 50px;
+    }
+
+    /* Bigger touch targets for buttons */
+    .btn { min-height: 48px; font-size: 1rem !important; }
+    .btn-sm { min-height: 36px; }
+
+    /* Readable text — no tiny fonts on mobile */
+    small, .small { font-size: 0.85rem !important; }
+    .text-secondary { font-size: 0.85rem; }
+
+    /* Stat numbers readable in col-4 */
+    .stat-number { font-size: 1.8rem !important; }
+    .stat-card { padding: 14px 8px !important; }
+    .stat-card small { font-size: 0.7rem !important; }
+
+    /* Cards breathe more */
+    .card { padding: 16px !important; margin-bottom: 12px; }
+
+    /* Bottom nav bigger tap area */
+    .nav-bottom { padding: 14px 0 24px; }
+    .nav-bottom a { font-size: 0.75rem; gap: 5px; }
+    .nav-bottom i { font-size: 1.5rem; }
+
+    /* Status pills readable */
+    .status-pill { font-size: 0.75rem !important; padding: 5px 12px !important; }
+
+    /* Logo sizing */
+    .unit-logo { font-size: 1.6rem !important; }
+
+    /* Access code big and clear */
+    .access-code-display { font-size: 3rem !important; letter-spacing: 0.3em !important; }
+
+    /* Address suggestion list — touch friendly */
+    #address-suggestions li { padding: 14px 16px !important; font-size: 0.9rem !important; min-height: 48px; display: flex; align-items: center; }
+
+    /* Tracking link code wrap */
+    code { font-size: 0.8rem !important; word-break: break-all; }
+
+    /* GPS status text */
+    #gps-text { font-size: 0.9rem !important; }
+
+    /* Delivered/Failed buttons full width on mobile already, make taller */
+    .row.g-3 .btn { min-height: 56px; font-size: 1rem !important; }
+
+    /* Container padding */
+    .container-fluid { padding: 16px !important; }
+
+    /* pb-nav increase for safe area */
+    .pb-nav { padding-bottom: 100px !important; }
+  }
 </style>
 {% block extra_css %}{% endblock %}
 </head>
