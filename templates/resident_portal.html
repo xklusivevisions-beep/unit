@@ -1,0 +1,58 @@
+{% extends 'base.html' %}
+{% block title %}UNIT — Resident Setup{% endblock %}
+{% block content %}
+<div class="container-fluid p-4">
+  <div class="text-center mb-5 pt-3">
+    <div class="unit-logo mb-2">UNIT<span>.</span></div>
+    <p class="text-secondary" style="font-size:0.85rem;">Set up your delivery profile once. Every driver gets it automatically.</p>
+  </div>
+
+  {% if success %}
+  <div class="access-box text-center mb-4">
+    <i class="fas fa-check-circle fa-3x mb-3" style="color:#00ff88;"></i>
+    <h5 class="fw-bold" style="color:#00ff88;">You're All Set!</h5>
+    <p class="text-secondary mb-0">Your driver will automatically get notified before they arrive. No more missed deliveries.</p>
+  </div>
+  {% else %}
+  <div class="card p-4">
+    <h6 class="fw-bold mb-1">Your Delivery Profile</h6>
+    <p class="text-secondary small mb-4">Takes 60 seconds. Works for every carrier — Amazon, SpeedX, UPS, FedEx, all of them.</p>
+
+    <form method="POST">
+      <div class="mb-3">
+        <label>Your Building Address</label>
+        <input type="text" name="address" class="form-control" placeholder="4500 Cass Ave, Detroit, MI 48201" required>
+      </div>
+      <div class="mb-3">
+        <label>Your Unit / Apt #</label>
+        <input type="text" name="unit" class="form-control" placeholder="710" required>
+      </div>
+      <div class="mb-3">
+        <label>Your Phone Number</label>
+        <input type="tel" name="phone" class="form-control" placeholder="+1 313 555 0000" required>
+        <small class="text-muted">You'll get a text when your driver is outside</small>
+      </div>
+      <div class="mb-3">
+        <label>Backup Contact (optional)</label>
+        <input type="tel" name="backup_phone" class="form-control" placeholder="Roommate, family member">
+      </div>
+      <div class="mb-3">
+        <label>Where To Leave Packages If No Answer</label>
+        <input type="text" name="drop_spot" class="form-control" placeholder="Front door / mailroom / with building manager">
+      </div>
+      <div class="mb-4">
+        <label>Door Notes (optional)</label>
+        <input type="text" name="door_notes" class="form-control" placeholder="Brown door, end of hallway, ring bell twice">
+      </div>
+      <button class="btn btn-primary w-100 py-3 fs-6">
+        <i class="fas fa-check me-2"></i>Save My Delivery Profile
+      </button>
+    </form>
+  </div>
+
+  <div class="text-center mt-4 pb-5">
+    <small class="text-muted">Your phone number is only used to notify you about deliveries. Never sold or shared.</small>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

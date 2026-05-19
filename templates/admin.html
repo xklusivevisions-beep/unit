@@ -1,0 +1,104 @@
+{% extends 'base.html' %}
+{% block title %}UNIT — Admin{% endblock %}
+{% block content %}
+<div class="container-fluid p-4 pb-nav">
+
+  <div class="d-flex align-items-center mb-4">
+    <div class="unit-logo me-auto" style="font-size:1.4rem;">UNIT<span>.</span></div>
+    <span class="badge" style="background:#00ff8822;color:#00ff88;">ADMIN</span>
+  </div>
+
+  <!-- Stats -->
+  <div class="row g-3 mb-4">
+    <div class="col-6">
+      <div class="stat-card">
+        <div class="stat-number">{{ stats.total_deliveries }}</div>
+        <small class="text-secondary">Total Stops</small>
+      </div>
+    </div>
+    <div class="col-6">
+      <div class="stat-card">
+        <div class="stat-number">{{ stats.delivered }}</div>
+        <small class="text-secondary">Delivered</small>
+      </div>
+    </div>
+    <div class="col-6">
+      <div class="stat-card">
+        <div class="stat-number" style="color:#ffaa00;">{{ stats.sms_sent }}</div>
+        <small class="text-secondary">SMS Sent</small>
+      </div>
+    </div>
+    <div class="col-6">
+      <div class="stat-card">
+        <div class="stat-number" style="color:#ff3333;">{{ stats.failed }}</div>
+        <small class="text-secondary">Failed</small>
+      </div>
+    </div>
+    <div class="col-6">
+      <div class="stat-card">
+        <div class="stat-number" style="color:#0088ff;">{{ stats.buildings }}</div>
+        <small class="text-secondary">Buildings</small>
+      </div>
+    </div>
+    <div class="col-6">
+      <div class="stat-card">
+        <div class="stat-number" style="color:#aa00ff;">{{ stats.residents }}</div>
+        <small class="text-secondary">Residents</small>
+      </div>
+    </div>
+  </div>
+
+  <!-- Buildings Database -->
+  <h6 class="text-secondary mb-3" style="letter-spacing:0.1em;font-size:0.75rem;">BUILDINGS DATABASE</h6>
+  {% for b in buildings %}
+  <div class="card p-3 mb-2">
+    <div class="fw-bold small">{{ b.address }}</div>
+    <div class="d-flex gap-2 mt-1 flex-wrap">
+      {% if b.access_code %}
+      <span class="badge" style="background:#00ff8822;color:#00ff88;">Code: {{ b.access_code }}</span>
+      {% endif %}
+      <span class="badge" style="background:#0088ff22;color:#0088ff;">{{ b.access_type }}</span>
+      {% if b.confirmed_count > 0 %}
+      <span class="badge" style="background:#22222;color:#aaa;">✓ {{ b.confirmed_count }}x confirmed</span>
+      {% endif %}
+    </div>
+    {% if b.interior_directions %}
+    <small class="text-secondary mt-1 d-block">{{ b.interior_directions[:80] }}{% if b.interior_directions|length > 80 %}...{% endif %}</small>
+    {% endif %}
+  </div>
+  {% endfor %}
+
+  <!-- Recent Deliveries -->
+  <h6 class="text-secondary mt-4 mb-3" style="letter-spacing:0.1em;font-size:0.75rem;">RECENT DELIVERIES</h6>
+  {% for d in deliveries %}
+  <div class="card p-3 mb-2">
+    <div class="d-flex justify-content-between">
+      <div style="flex:1;">
+        <div class="fw-bold" style="font-size:0.85rem;">{{ d.address[:35] }}{% if d.address|length > 35 %}...{% endif %}</div>
+        <small class="text-secondary">{{ d.driver_name }} • Unit {{ d.unit or '—' }}</small>
+      </div>
+      <div class="text-end">
+        <span class="status-pill pill-{{ d.status }}">{{ d.status.upper() }}</span>
+        {% if d.sms_sent %}<div><small style="color:#00ff88;font-size:0.65rem;"><i class="fas fa-sms"></i> SMS</small></div>{% endif %}
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+
+</div>
+
+<!-- Bottom Nav -->
+<div class="nav-bottom">
+  <div class="d-flex justify-content-around">
+    <a href="/driver">
+      <i class="fas fa-home"></i>Home
+    </a>
+    <a href="/driver/lookup">
+      <i class="fas fa-search"></i>Lookup
+    </a>
+    <a href="/admin" class="active">
+      <i class="fas fa-chart-bar"></i>Admin
+    </a>
+  </div>
+</div>
+{% endblock %}

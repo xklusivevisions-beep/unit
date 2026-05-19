@@ -1,0 +1,40 @@
+{% extends 'base.html' %}
+{% block title %}UNIT — Driver Login{% endblock %}
+{% block content %}
+<div class="min-vh-100 d-flex align-items-center justify-content-center p-4">
+  <div class="w-100" style="max-width:380px;">
+    <div class="text-center mb-5">
+      <div class="unit-logo mb-2">UNIT<span>.</span></div>
+      <p class="text-secondary mb-0" style="letter-spacing:0.1em;font-size:0.85rem;">DELIVERY ACCESS PLATFORM</p>
+    </div>
+
+    <div class="card p-4">
+      <h5 class="fw-bold mb-4 text-center">Driver Login</h5>
+      {% if error %}
+      <div class="alert alert-danger border-0 rounded-3">{{ error }}</div>
+      {% endif %}
+      <form method="POST">
+        <div class="mb-4">
+          <label>Enter Your Driver PIN</label>
+          <input type="number" name="pin" class="form-control text-center fs-3 fw-bold"
+                 placeholder="••••" maxlength="4" autofocus>
+        </div>
+        <button class="btn btn-primary w-100 fs-6">
+          <i class="fas fa-arrow-right me-2"></i>Enter
+        </button>
+      </form>
+    </div>
+
+    <div class="text-center mt-4">
+      <small class="text-secondary">Not a driver?</small>
+      <a href="/resident" class="text-decoration-none ms-2" style="color:#00ff88;font-size:0.85rem;">
+        Set up my delivery profile →
+      </a>
+    </div>
+
+    <div class="text-center mt-3">
+      <small class="text-muted">Demo PIN: <strong style="color:#00ff88;">1234</strong></small>
+    </div>
+  </div>
+</div>
+{% endblock %}

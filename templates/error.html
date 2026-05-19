@@ -1,0 +1,12 @@
+{% extends 'base.html' %}
+{% block title %}UNIT — Error{% endblock %}
+{% block content %}
+<div class="min-vh-100 d-flex align-items-center justify-content-center p-4 text-center">
+  <div>
+    <div class="unit-logo mb-4">UNIT<span>.</span></div>
+    <div style="font-size:4rem;font-weight:900;color:#333;">{{ code }}</div>
+    <p class="text-secondary mb-4">{{ msg }}</p>
+    <a href="/" class="btn btn-primary px-4">Go Home</a>
+  </div>
+</div>
+{% endblock %}
