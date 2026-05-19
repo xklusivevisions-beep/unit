@@ -32,7 +32,8 @@ DB = 'data/unit.db'
 TWILIO_SID   = os.environ.get('TWILIO_SID', '')
 TWILIO_TOKEN = os.environ.get('TWILIO_TOKEN', '')
 TWILIO_PHONE = os.environ.get('TWILIO_PHONE', '')
-APPROACH_RADIUS_MILES = 0.5
+APPROACH_RADIUS_MILES = 0.5      # SMS to customer
+GEOFENCE_RADIUS_MILES  = 0.028   # ~150 ft — "you're at the stop"
 _geocache = {}
 
 # ─── DB ────────────────────────────────────────────────────────
@@ -419,17 +420,19 @@ def update_location():
     db.execute("UPDATE drivers SET current_lat=?, current_lng=?, last_seen=? WHERE id=?",
                (lat, lng, datetime.now().isoformat(), session['driver_id']))
 
-    result = {'status': 'ok', 'sms_triggered': False, 'distance_miles': None}
+    result = {'status': 'ok', 'sms_triggered': False, 'distance_miles': None, 'at_stop': False, 'distance_feet': None}
 
     if stop_id:
         db.execute("UPDATE stops SET driver_lat=?, driver_lng=? WHERE id=?", (lat, lng, stop_id))
         stop = db.execute("SELECT * FROM stops WHERE id=?", (stop_id,)).fetchone()
 
-        if stop and stop['dest_lat'] and not stop['approach_sms_sent']:
+        if stop and stop['dest_lat']:
             distance = miles_away(lat, lng, stop['dest_lat'], stop['dest_lng'])
             result['distance_miles'] = round(distance, 2)
+            result['distance_feet']  = int(distance * 5280)
+            result['at_stop']        = distance <= GEOFENCE_RADIUS_MILES
 
-            if distance <= APPROACH_RADIUS_MILES and stop['phone']:
+            if not stop['approach_sms_sent'] and distance <= APPROACH_RADIUS_MILES and stop['phone']:
                 track_url = f"{get_base_url()}/track/{stop['token']}"
                 mins = max(1, int(distance * 3))
                 name_part = stop['customer_name'].split()[0] if stop['customer_name'] else 'there'

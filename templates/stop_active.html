@@ -1,9 +1,59 @@
 {% extends 'base.html' %}
 {% block title %}UNIT — Stop #{{ stop.stop_number }}{% endblock %}
+
+{% block extra_css %}
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<style>
+  #map {
+    height: 260px;
+    border-radius: 14px;
+    overflow: hidden;
+    border: 2px solid #222;
+    margin-bottom: 12px;
+  }
+  /* Dark map tiles */
+  .leaflet-tile { filter: brightness(0.7) saturate(0.6); }
+
+  .geofence-bar {
+    height: 10px;
+    border-radius: 10px;
+    background: #1a1a1a;
+    overflow: hidden;
+    margin-bottom: 4px;
+  }
+  .geofence-fill {
+    height: 100%;
+    border-radius: 10px;
+    transition: width 0.5s, background 0.5s;
+  }
+
+  .at-stop-banner {
+    display: none;
+    background: #0d2818;
+    border: 2px solid #00ff88;
+    border-radius: 14px;
+    padding: 16px;
+    text-align: center;
+    margin-bottom: 12px;
+    animation: pulseGreen 1.5s infinite;
+  }
+  @keyframes pulseGreen {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(0,255,136,.4); }
+    50%       { box-shadow: 0 0 0 10px rgba(0,255,136,0); }
+  }
+  @keyframes gpsPulse {
+    0%   { box-shadow: 0 0 0 0 rgba(0,255,136,.7); }
+    70%  { box-shadow: 0 0 0 8px rgba(0,255,136,0); }
+    100% { box-shadow: 0 0 0 0 rgba(0,255,136,0); }
+  }
+  .gps-active { animation: gpsPulse 1.5s infinite; }
+</style>
+{% endblock %}
+
 {% block content %}
 <div class="container-fluid p-4 pb-nav">
 
-  <div class="d-flex align-items-center mb-4">
+  <div class="d-flex align-items-center mb-3">
     <a href="/driver/route/{{ stop.route_id }}" class="text-decoration-none me-3" style="color:#555;">
       <i class="fas fa-chevron-left"></i>
     </a>
@@ -14,34 +64,48 @@
   </div>
 
   <!-- Stop Info -->
-  <div class="card p-4 mb-3">
+  <div class="card p-3 mb-3">
     <div class="fw-bold fs-5 mb-1">{{ stop.customer_name or 'Customer' }}</div>
-    <div class="text-secondary mb-1">{{ stop.address }}</div>
-    {% if stop.unit %}<div class="text-secondary small">Unit {{ stop.unit }}</div>{% endif %}
-    {% if stop.tracking %}<div class="mt-2"><small class="text-muted">{{ stop.tracking }}</small></div>{% endif %}
+    <div class="text-secondary">{{ stop.address }}</div>
+    {% if stop.unit %}<div style="color:#00ff88;" class="small fw-bold mt-1">{{ stop.unit }}</div>{% endif %}
+    {% if stop.notes %}<div class="text-secondary small mt-1">{{ stop.notes }}</div>{% endif %}
   </div>
 
-  <!-- GPS Status -->
-  <div id="gps-status" class="p-3 mb-3" style="background:#0d2818;border:1px solid #00ff8844;border-radius:12px;">
-    <div class="d-flex align-items-center mb-1">
-      <span id="gps-dot" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#444;margin-right:10px;flex-shrink:0;"></span>
-      <span id="gps-text" style="font-size:0.9rem;color:#aaa;">Starting GPS...</span>
+  <!-- At Stop Banner -->
+  <div class="at-stop-banner" id="at-stop-banner">
+    <i class="fas fa-map-marker-alt fa-2x mb-2" style="color:#00ff88;"></i>
+    <div class="fw-bold fs-5" style="color:#00ff88;">You're at the right address</div>
+    <small class="text-secondary">Geofence confirmed — deliver here</small>
+  </div>
+
+  <!-- Live Map -->
+  <div id="map"></div>
+
+  <!-- Proximity Bar -->
+  <div class="card p-3 mb-3">
+    <div class="d-flex justify-content-between align-items-center mb-2">
+      <div class="d-flex align-items-center gap-2">
+        <span id="gps-dot" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#444;flex-shrink:0;"></span>
+        <span id="gps-text" style="font-size:0.9rem;color:#aaa;">Acquiring GPS...</span>
+      </div>
+      <span id="dist-badge" style="font-size:0.8rem;color:#aaa;"></span>
     </div>
-    <div id="sms-alert" style="display:none;margin-top:8px;padding:8px 12px;background:#00ff8815;border-radius:8px;color:#00ff88;font-size:0.85rem;font-weight:700;">
-      <i class="fas fa-sms me-2"></i>Customer notified automatically!
+    <div class="geofence-bar">
+      <div class="geofence-fill" id="geofence-fill" style="width:0%;background:#444;"></div>
+    </div>
+    <div class="d-flex justify-content-between mt-1">
+      <small class="text-muted">Far</small>
+      <small style="color:#00ff88;font-size:0.7rem;">Geofence ●</small>
+      <small class="text-muted">At Stop</small>
+    </div>
+
+    <div id="sms-alert" style="display:none;margin-top:10px;padding:8px 12px;background:#00ff8815;border-radius:8px;color:#00ff88;font-size:0.85rem;font-weight:700;">
+      <i class="fas fa-sms me-2"></i>Customer notified automatically
     </div>
   </div>
 
-  <!-- Tracking Link -->
-  <div class="card p-3 mb-4" style="border-color:#0088ff44;">
-    <small class="text-secondary d-block mb-1">Customer tracking link</small>
-    <div style="font-size:0.8rem;color:#0088ff;word-break:break-all;">
-      {{ request.host_url }}track/{{ stop.token }}
-    </div>
-  </div>
-
-  <!-- Actions -->
-  <div class="row g-3">
+  <!-- Delivery Actions -->
+  <div class="row g-3 mb-3">
     <div class="col-6">
       <form method="POST" action="/driver/stop/{{ stop.id }}/delivered">
         <button class="btn btn-primary w-100 py-3 fs-6">
@@ -70,14 +134,71 @@
 {% endblock %}
 
 {% block scripts %}
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 const STOP_ID   = {{ stop.id }};
-const gpsDot    = document.getElementById('gps-dot');
-const gpsText   = document.getElementById('gps-text');
-const smsAlert  = document.getElementById('sms-alert');
-let smsTriggered = false;
+const DEST_LAT  = {{ stop.dest_lat or 'null' }};
+const DEST_LNG  = {{ stop.dest_lng or 'null' }};
+const GEOFENCE_FEET = 150;
 
+const gpsDot       = document.getElementById('gps-dot');
+const gpsText      = document.getElementById('gps-text');
+const distBadge    = document.getElementById('dist-badge');
+const smsAlert     = document.getElementById('sms-alert');
+const atBanner     = document.getElementById('at-stop-banner');
+const gfFill       = document.getElementById('geofence-fill');
+let smsTriggered   = false;
+let atStopShown    = false;
+
+// ── MAP SETUP ──
+const map = L.map('map', { zoomControl: true, attributionControl: false });
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+
+// Target pin
+let destMarker = null;
+let driverMarker = null;
+let geofenceCircle = null;
+
+if (DEST_LAT && DEST_LNG) {
+  const targetIcon = L.divIcon({
+    html: '<div style="background:#00ff88;width:18px;height:18px;border-radius:50%;border:3px solid #fff;box-shadow:0 0 8px rgba(0,255,136,0.8);"></div>',
+    className: '', iconAnchor: [9,9]
+  });
+  destMarker = L.marker([DEST_LAT, DEST_LNG], {icon: targetIcon}).addTo(map);
+  destMarker.bindPopup('<b>Target Address</b>').openPopup();
+
+  // Geofence circle (150ft ≈ 46m)
+  geofenceCircle = L.circle([DEST_LAT, DEST_LNG], {
+    radius: 46,
+    color: '#00ff88',
+    fillColor: '#00ff88',
+    fillOpacity: 0.06,
+    weight: 2,
+    dashArray: '6,4'
+  }).addTo(map);
+
+  map.setView([DEST_LAT, DEST_LNG], 17);
+} else {
+  map.setView([42.33, -83.05], 13);
+}
+
+const driverIcon = L.divIcon({
+  html: '<div style="background:#0088ff;width:14px;height:14px;border-radius:50%;border:2px solid #fff;box-shadow:0 0 6px rgba(0,136,255,0.8);"></div>',
+  className: '', iconAnchor: [7,7]
+});
+
+// ── GPS + API ──
 function sendLocation(lat, lng) {
+  // Update driver marker on map
+  if (!driverMarker) {
+    driverMarker = L.marker([lat, lng], {icon: driverIcon}).addTo(map);
+    if (DEST_LAT && DEST_LNG) {
+      map.fitBounds([[lat, lng],[DEST_LAT, DEST_LNG]], {padding:[40,40]});
+    }
+  } else {
+    driverMarker.setLatLng([lat, lng]);
+  }
+
   fetch('/api/location', {
     method: 'POST',
     headers: {'Content-Type':'application/json'},
@@ -85,18 +206,46 @@ function sendLocation(lat, lng) {
   })
   .then(r => r.json())
   .then(data => {
-    gpsDot.style.cssText = 'display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:10px;flex-shrink:0;background:#00ff88;animation:gpsPulse 1.5s infinite;';
+    // GPS dot active
+    gpsDot.style.cssText = 'display:inline-block;width:10px;height:10px;border-radius:50%;flex-shrink:0;background:#00ff88;';
+    gpsDot.classList.add('gps-active');
+
+    const feet = data.distance_feet;
+    const miles = data.distance_miles;
+
+    if (feet !== null && feet !== undefined) {
+      // Proximity bar — full at 0ft, empty at 2640ft (0.5mi)
+      const pct = Math.max(0, Math.min(100, Math.round((1 - feet / 2640) * 100)));
+      gfFill.style.width = pct + '%';
+      gfFill.style.background = data.at_stop ? '#00ff88' : feet < 528 ? '#ffaa00' : '#444';
+
+      if (data.at_stop) {
+        distBadge.textContent = '✓ At stop';
+        distBadge.style.color = '#00ff88';
+        gpsText.textContent = 'You are at the right address';
+        gpsText.style.color = '#00ff88';
+        if (!atStopShown) {
+          atBanner.style.display = 'block';
+          atStopShown = true;
+        }
+      } else if (feet < 528) {
+        distBadge.textContent = feet + ' ft away';
+        distBadge.style.color = '#ffaa00';
+        gpsText.textContent = 'Almost there — ' + feet + ' ft';
+        gpsText.style.color = '#ffaa00';
+        atBanner.style.display = 'none';
+      } else {
+        distBadge.textContent = miles + ' mi away';
+        distBadge.style.color = '#aaa';
+        gpsText.textContent = 'En route — ' + miles + ' mi to stop';
+        gpsText.style.color = '#aaa';
+        atBanner.style.display = 'none';
+      }
+    }
+
     if (data.sms_triggered && !smsTriggered) {
       smsTriggered = true;
       smsAlert.style.display = 'block';
-      gpsText.textContent = '✓ Customer notified — ' + (data.distance_miles || '?') + ' mi away';
-      gpsText.style.color = '#00ff88';
-    } else if (data.distance_miles !== null && data.distance_miles !== undefined) {
-      gpsText.textContent = 'Live GPS — ' + data.distance_miles + ' mi from stop';
-      gpsText.style.color = '#00ff88';
-    } else {
-      gpsText.textContent = 'GPS active';
-      gpsText.style.color = '#00ff88';
     }
   })
   .catch(() => {
@@ -109,23 +258,16 @@ if (navigator.geolocation) {
   navigator.geolocation.watchPosition(
     pos => sendLocation(pos.coords.latitude, pos.coords.longitude),
     err => { gpsText.textContent = 'GPS unavailable: ' + err.message; gpsText.style.color = '#ff6666'; },
-    { enableHighAccuracy: true, timeout: 15000, maximumAge: 5000 }
+    { enableHighAccuracy: true, timeout: 15000, maximumAge: 3000 }
   );
   setInterval(() => {
     navigator.geolocation.getCurrentPosition(
       pos => sendLocation(pos.coords.latitude, pos.coords.longitude),
       () => {}
     );
-  }, 10000);
+  }, 8000);
 } else {
   gpsText.textContent = 'GPS not available on this device';
 }
 </script>
-<style>
-@keyframes gpsPulse {
-  0%   { box-shadow: 0 0 0 0 rgba(0,255,136,.7); }
-  70%  { box-shadow: 0 0 0 8px rgba(0,255,136,0); }
-  100% { box-shadow: 0 0 0 0 rgba(0,255,136,0); }
-}
-</style>
 {% endblock %}
