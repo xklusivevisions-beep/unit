@@ -121,7 +121,6 @@ function renumberStops() {
   document.querySelectorAll('.stop-num').forEach((el, i) => el.textContent = i + 1);
 }
 
-// Internal address suggestions from delivery history
 function attachSuggestions(input) {
   if (input.dataset.ac) return;
   input.dataset.ac = '1';
@@ -134,33 +133,55 @@ function attachSuggestions(input) {
     const q = this.value.trim();
     if (q.length < 3) { suggestions.style.display = 'none'; return; }
     timer = setTimeout(() => {
+      // First check internal history, then fall back to OpenStreetMap
       fetch(`/api/address-suggest?q=${encodeURIComponent(q)}`)
         .then(r => r.json())
-        .then(data => {
-          suggestions.innerHTML = '';
-          if (!data.length) { suggestions.style.display = 'none'; return; }
-          data.forEach(item => {
-            const li = document.createElement('li');
-            li.innerHTML = `<div style="font-size:0.9rem;color:#fff;">${item.address}</div>${item.name ? `<div style="font-size:0.75rem;color:#00ff88;">${item.name}${item.unit ? ' · ' + item.unit : ''}</div>` : ''}`;
-            li.style.cssText = 'padding:12px 16px;cursor:pointer;border-bottom:1px solid #222;min-height:48px;';
-            li.addEventListener('click', () => {
-              input.value = item.address;
-              if (item.unit && row) {
-                const unitInput = row.querySelector('input[name="unit"]');
-                if (unitInput && !unitInput.value) unitInput.value = item.unit;
-              }
-              if (item.name && row) {
-                const nameInput = row.querySelector('input[name="name"]');
-                if (nameInput && !nameInput.value) nameInput.value = item.name;
-              }
-              suggestions.style.display = 'none';
+        .then(internal => {
+          return fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=json&addressdetails=1&limit=5&countrycodes=us`)
+            .then(r => r.json())
+            .then(osm => {
+              suggestions.innerHTML = '';
+              const results = [];
+
+              // Internal history first (green label)
+              internal.forEach(item => results.push({label: item.address, sublabel: item.name ? `\uD83D\uDCCE Previous delivery${item.unit ? ' · ' + item.unit : ''}` : '\uD83D\uDCCE From history', unit: item.unit, name: item.name, fromHistory: true}));
+
+              // OSM results
+              osm.forEach(item => {
+                const addr = item.address;
+                const street = [addr.house_number, addr.road].filter(Boolean).join(' ');
+                const city = addr.city || addr.town || addr.village || '';
+                const state = addr.state || '';
+                const zip = addr.postcode || '';
+                const full = [street, city, state, zip].filter(Boolean).join(', ');
+                if (full) results.push({label: full, sublabel: null, fromHistory: false});
+              });
+
+              if (!results.length) { suggestions.style.display = 'none'; return; }
+
+              results.forEach(item => {
+                const li = document.createElement('li');
+                li.innerHTML = `<div style="font-size:0.9rem;color:#fff;">${item.label}</div>${item.sublabel ? `<div style="font-size:0.72rem;color:${item.fromHistory ? '#00ff88' : '#888'};">${item.sublabel}</div>` : ''}`;
+                li.style.cssText = 'padding:12px 16px;cursor:pointer;border-bottom:1px solid #222;min-height:48px;';
+                li.addEventListener('click', () => {
+                  input.value = item.label;
+                  if (item.unit && row) {
+                    const unitInput = row.querySelector('input[name="unit"]');
+                    if (unitInput && !unitInput.value) unitInput.value = item.unit;
+                  }
+                  if (item.name && row) {
+                    const nameInput = row.querySelector('input[name="name"]');
+                    if (nameInput && !nameInput.value) nameInput.value = item.name;
+                  }
+                  suggestions.style.display = 'none';
+                });
+                suggestions.appendChild(li);
+              });
+              suggestions.style.display = 'block';
             });
-            suggestions.appendChild(li);
-          });
-          suggestions.style.display = 'block';
         })
         .catch(() => { suggestions.style.display = 'none'; });
-    }, 300);
+    }, 350);
   });
 
   document.addEventListener('click', e => {
