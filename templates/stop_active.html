@@ -104,6 +104,19 @@
     </div>
   </div>
 
+  <!-- Pin Correction -->
+  <div class="card p-3 mb-3" style="border-color:#ffaa0033;">
+    <div class="d-flex justify-content-between align-items-center">
+      <div>
+        <div class="fw-bold" style="font-size:0.85rem;">Pin in wrong spot?</div>
+        <small class="text-secondary">Tap to drag green pin to exact address</small>
+      </div>
+      <button id="edit-pin-btn" class="btn btn-sm" style="border:1px solid #ffaa00;color:#ffaa00;border-radius:10px;padding:6px 14px;">
+        <i class="fas fa-map-pin me-1"></i>Move Pin
+      </button>
+    </div>
+  </div>
+
   <!-- Delivery Actions -->
   <div class="row g-3 mb-3">
     <div class="col-6">
@@ -254,18 +267,72 @@ function sendLocation(lat, lng) {
   });
 }
 
+// ── PIN CORRECTION ──
+document.getElementById('edit-pin-btn').addEventListener('click', function() {
+  if (!destMarker) return;
+  destMarker.setIcon(L.divIcon({
+    html: '<div style="background:#ffaa00;width:18px;height:18px;border-radius:50%;border:3px solid #fff;box-shadow:0 0 8px rgba(255,170,0,0.8);"></div>',
+    className: '', iconAnchor: [9,9]
+  }));
+  destMarker.dragging.enable();
+  this.textContent = 'Saving...';
+  this.style.color = '#00ff88';
+  this.style.borderColor = '#00ff88';
+
+  destMarker.on('dragend', function(e) {
+    const {lat, lng} = e.target.getLatLng();
+    fetch(`/driver/stop/${STOP_ID}/pin`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({lat, lng})
+    })
+    .then(r => r.json())
+    .then(() => {
+      // Update geofence circle
+      if (geofenceCircle) map.removeLayer(geofenceCircle);
+      geofenceCircle = L.circle([lat, lng], {
+        radius: 46, color: '#00ff88', fillColor: '#00ff88',
+        fillOpacity: 0.06, weight: 2, dashArray: '6,4'
+      }).addTo(map);
+      document.getElementById('edit-pin-btn').textContent = '✓ Saved';
+      destMarker.dragging.disable();
+    });
+  });
+});
+
+let accuracyCircle = null;
+
+function handlePosition(pos) {
+  const lat      = pos.coords.latitude;
+  const lng      = pos.coords.longitude;
+  const accuracy = pos.coords.accuracy; // metres
+  const accFt    = Math.round(accuracy * 3.281);
+
+  // Draw accuracy circle on map
+  if (accuracyCircle) map.removeLayer(accuracyCircle);
+  accuracyCircle = L.circle([lat, lng], {
+    radius: accuracy,
+    color: accuracy < 15 ? '#00ff88' : accuracy < 40 ? '#ffaa00' : '#ff3333',
+    fillOpacity: 0.06, weight: 1, dashArray: '4,4'
+  }).addTo(map);
+
+  // Warn driver if signal is weak — don't send bad readings
+  if (accuracy > 50) {
+    gpsDot.style.background = '#ff3333';
+    gpsText.textContent = `⚠️ Weak GPS — ±${accFt}ft. Step outside or near a window.`;
+    gpsText.style.color = '#ff6666';
+    return;
+  }
+
+  sendLocation(lat, lng);
+}
+
 if (navigator.geolocation) {
   navigator.geolocation.watchPosition(
-    pos => sendLocation(pos.coords.latitude, pos.coords.longitude),
+    handlePosition,
     err => { gpsText.textContent = 'GPS unavailable: ' + err.message; gpsText.style.color = '#ff6666'; },
-    { enableHighAccuracy: true, timeout: 15000, maximumAge: 3000 }
+    { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
   );
-  setInterval(() => {
-    navigator.geolocation.getCurrentPosition(
-      pos => sendLocation(pos.coords.latitude, pos.coords.longitude),
-      () => {}
-    );
-  }, 8000);
 } else {
   gpsText.textContent = 'GPS not available on this device';
 }

@@ -451,6 +451,18 @@ def stop_active(stop_id):
     if not stop: return redirect(url_for('driver_dashboard'))
     return render_template('stop_active.html', stop=stop)
 
+@app.route('/driver/stop/<int:stop_id>/pin', methods=['POST'])
+def stop_pin(stop_id):
+    if 'driver_id' not in session:
+        return jsonify({'error': 'unauthorized'}), 401
+    data = request.get_json()
+    lat, lng = data.get('lat'), data.get('lng')
+    db = get_db()
+    db.execute("UPDATE stops SET dest_lat=?, dest_lng=?, approach_sms_sent=0 WHERE id=?", (lat, lng, stop_id))
+    db.commit()
+    db.close()
+    return jsonify({'ok': True})
+
 @app.route('/driver/stop/<int:stop_id>/delivered', methods=['POST'])
 def stop_delivered(stop_id):
     if 'driver_id' not in session:
