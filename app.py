@@ -191,7 +191,7 @@ def get_base_url():
 
 @app.route('/')
 def index():
-    return redirect(url_for('driver_login'))
+    return render_template('index.html')
 
 @app.route('/driver/login', methods=['GET', 'POST'])
 def driver_login():

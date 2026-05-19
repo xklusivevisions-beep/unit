@@ -1,0 +1,62 @@
+{% extends 'base.html' %}
+{% block title %}UNIT — Delivery Access Platform{% endblock %}
+{% block content %}
+<div class="min-vh-100 d-flex flex-column align-items-center justify-content-center p-4">
+
+  <div class="text-center mb-5">
+    <div class="unit-logo mb-2">UNIT<span>.</span></div>
+    <p class="text-secondary mb-0" style="letter-spacing:0.1em;font-size:0.85rem;">DELIVERY ACCESS PLATFORM</p>
+  </div>
+
+  <div class="w-100" style="max-width:400px;">
+    <p class="text-secondary text-center mb-4" style="font-size:0.9rem;">Who are you?</p>
+
+    <a href="/driver/login" class="card p-4 mb-3 text-decoration-none d-flex flex-row align-items-center role-card">
+      <div class="me-3" style="width:48px;height:48px;background:#00ff8815;border-radius:14px;display:flex;align-items:center;justify-content:center;">
+        <i class="fas fa-truck" style="color:#00ff88;font-size:1.3rem;"></i>
+      </div>
+      <div style="flex:1;">
+        <div class="fw-bold">Driver</div>
+        <small class="text-secondary">Look up building access + notify residents</small>
+      </div>
+      <i class="fas fa-chevron-right text-secondary"></i>
+    </a>
+
+    <a href="/resident" class="card p-4 mb-3 text-decoration-none d-flex flex-row align-items-center role-card">
+      <div class="me-3" style="width:48px;height:48px;background:#0088ff15;border-radius:14px;display:flex;align-items:center;justify-content:center;">
+        <i class="fas fa-home" style="color:#0088ff;font-size:1.3rem;"></i>
+      </div>
+      <div style="flex:1;">
+        <div class="fw-bold">Resident</div>
+        <small class="text-secondary">Set up your delivery profile once</small>
+      </div>
+      <i class="fas fa-chevron-right text-secondary"></i>
+    </a>
+
+    <a href="/admin" class="card p-4 mb-3 text-decoration-none d-flex flex-row align-items-center role-card">
+      <div class="me-3" style="width:48px;height:48px;background:#aa00ff15;border-radius:14px;display:flex;align-items:center;justify-content:center;">
+        <i class="fas fa-chart-bar" style="color:#aa00ff;font-size:1.3rem;"></i>
+      </div>
+      <div style="flex:1;">
+        <div class="fw-bold">Admin</div>
+        <small class="text-secondary">Buildings, deliveries, stats</small>
+      </div>
+      <i class="fas fa-chevron-right text-secondary"></i>
+    </a>
+  </div>
+</div>
+
+{% block extra_css %}
+<style>
+  .role-card {
+    transition: border-color 0.2s, transform 0.1s;
+    color: inherit;
+  }
+  .role-card:hover, .role-card:active {
+    border-color: #444 !important;
+    transform: scale(0.98);
+    color: #fff;
+  }
+</style>
+{% endblock %}
+{% endblock %}
