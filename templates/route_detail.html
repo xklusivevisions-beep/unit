@@ -81,6 +81,13 @@
         <div class="text-secondary small text-truncate">{{ stop.address }}</div>
         {% if stop.unit %}<small class="text-secondary">Unit {{ stop.unit }}</small>{% endif %}
 
+        <!-- Edit button -->
+        <div class="mt-1">
+          <a href="/driver/stop/{{ stop.id }}/edit" class="btn btn-sm py-0 px-2" style="font-size:0.75rem;border:1px solid #333;border-radius:6px;color:#aaa;">
+            <i class="fas fa-pencil-alt me-1"></i>Edit stop
+          </a>
+        </div>
+
         <!-- Phone input -->
         <div class="mt-2 d-flex gap-2 align-items-center">
           {% if stop.phone %}

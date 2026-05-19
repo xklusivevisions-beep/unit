@@ -349,6 +349,41 @@ def update_stop_phone(route_id, stop_id):
     db.close()
     return jsonify({'ok': True, 'phone': phone})
 
+@app.route('/driver/stop/<int:stop_id>/edit', methods=['GET', 'POST'])
+def stop_edit(stop_id):
+    if 'driver_id' not in session:
+        return redirect(url_for('driver_login'))
+    db = get_db()
+    stop = db.execute("SELECT * FROM stops WHERE id=?", (stop_id,)).fetchone()
+    if not stop:
+        db.close()
+        return redirect(url_for('driver_dashboard'))
+
+    if request.method == 'POST':
+        address  = request.form.get('address', '').strip()
+        unit     = request.form.get('unit', '').strip()
+        name     = request.form.get('name', '').strip()
+        phone    = format_phone(request.form.get('phone', '').strip()) if request.form.get('phone', '').strip() else ''
+        notes    = request.form.get('notes', '').strip()
+
+        # Re-geocode if address changed
+        lat, lng = stop['dest_lat'], stop['dest_lng']
+        if address != stop['address']:
+            lat, lng = geocode_address(address)
+
+        db.execute(
+            "UPDATE stops SET address=?, unit=?, customer_name=?, phone=?, notes=?, dest_lat=?, dest_lng=?, status='pending', approach_sms_sent=0 WHERE id=?",
+            (address, unit, name, phone, notes, lat, lng, stop_id)
+        )
+        db.commit()
+        route_id = stop['route_id']
+        db.close()
+        return redirect(url_for('route_detail', route_id=route_id))
+
+    route_id = stop['route_id']
+    db.close()
+    return render_template('stop_edit.html', stop=stop, route_id=route_id)
+
 @app.route('/driver/route/<int:route_id>/blast', methods=['POST'])
 def route_blast(route_id):
     if 'driver_id' not in session:

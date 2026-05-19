@@ -1,0 +1,103 @@
+{% extends 'base.html' %}
+{% block title %}UNIT — Edit Stop{% endblock %}
+{% block content %}
+<div class="container-fluid p-4 pb-nav">
+
+  <div class="d-flex align-items-center mb-4">
+    <a href="/driver/route/{{ route_id }}" class="text-decoration-none me-3" style="color:#555;">
+      <i class="fas fa-chevron-left"></i>
+    </a>
+    <div class="unit-logo" style="font-size:1.4rem;">UNIT<span>.</span></div>
+  </div>
+
+  <h5 class="fw-bold mb-1">Edit Stop #{{ stop.stop_number }}</h5>
+  <p class="text-secondary small mb-4">Fix the address and it'll re-geocode automatically.</p>
+
+  <form method="POST">
+    <div class="card p-4 mb-3">
+
+      <div class="mb-3" style="position:relative;">
+        <label>Address *</label>
+        <input type="text" id="address-input" name="address" class="form-control"
+               value="{{ stop.address }}" autocomplete="off" required>
+        <ul id="address-suggestions" style="position:absolute;z-index:1000;width:100%;background:#1a1a2e;border:1px solid #333;border-radius:8px;list-style:none;padding:0;margin:0;display:none;"></ul>
+      </div>
+
+      <div class="row g-2 mb-3">
+        <div class="col-6">
+          <label>Unit / Suite</label>
+          <input type="text" name="unit" class="form-control" value="{{ stop.unit or '' }}" placeholder="Apt 4B (optional)">
+        </div>
+        <div class="col-6">
+          <label>Customer Name</label>
+          <input type="text" name="name" class="form-control" value="{{ stop.customer_name or '' }}" placeholder="John D.">
+        </div>
+      </div>
+
+      <div class="mb-3">
+        <label>Phone Number</label>
+        <input type="tel" name="phone" class="form-control" value="{{ stop.phone or '' }}" placeholder="+1 313 555 0000">
+      </div>
+
+      <div class="mb-1">
+        <label>Delivery Notes</label>
+        <input type="text" name="notes" class="form-control" value="{{ stop.notes or '' }}" placeholder="Gate code, leave at door, etc.">
+      </div>
+
+    </div>
+
+    <button type="submit" class="btn btn-primary w-100 py-3 fs-6">
+      <i class="fas fa-check me-2"></i>Save Changes
+    </button>
+  </form>
+
+</div>
+
+<div class="nav-bottom">
+  <div class="d-flex justify-content-around">
+    <a href="/driver"><i class="fas fa-home"></i>Home</a>
+    <a href="/driver/route/{{ route_id }}"><i class="fas fa-list"></i>Route</a>
+    <a href="/driver/route/new"><i class="fas fa-upload"></i>New Route</a>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const input = document.getElementById('address-input');
+const suggestions = document.getElementById('address-suggestions');
+let debounceTimer;
+
+input.addEventListener('input', function() {
+  clearTimeout(debounceTimer);
+  const query = this.value.trim();
+  if (query.length < 4) { suggestions.style.display = 'none'; return; }
+  debounceTimer = setTimeout(() => {
+    fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&addressdetails=1&limit=5&countrycodes=us`)
+      .then(r => r.json())
+      .then(data => {
+        suggestions.innerHTML = '';
+        if (!data.length) { suggestions.style.display = 'none'; return; }
+        data.forEach(item => {
+          const li = document.createElement('li');
+          li.textContent = item.display_name;
+          li.style.cssText = 'padding:14px 16px;cursor:pointer;font-size:0.9rem;color:#ccc;border-bottom:1px solid #222;min-height:48px;display:flex;align-items:center;';
+          li.addEventListener('click', () => {
+            input.value = item.display_name;
+            suggestions.style.display = 'none';
+          });
+          suggestions.appendChild(li);
+        });
+        suggestions.style.display = 'block';
+      })
+      .catch(() => { suggestions.style.display = 'none'; });
+  }, 400);
+});
+
+document.addEventListener('click', e => {
+  if (!input.contains(e.target) && !suggestions.contains(e.target)) {
+    suggestions.style.display = 'none';
+  }
+});
+</script>
+{% endblock %}
