@@ -54,7 +54,9 @@
             <span style="background:#1a1a1a;color:#aaa;border-radius:8px;padding:2px 8px;font-size:0.75rem;font-weight:700;">#{{ stop.stop_number }}</span>
             {% if stop.sms_blast_sent %}<span style="color:#00ff88;font-size:0.7rem;"><i class="fas fa-sms"></i></span>{% endif %}
           </div>
-          <div class="fw-bold" style="font-size:0.9rem;">{{ stop.address[:38] }}{% if stop.address|length > 38 %}...{% endif %}</div>
+          <a href="/driver/stop/{{ stop.id }}/edit" class="text-decoration-none">
+            <div class="fw-bold" style="font-size:0.9rem;color:#fff;">{{ stop.address[:38] }}{% if stop.address|length > 38 %}...{% endif %} <i class="fas fa-pencil-alt" style="font-size:0.65rem;color:#555;"></i></div>
+          </a>
           {% if stop.unit %}<small class="text-secondary">Unit {{ stop.unit }}</small>{% endif %}
           {% if stop.customer_name %}<small class="text-secondary d-block">{{ stop.customer_name }}</small>{% endif %}
         </div>
