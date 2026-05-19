@@ -7,7 +7,7 @@
   </div>
   <div class="text-center mb-5 pt-3">
     <div class="unit-logo mb-2">UNIT<span>.</span></div>
-    <p class="text-secondary" style="font-size:0.85rem;">Set up your delivery profile once. Every driver gets it automatically.</p>
+    <p class="text-secondary" style="font-size:0.85rem;">Set up your delivery profile once. Works for any address — house, apartment, or business.</p>
   </div>
 
   {% if success %}
@@ -19,17 +19,17 @@
   {% else %}
   <div class="card p-4">
     <h6 class="fw-bold mb-1">Your Delivery Profile</h6>
-    <p class="text-secondary small mb-4">Takes 60 seconds. Works for every carrier — Amazon, SpeedX, UPS, FedEx, all of them.</p>
+    <p class="text-secondary small mb-4">Takes 60 seconds. House, apartment, business — works for every carrier.</p>
 
     <form method="POST">
       <div class="mb-3" style="position:relative;">
-        <label>Your Building Address</label>
+        <label>Your Delivery Address</label>
         <input type="text" id="address-input" name="address" class="form-control" placeholder="Start typing your address..." autocomplete="off" required>
         <ul id="address-suggestions" style="position:absolute;z-index:1000;width:100%;background:#1a1a2e;border:1px solid #333;border-radius:8px;list-style:none;padding:0;margin:0;display:none;"></ul>
       </div>
       <div class="mb-3">
-        <label>Your Unit / Apt #</label>
-        <input type="text" name="unit" class="form-control" placeholder="710" required>
+        <label>Unit / Apt / Suite <span class="text-muted" style="font-weight:400;">(if applicable)</span></label>
+        <input type="text" name="unit" class="form-control" placeholder="Apt 710, Suite 4B, or leave blank for houses">
       </div>
       <div class="mb-3">
         <label>Your Phone Number</label>
@@ -42,11 +42,11 @@
       </div>
       <div class="mb-3">
         <label>Where To Leave Packages If No Answer</label>
-        <input type="text" name="drop_spot" class="form-control" placeholder="Front door / mailroom / with building manager">
+        <input type="text" name="drop_spot" class="form-control" placeholder="Front door / back porch / mailroom / office front desk">
       </div>
       <div class="mb-4">
         <label>Door Notes (optional)</label>
-        <input type="text" name="door_notes" class="form-control" placeholder="Brown door, end of hallway, ring bell twice">
+        <input type="text" name="door_notes" class="form-control" placeholder="e.g. Gate code 1234, brown house, side entrance, ring bell">
       </div>
       <button class="btn btn-primary w-100 py-3 fs-6">
         <i class="fas fa-check me-2"></i>Save My Delivery Profile

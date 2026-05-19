@@ -20,8 +20,8 @@
                value="{{ address }}" required>
       </div>
       <div class="mb-3">
-        <label>Unit / Apt Number</label>
-        <input type="text" name="unit" class="form-control" placeholder="710" value="{{ unit }}">
+        <label>Unit / Apt / Suite <span class="text-muted" style="font-weight:400;font-size:0.8rem;">(if applicable)</span></label>
+        <input type="text" name="unit" class="form-control" placeholder="Apt 710, Suite B, or leave blank" value="{{ unit }}">
       </div>
       <div class="mb-3">
         <label>Tracking # (optional)</label>
@@ -37,7 +37,7 @@
   <div class="warning-box mb-4">
     <div class="d-flex align-items-center mb-2">
       <i class="fas fa-exclamation-triangle me-2" style="color:#ffaa00;"></i>
-      <strong style="color:#ffaa00;">Building Not In Database</strong>
+      <strong style="color:#ffaa00;">Address Not In Database</strong>
     </div>
     <p class="text-secondary mb-3 small">Be the first to add it and help every driver after you.</p>
 
@@ -45,7 +45,7 @@
       <input type="hidden" name="address" value="{{ address }}">
       <div class="mb-3">
         <label>Access Code (if any)</label>
-        <input type="text" name="access_code" class="form-control" placeholder="e.g. 4500# or leave blank if key/buzzer only">
+        <input type="text" name="access_code" class="form-control" placeholder="e.g. gate code 1234, keypad 4500#, or leave blank">
       </div>
       <div class="mb-3">
         <label>Access Type</label>
@@ -53,20 +53,20 @@
           <option value="code">Keypad Code</option>
           <option value="text_only">Text Resident Only (no code)</option>
           <option value="key">Key Access Only</option>
-          <option value="open">Building Open / No Access Needed</option>
+          <option value="open">No Access Needed (house / open area)</option>
         </select>
       </div>
       <div class="mb-3">
-        <label>Buzzer / Entry Notes</label>
-        <input type="text" name="buzzer_notes" class="form-control" placeholder="e.g. Buzzer broken, press 1B">
+        <label>Access Notes</label>
+        <input type="text" name="buzzer_notes" class="form-control" placeholder="e.g. Ring bell, gate on left side, call ahead, buzzer broken">
       </div>
       <div class="mb-3">
-        <label>How To Find The Unit Inside</label>
+        <label>Delivery Instructions</label>
         <textarea name="interior_directions" class="form-control" rows="2"
-                  placeholder="e.g. Take elevator to 4th floor, turn left, third door on right"></textarea>
+                  placeholder="e.g. Brown house, leave at back door / 3rd floor turn left / front desk of lobby"></textarea>
       </div>
       <button class="btn btn-primary w-100">
-        <i class="fas fa-plus me-2"></i>Add Building & Help Future Drivers
+        <i class="fas fa-plus me-2"></i>Add Address & Help Future Drivers
       </button>
     </form>
   </div>
@@ -76,8 +76,8 @@
   <!-- Building Access Info -->
   <div class="access-box mb-4">
     <div class="d-flex align-items-center mb-3">
-      <i class="fas fa-building me-2" style="color:#00ff88;"></i>
-      <strong style="color:#00ff88;">Building Access</strong>
+      <i class="fas fa-map-marker-alt me-2" style="color:#00ff88;"></i>
+      <strong style="color:#00ff88;">Delivery Access</strong>
       {% if building.confirmed_count > 0 %}
       <span class="badge ms-auto" style="background:#00ff8822;color:#00ff88;">
         ✓ Confirmed {{ building.confirmed_count }}x
@@ -101,7 +101,7 @@
     {% elif building.access_type == 'open' %}
     <div class="text-center py-3 mb-3" style="background:#0a1f0f;border-radius:12px;">
       <i class="fas fa-door-open fa-2x mb-2" style="color:#00ff88;"></i>
-      <div style="color:#00ff88;font-weight:700;">Building Open</div>
+      <div style="color:#00ff88;font-weight:700;">No Access Needed</div>
       <small class="text-secondary">No access code needed</small>
     </div>
     {% else %}
@@ -121,7 +121,7 @@
 
     {% if building.interior_directions %}
     <div class="mt-3 p-3" style="background:#0d0d0d;border-radius:12px;">
-      <small class="text-secondary"><i class="fas fa-map-signs me-1"></i>INTERIOR DIRECTIONS</small>
+      <small class="text-secondary"><i class="fas fa-map-signs me-1"></i>DELIVERY INSTRUCTIONS</small>
       <p class="mb-0 mt-1 small">{{ building.interior_directions }}</p>
     </div>
     {% endif %}
