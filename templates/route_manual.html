@@ -26,9 +26,10 @@
           <span class="fw-bold" style="color:#00ff88;font-size:0.85rem;">STOP <span class="stop-num">1</span></span>
           <button type="button" class="remove-stop btn btn-sm" style="color:#666;border:none;background:none;font-size:0.8rem;">✕ Remove</button>
         </div>
-        <div class="mb-2">
+        <div class="mb-2" style="position:relative;">
           <label>Address *</label>
-          <input type="text" name="address" class="form-control" placeholder="1341 W Warren Ave, Detroit, MI 48201" required>
+          <input type="text" name="address" class="form-control address-input" placeholder="Start typing address..." autocomplete="off" required>
+          <ul class="addr-suggestions" style="position:absolute;z-index:1000;width:100%;background:#1a1a2e;border:1px solid #333;border-radius:8px;list-style:none;padding:0;margin:0;display:none;"></ul>
         </div>
         <div class="row g-2 mb-2">
           <div class="col-6">
@@ -81,9 +82,10 @@ document.getElementById('add-stop').addEventListener('click', function() {
       <span class="fw-bold" style="color:#00ff88;font-size:0.85rem;">STOP <span class="stop-num">${stopCount}</span></span>
       <button type="button" class="remove-stop btn btn-sm" style="color:#666;border:none;background:none;font-size:0.8rem;">✕ Remove</button>
     </div>
-    <div class="mb-2">
+    <div class="mb-2" style="position:relative;">
       <label>Address *</label>
-      <input type="text" name="address" class="form-control" placeholder="1341 W Warren Ave, Detroit, MI 48201">
+      <input type="text" name="address" class="form-control address-input" placeholder="Start typing address..." autocomplete="off">
+      <ul class="addr-suggestions" style="position:absolute;z-index:1000;width:100%;background:#1a1a2e;border:1px solid #333;border-radius:8px;list-style:none;padding:0;margin:0;display:none;"></ul>
     </div>
     <div class="row g-2 mb-2">
       <div class="col-6">
@@ -118,5 +120,54 @@ document.getElementById('stops-container').addEventListener('click', function(e)
 function renumberStops() {
   document.querySelectorAll('.stop-num').forEach((el, i) => el.textContent = i + 1);
 }
+
+// Address autocomplete for all stop rows
+function attachAutocomplete(input) {
+  const suggestions = input.closest('div').querySelector('.addr-suggestions');
+  let timer;
+  input.addEventListener('input', function() {
+    clearTimeout(timer);
+    const q = this.value.trim();
+    if (q.length < 4) { suggestions.style.display = 'none'; return; }
+    timer = setTimeout(() => {
+      fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=json&limit=5&countrycodes=us`)
+        .then(r => r.json())
+        .then(data => {
+          suggestions.innerHTML = '';
+          if (!data.length) { suggestions.style.display = 'none'; return; }
+          data.forEach(item => {
+            const li = document.createElement('li');
+            li.textContent = item.display_name;
+            li.style.cssText = 'padding:14px 16px;cursor:pointer;font-size:0.9rem;color:#ccc;border-bottom:1px solid #222;min-height:48px;display:flex;align-items:center;';
+            li.addEventListener('click', () => {
+              input.value = item.display_name;
+              suggestions.style.display = 'none';
+            });
+            suggestions.appendChild(li);
+          });
+          suggestions.style.display = 'block';
+        })
+        .catch(() => { suggestions.style.display = 'none'; });
+    }, 400);
+  });
+  document.addEventListener('click', e => {
+    if (!input.contains(e.target) && !suggestions.contains(e.target)) suggestions.style.display = 'none';
+  });
+}
+
+// Attach to existing + new stops
+document.querySelectorAll('.address-input').forEach(attachAutocomplete);
+
+const origAddStop = document.getElementById('add-stop').onclick;
+document.getElementById('add-stop').addEventListener('click', function() {
+  setTimeout(() => {
+    document.querySelectorAll('.address-input').forEach(input => {
+      if (!input.dataset.ac) {
+        input.dataset.ac = '1';
+        attachAutocomplete(input);
+      }
+    });
+  }, 100);
+});
 </script>
 {% endblock %}
