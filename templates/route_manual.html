@@ -28,8 +28,8 @@
         </div>
         <div class="mb-2" style="position:relative;">
           <label>Address *</label>
-          <input type="text" name="address" class="form-control address-input" placeholder="Start typing address..." autocomplete="off" required>
-          <ul class="addr-suggestions" style="position:absolute;z-index:1000;width:100%;background:#1a1a2e;border:1px solid #333;border-radius:8px;list-style:none;padding:0;margin:0;display:none;"></ul>
+          <input type="text" name="address" class="form-control address-input" placeholder="Enter delivery address" required>
+          <ul class="addr-suggestions" style="position:absolute;z-index:1000;width:100%;background:#1a1a1a;border:1px solid #333;border-radius:8px;list-style:none;padding:0;margin:0;display:none;"></ul>
         </div>
         <div class="row g-2 mb-2">
           <div class="col-6">
@@ -84,8 +84,8 @@ document.getElementById('add-stop').addEventListener('click', function() {
     </div>
     <div class="mb-2" style="position:relative;">
       <label>Address *</label>
-      <input type="text" name="address" class="form-control address-input" placeholder="Start typing address..." autocomplete="off">
-      <ul class="addr-suggestions" style="position:absolute;z-index:1000;width:100%;background:#1a1a2e;border:1px solid #333;border-radius:8px;list-style:none;padding:0;margin:0;display:none;"></ul>
+      <input type="text" name="address" class="form-control address-input" placeholder="Enter delivery address">
+      <ul class="addr-suggestions" style="position:absolute;z-index:1000;width:100%;background:#1a1a1a;border:1px solid #333;border-radius:8px;list-style:none;padding:0;margin:0;display:none;"></ul>
     </div>
     <div class="row g-2 mb-2">
       <div class="col-6">
@@ -121,26 +121,38 @@ function renumberStops() {
   document.querySelectorAll('.stop-num').forEach((el, i) => el.textContent = i + 1);
 }
 
-// Address autocomplete for all stop rows
-function attachAutocomplete(input) {
+// Internal address suggestions from delivery history
+function attachSuggestions(input) {
+  if (input.dataset.ac) return;
+  input.dataset.ac = '1';
   const suggestions = input.closest('div').querySelector('.addr-suggestions');
+  const row = input.closest('.stop-row');
   let timer;
+
   input.addEventListener('input', function() {
     clearTimeout(timer);
     const q = this.value.trim();
-    if (q.length < 4) { suggestions.style.display = 'none'; return; }
+    if (q.length < 3) { suggestions.style.display = 'none'; return; }
     timer = setTimeout(() => {
-      fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=json&limit=5&countrycodes=us`)
+      fetch(`/api/address-suggest?q=${encodeURIComponent(q)}`)
         .then(r => r.json())
         .then(data => {
           suggestions.innerHTML = '';
           if (!data.length) { suggestions.style.display = 'none'; return; }
           data.forEach(item => {
             const li = document.createElement('li');
-            li.textContent = item.display_name;
-            li.style.cssText = 'padding:14px 16px;cursor:pointer;font-size:0.9rem;color:#ccc;border-bottom:1px solid #222;min-height:48px;display:flex;align-items:center;';
+            li.innerHTML = `<div style="font-size:0.9rem;color:#fff;">${item.address}</div>${item.name ? `<div style="font-size:0.75rem;color:#00ff88;">${item.name}${item.unit ? ' · ' + item.unit : ''}</div>` : ''}`;
+            li.style.cssText = 'padding:12px 16px;cursor:pointer;border-bottom:1px solid #222;min-height:48px;';
             li.addEventListener('click', () => {
-              input.value = item.display_name;
+              input.value = item.address;
+              if (item.unit && row) {
+                const unitInput = row.querySelector('input[name="unit"]');
+                if (unitInput && !unitInput.value) unitInput.value = item.unit;
+              }
+              if (item.name && row) {
+                const nameInput = row.querySelector('input[name="name"]');
+                if (nameInput && !nameInput.value) nameInput.value = item.name;
+              }
               suggestions.style.display = 'none';
             });
             suggestions.appendChild(li);
@@ -148,26 +160,18 @@ function attachAutocomplete(input) {
           suggestions.style.display = 'block';
         })
         .catch(() => { suggestions.style.display = 'none'; });
-    }, 400);
+    }, 300);
   });
+
   document.addEventListener('click', e => {
     if (!input.contains(e.target) && !suggestions.contains(e.target)) suggestions.style.display = 'none';
   });
 }
 
-// Attach to existing + new stops
-document.querySelectorAll('.address-input').forEach(attachAutocomplete);
+document.querySelectorAll('.address-input').forEach(attachSuggestions);
 
-const origAddStop = document.getElementById('add-stop').onclick;
 document.getElementById('add-stop').addEventListener('click', function() {
-  setTimeout(() => {
-    document.querySelectorAll('.address-input').forEach(input => {
-      if (!input.dataset.ac) {
-        input.dataset.ac = '1';
-        attachAutocomplete(input);
-      }
-    });
-  }, 100);
+  setTimeout(() => document.querySelectorAll('.address-input').forEach(attachSuggestions), 100);
 });
 </script>
 {% endblock %}

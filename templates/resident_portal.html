@@ -24,7 +24,7 @@
     <form method="POST">
       <div class="mb-3" style="position:relative;">
         <label>Your Delivery Address</label>
-        <input type="text" id="address-input" name="address" class="form-control" placeholder="Start typing your address..." autocomplete="off" required>
+        <input type="text" id="address-input" name="address" class="form-control" placeholder="Enter your delivery address" required>
         <ul id="address-suggestions" style="position:absolute;z-index:1000;width:100%;background:#1a1a2e;border:1px solid #333;border-radius:8px;list-style:none;padding:0;margin:0;display:none;"></ul>
       </div>
       <div class="mb-3">
@@ -70,22 +70,20 @@
   input.addEventListener('input', function() {
     clearTimeout(debounceTimer);
     const query = this.value.trim();
-    if (query.length < 4) { suggestions.style.display = 'none'; return; }
+    if (query.length < 3) { suggestions.style.display = 'none'; return; }
 
     debounceTimer = setTimeout(() => {
-      fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&addressdetails=1&limit=5&countrycodes=us`)
+      fetch(`/api/address-suggest?q=${encodeURIComponent(query)}`)
         .then(r => r.json())
         .then(data => {
           suggestions.innerHTML = '';
           if (!data.length) { suggestions.style.display = 'none'; return; }
           data.forEach(item => {
             const li = document.createElement('li');
-            li.textContent = item.display_name;
-            li.style.cssText = 'padding:10px 14px;cursor:pointer;font-size:0.85rem;color:#ccc;border-bottom:1px solid #222;';
-            li.addEventListener('mouseenter', () => li.style.background = '#252540');
-            li.addEventListener('mouseleave', () => li.style.background = 'transparent');
+            li.innerHTML = `<div style="font-size:0.9rem;color:#fff;">${item.address}</div>${item.unit ? `<div style="font-size:0.75rem;color:#00ff88;">${item.unit}</div>` : ''}`;
+            li.style.cssText = 'padding:12px 16px;cursor:pointer;border-bottom:1px solid #222;min-height:48px;';
             li.addEventListener('click', () => {
-              input.value = item.display_name;
+              input.value = item.address;
               suggestions.style.display = 'none';
             });
             suggestions.appendChild(li);
@@ -93,7 +91,7 @@
           suggestions.style.display = 'block';
         })
         .catch(() => { suggestions.style.display = 'none'; });
-    }, 400);
+    }, 300);
   });
 
   document.addEventListener('click', function(e) {

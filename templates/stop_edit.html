@@ -19,7 +19,7 @@
       <div class="mb-3" style="position:relative;">
         <label>Address *</label>
         <input type="text" id="address-input" name="address" class="form-control"
-               value="{{ stop.address }}" autocomplete="off" required>
+               value="{{ stop.address }}" required>
         <ul id="address-suggestions" style="position:absolute;z-index:1000;width:100%;background:#1a1a2e;border:1px solid #333;border-radius:8px;list-style:none;padding:0;margin:0;display:none;"></ul>
       </div>
 
@@ -66,24 +66,24 @@
 <script>
 const input = document.getElementById('address-input');
 const suggestions = document.getElementById('address-suggestions');
-let debounceTimer;
+let timer;
 
 input.addEventListener('input', function() {
-  clearTimeout(debounceTimer);
-  const query = this.value.trim();
-  if (query.length < 4) { suggestions.style.display = 'none'; return; }
-  debounceTimer = setTimeout(() => {
-    fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&addressdetails=1&limit=5&countrycodes=us`)
+  clearTimeout(timer);
+  const q = this.value.trim();
+  if (q.length < 3) { suggestions.style.display = 'none'; return; }
+  timer = setTimeout(() => {
+    fetch(`/api/address-suggest?q=${encodeURIComponent(q)}`)
       .then(r => r.json())
       .then(data => {
         suggestions.innerHTML = '';
         if (!data.length) { suggestions.style.display = 'none'; return; }
         data.forEach(item => {
           const li = document.createElement('li');
-          li.textContent = item.display_name;
-          li.style.cssText = 'padding:14px 16px;cursor:pointer;font-size:0.9rem;color:#ccc;border-bottom:1px solid #222;min-height:48px;display:flex;align-items:center;';
+          li.innerHTML = `<div style="font-size:0.9rem;color:#fff;">${item.address}</div>${item.name ? `<div style="font-size:0.75rem;color:#00ff88;">${item.name}${item.unit ? ' · ' + item.unit : ''}</div>` : ''}`;
+          li.style.cssText = 'padding:12px 16px;cursor:pointer;border-bottom:1px solid #222;min-height:48px;';
           li.addEventListener('click', () => {
-            input.value = item.display_name;
+            input.value = item.address;
             suggestions.style.display = 'none';
           });
           suggestions.appendChild(li);
@@ -91,13 +91,11 @@ input.addEventListener('input', function() {
         suggestions.style.display = 'block';
       })
       .catch(() => { suggestions.style.display = 'none'; });
-  }, 400);
+  }, 300);
 });
 
 document.addEventListener('click', e => {
-  if (!input.contains(e.target) && !suggestions.contains(e.target)) {
-    suggestions.style.display = 'none';
-  }
+  if (!input.contains(e.target) && !suggestions.contains(e.target)) suggestions.style.display = 'none';
 });
 </script>
 {% endblock %}

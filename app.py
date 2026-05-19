@@ -476,6 +476,22 @@ def stop_failed(stop_id):
     db.close()
     return redirect(url_for('route_detail', route_id=route_id) if route_id else url_for('driver_dashboard'))
 
+# ─── ADDRESS SUGGESTIONS (internal DB) ────────────────────────
+
+@app.route('/api/address-suggest')
+def address_suggest():
+    q = request.args.get('q', '').strip()
+    if len(q) < 3:
+        return jsonify([])
+    db = get_db()
+    results = db.execute(
+        """SELECT DISTINCT address, unit, customer_name FROM stops
+           WHERE address LIKE ? ORDER BY rowid DESC LIMIT 8""",
+        (f'%{q}%',)
+    ).fetchall()
+    db.close()
+    return jsonify([{'address': r['address'], 'unit': r['unit'] or '', 'name': r['customer_name'] or ''} for r in results])
+
 # ─── GPS API ───────────────────────────────────────────────────
 
 @app.route('/api/location', methods=['POST'])
