@@ -1,0 +1,122 @@
+{% extends 'base.html' %}
+{% block title %}UNIT — Add Stops Manually{% endblock %}
+{% block content %}
+<div class="container-fluid p-4 pb-nav">
+
+  <div class="d-flex align-items-center mb-4">
+    <a href="/driver/route/new" class="text-decoration-none me-3" style="color:#555;">
+      <i class="fas fa-chevron-left"></i>
+    </a>
+    <div class="unit-logo" style="font-size:1.4rem;">UNIT<span>.</span></div>
+  </div>
+
+  <h5 class="fw-bold mb-1">Add Stops Manually</h5>
+  <p class="text-secondary small mb-4">Enter each stop. Address is required — everything else optional.</p>
+
+  <form method="POST">
+    <div class="mb-3">
+      <label>Route Name</label>
+      <input type="text" name="route_name" class="form-control" placeholder="Route — Today">
+    </div>
+
+    <div id="stops-container">
+      <!-- Stop 1 -->
+      <div class="stop-row card p-3 mb-3">
+        <div class="d-flex justify-content-between align-items-center mb-2">
+          <span class="fw-bold" style="color:#00ff88;font-size:0.85rem;">STOP <span class="stop-num">1</span></span>
+          <button type="button" class="remove-stop btn btn-sm" style="color:#666;border:none;background:none;font-size:0.8rem;">✕ Remove</button>
+        </div>
+        <div class="mb-2">
+          <label>Address *</label>
+          <input type="text" name="address" class="form-control" placeholder="1341 W Warren Ave, Detroit, MI 48201" required>
+        </div>
+        <div class="row g-2 mb-2">
+          <div class="col-6">
+            <label>Unit / Suite</label>
+            <input type="text" name="unit" class="form-control" placeholder="Apt 4B (optional)">
+          </div>
+          <div class="col-6">
+            <label>Customer Name</label>
+            <input type="text" name="name" class="form-control" placeholder="John D.">
+          </div>
+        </div>
+        <div>
+          <label>Phone Number</label>
+          <input type="tel" name="phone" class="form-control" placeholder="+1 313 555 0000">
+        </div>
+      </div>
+    </div>
+
+    <button type="button" id="add-stop" class="btn w-100 mb-4" style="border:1px dashed #333;color:#aaa;border-radius:12px;min-height:48px;">
+      <i class="fas fa-plus me-2"></i>Add Another Stop
+    </button>
+
+    <button type="submit" class="btn btn-primary w-100 py-3 fs-6">
+      <i class="fas fa-check me-2"></i>Save Route
+    </button>
+  </form>
+
+</div>
+
+<div class="nav-bottom">
+  <div class="d-flex justify-content-around">
+    <a href="/driver"><i class="fas fa-home"></i>Home</a>
+    <a href="/driver/route/new" class="active"><i class="fas fa-upload"></i>New Route</a>
+    <a href="/admin"><i class="fas fa-chart-bar"></i>Admin</a>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let stopCount = 1;
+
+document.getElementById('add-stop').addEventListener('click', function() {
+  stopCount++;
+  const container = document.getElementById('stops-container');
+  const div = document.createElement('div');
+  div.className = 'stop-row card p-3 mb-3';
+  div.innerHTML = `
+    <div class="d-flex justify-content-between align-items-center mb-2">
+      <span class="fw-bold" style="color:#00ff88;font-size:0.85rem;">STOP <span class="stop-num">${stopCount}</span></span>
+      <button type="button" class="remove-stop btn btn-sm" style="color:#666;border:none;background:none;font-size:0.8rem;">✕ Remove</button>
+    </div>
+    <div class="mb-2">
+      <label>Address *</label>
+      <input type="text" name="address" class="form-control" placeholder="1341 W Warren Ave, Detroit, MI 48201">
+    </div>
+    <div class="row g-2 mb-2">
+      <div class="col-6">
+        <label>Unit / Suite</label>
+        <input type="text" name="unit" class="form-control" placeholder="Apt 4B (optional)">
+      </div>
+      <div class="col-6">
+        <label>Customer Name</label>
+        <input type="text" name="name" class="form-control" placeholder="John D.">
+      </div>
+    </div>
+    <div>
+      <label>Phone Number</label>
+      <input type="tel" name="phone" class="form-control" placeholder="+1 313 555 0000">
+    </div>
+  `;
+  container.appendChild(div);
+  renumberStops();
+  div.querySelector('input').focus();
+});
+
+document.getElementById('stops-container').addEventListener('click', function(e) {
+  if (e.target.classList.contains('remove-stop')) {
+    const rows = document.querySelectorAll('.stop-row');
+    if (rows.length > 1) {
+      e.target.closest('.stop-row').remove();
+      renumberStops();
+    }
+  }
+});
+
+function renumberStops() {
+  document.querySelectorAll('.stop-num').forEach((el, i) => el.textContent = i + 1);
+}
+</script>
+{% endblock %}

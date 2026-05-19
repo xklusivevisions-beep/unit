@@ -288,6 +288,44 @@ def route_new():
 
     return render_template('route_new.html')
 
+@app.route('/driver/route/manual', methods=['GET', 'POST'])
+def route_manual():
+    if 'driver_id' not in session:
+        return redirect(url_for('driver_login'))
+
+    if request.method == 'POST':
+        db = get_db()
+        today = datetime.now().strftime('%Y-%m-%d')
+        route_name = request.form.get('route_name', f'Route {today}')
+        db.execute(
+            "INSERT INTO routes (driver_id, driver_name, name, date) VALUES (?,?,?,?)",
+            (session['driver_id'], session['driver_name'], route_name, today)
+        )
+        db.commit()
+        route_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        addresses = request.form.getlist('address')
+        phones    = request.form.getlist('phone')
+        names     = request.form.getlist('name')
+        units     = request.form.getlist('unit')
+
+        for i, addr in enumerate(addresses):
+            if not addr.strip(): continue
+            token = secrets.token_urlsafe(12)
+            db.execute(
+                "INSERT INTO stops (route_id, stop_number, address, unit, customer_name, phone, token) VALUES (?,?,?,?,?,?,?)",
+                (route_id, i+1, addr.strip(),
+                 units[i].strip() if i < len(units) else '',
+                 names[i].strip() if i < len(names) else '',
+                 format_phone(phones[i].strip()) if i < len(phones) and phones[i].strip() else '',
+                 token)
+            )
+        db.commit()
+        db.close()
+        return redirect(url_for('route_detail', route_id=route_id))
+
+    return render_template('route_manual.html')
+
 @app.route('/driver/route/<int:route_id>')
 def route_detail(route_id):
     if 'driver_id' not in session:
