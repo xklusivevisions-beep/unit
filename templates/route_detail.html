@@ -1,0 +1,164 @@
+{% extends 'base.html' %}
+{% block title %}UNIT — Route{% endblock %}
+{% block content %}
+<div class="container-fluid p-4 pb-nav">
+
+  <div class="d-flex align-items-center mb-4">
+    <a href="/driver" class="text-decoration-none me-3" style="color:#555;">
+      <i class="fas fa-chevron-left"></i>
+    </a>
+    <div>
+      <div class="unit-logo" style="font-size:1.2rem;">UNIT<span>.</span></div>
+      <small class="text-secondary">{{ route.name }}</small>
+    </div>
+  </div>
+
+  <!-- Stats Bar -->
+  <div class="row g-2 mb-4">
+    <div class="col-4">
+      <div class="stat-card">
+        <div class="stat-number">{{ total }}</div>
+        <small class="text-secondary">Stops</small>
+      </div>
+    </div>
+    <div class="col-4">
+      <div class="stat-card">
+        <div class="stat-number" style="color:#00ff88;">{{ with_phone }}</div>
+        <small class="text-secondary">Have Phone</small>
+      </div>
+    </div>
+    <div class="col-4">
+      <div class="stat-card">
+        <div class="stat-number" style="color:#ffaa00;">{{ total - with_phone }}</div>
+        <small class="text-secondary">Missing</small>
+      </div>
+    </div>
+  </div>
+
+  <!-- Blast SMS Button -->
+  {% if request.args.get('blast_sent') %}
+  <div class="access-box mb-4">
+    <i class="fas fa-check-circle me-2" style="color:#00ff88;"></i>
+    <strong style="color:#00ff88;">Blast sent to {{ request.args.get('blast_sent') }} customers!</strong>
+    {% if request.args.get('blast_failed','0') != '0' %}
+    <div class="mt-1"><small style="color:#ff6666;">{{ request.args.get('blast_failed') }} failed — check phone numbers</small></div>
+    {% endif %}
+  </div>
+  {% elif not route.blast_sent %}
+  <div class="card p-4 mb-4" style="border-color:#00ff8844;">
+    <div class="fw-bold mb-1">Ready to notify customers?</div>
+    <p class="text-secondary small mb-3">Sends one SMS to every customer with a phone number, letting them know their delivery is on the way today.</p>
+    {% if with_phone == 0 %}
+    <div class="text-secondary small mb-3" style="color:#ffaa00!important;">
+      <i class="fas fa-exclamation-triangle me-1" style="color:#ffaa00;"></i>
+      Add phone numbers below first
+    </div>
+    {% else %}
+    <form method="POST" action="/driver/route/{{ route.id }}/blast">
+      <button class="btn btn-primary w-100 py-3 fs-6">
+        <i class="fas fa-paper-plane me-2"></i>Send SMS to {{ with_phone }} Customers
+      </button>
+    </form>
+    {% endif %}
+  </div>
+  {% else %}
+  <div class="access-box mb-4">
+    <i class="fas fa-check-circle me-2" style="color:#00ff88;"></i>
+    <strong style="color:#00ff88;">SMS blast already sent</strong>
+    <div><small class="text-secondary">Sent at {{ route.blast_sent_at[:16] if route.blast_sent_at else 'earlier' }}</small></div>
+  </div>
+  {% endif %}
+
+  <!-- Stop List -->
+  <h6 class="text-secondary mb-3" style="letter-spacing:0.1em;font-size:0.75rem;">ALL STOPS</h6>
+  {% for stop in stops %}
+  <div class="card p-3 mb-2" id="stop-{{ stop.id }}"
+       style="border-color:{% if stop.status=='delivered' %}#00ff8844{% elif stop.status=='failed' %}#ff333344{% elif stop.status=='en_route' %}#0088ff44{% else %}#222{% endif %};">
+    <div class="d-flex align-items-start gap-2">
+      <span style="background:#1a1a1a;color:#aaa;border-radius:8px;padding:4px 8px;font-size:0.8rem;font-weight:700;min-width:32px;text-align:center;flex-shrink:0;">{{ stop.stop_number }}</span>
+      <div style="flex:1;min-width:0;">
+        <div class="fw-bold" style="font-size:0.9rem;">{{ stop.customer_name or 'Unknown' }}</div>
+        <div class="text-secondary small text-truncate">{{ stop.address }}</div>
+        {% if stop.unit %}<small class="text-secondary">Unit {{ stop.unit }}</small>{% endif %}
+
+        <!-- Phone input -->
+        <div class="mt-2 d-flex gap-2 align-items-center">
+          {% if stop.phone %}
+            <span style="color:#00ff88;font-size:0.8rem;"><i class="fas fa-phone me-1"></i>{{ stop.phone }}</span>
+            <button class="btn btn-sm py-0 px-2" style="font-size:0.7rem;border:1px solid #333;border-radius:6px;color:#aaa;"
+                    onclick="editPhone({{ stop.id }}, '{{ stop.phone }}')">edit</button>
+          {% else %}
+            <button class="btn btn-sm py-0 px-2" style="font-size:0.75rem;border:1px solid #ffaa0044;color:#ffaa00;border-radius:6px;"
+                    onclick="editPhone({{ stop.id }}, '')">+ Add Phone</button>
+          {% endif %}
+          <span id="phone-status-{{ stop.id }}"></span>
+        </div>
+
+        <!-- Inline phone edit -->
+        <div id="phone-edit-{{ stop.id }}" style="display:none;" class="mt-2">
+          <div class="d-flex gap-2">
+            <input type="tel" id="phone-input-{{ stop.id }}" class="form-control form-control-sm" placeholder="+1 313 555 0000" value="{{ stop.phone or '' }}">
+            <button class="btn btn-sm" style="background:#00ff88;color:#000;border-radius:8px;white-space:nowrap;"
+                    onclick="savePhone({{ stop.id }}, {{ route.id }})">Save</button>
+          </div>
+        </div>
+
+      </div>
+      <div class="text-end flex-shrink-0">
+        {% if stop.status == 'pending' %}
+          <form method="POST" action="/driver/stop/{{ stop.id }}/start">
+            <button class="btn btn-sm" style="background:#00ff88;color:#000;border-radius:10px;min-height:36px;padding:4px 14px;font-weight:700;">
+              <i class="fas fa-play me-1"></i>Go
+            </button>
+          </form>
+        {% elif stop.status == 'en_route' %}
+          <a href="/driver/stop/{{ stop.id }}" class="btn btn-sm" style="background:#0088ff;border-radius:10px;min-height:36px;padding:4px 12px;">
+            <i class="fas fa-location-arrow"></i>
+          </a>
+        {% else %}
+          <span class="status-pill pill-{{ stop.status }}">{{ stop.status.upper() }}</span>
+        {% endif %}
+        {% if stop.sms_blast_sent %}
+        <div><small style="color:#00ff88;font-size:0.65rem;"><i class="fas fa-sms"></i> Notified</small></div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+
+</div>
+
+<div class="nav-bottom">
+  <div class="d-flex justify-content-around">
+    <a href="/driver"><i class="fas fa-home"></i>Home</a>
+    <a href="/driver/route/new"><i class="fas fa-upload"></i>New Route</a>
+    <a href="/admin"><i class="fas fa-chart-bar"></i>Admin</a>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+function editPhone(stopId, current) {
+  document.getElementById(`phone-edit-${stopId}`).style.display = 'block';
+  document.getElementById(`phone-input-${stopId}`).focus();
+}
+
+function savePhone(stopId, routeId) {
+  const phone = document.getElementById(`phone-input-${stopId}`).value.trim();
+  const status = document.getElementById(`phone-status-${stopId}`);
+  fetch(`/driver/route/${routeId}/stop/${stopId}/phone`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+    body: `phone=${encodeURIComponent(phone)}`
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (data.ok) {
+      document.getElementById(`phone-edit-${stopId}`).style.display = 'none';
+      status.innerHTML = `<span style="color:#00ff88;font-size:0.75rem;"><i class="fas fa-check"></i> Saved</span>`;
+      setTimeout(() => location.reload(), 800);
+    }
+  });
+}
+</script>
+{% endblock %}

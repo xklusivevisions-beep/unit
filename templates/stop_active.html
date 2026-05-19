@@ -1,0 +1,131 @@
+{% extends 'base.html' %}
+{% block title %}UNIT — Stop #{{ stop.stop_number }}{% endblock %}
+{% block content %}
+<div class="container-fluid p-4 pb-nav">
+
+  <div class="d-flex align-items-center mb-4">
+    <a href="/driver/route/{{ stop.route_id }}" class="text-decoration-none me-3" style="color:#555;">
+      <i class="fas fa-chevron-left"></i>
+    </a>
+    <div>
+      <div class="unit-logo" style="font-size:1.2rem;">UNIT<span>.</span></div>
+      <small class="text-secondary">Stop #{{ stop.stop_number }}</small>
+    </div>
+  </div>
+
+  <!-- Stop Info -->
+  <div class="card p-4 mb-3">
+    <div class="fw-bold fs-5 mb-1">{{ stop.customer_name or 'Customer' }}</div>
+    <div class="text-secondary mb-1">{{ stop.address }}</div>
+    {% if stop.unit %}<div class="text-secondary small">Unit {{ stop.unit }}</div>{% endif %}
+    {% if stop.tracking %}<div class="mt-2"><small class="text-muted">{{ stop.tracking }}</small></div>{% endif %}
+  </div>
+
+  <!-- GPS Status -->
+  <div id="gps-status" class="p-3 mb-3" style="background:#0d2818;border:1px solid #00ff8844;border-radius:12px;">
+    <div class="d-flex align-items-center mb-1">
+      <span id="gps-dot" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#444;margin-right:10px;flex-shrink:0;"></span>
+      <span id="gps-text" style="font-size:0.9rem;color:#aaa;">Starting GPS...</span>
+    </div>
+    <div id="sms-alert" style="display:none;margin-top:8px;padding:8px 12px;background:#00ff8815;border-radius:8px;color:#00ff88;font-size:0.85rem;font-weight:700;">
+      <i class="fas fa-sms me-2"></i>Customer notified automatically!
+    </div>
+  </div>
+
+  <!-- Tracking Link -->
+  <div class="card p-3 mb-4" style="border-color:#0088ff44;">
+    <small class="text-secondary d-block mb-1">Customer tracking link</small>
+    <div style="font-size:0.8rem;color:#0088ff;word-break:break-all;">
+      {{ request.host_url }}track/{{ stop.token }}
+    </div>
+  </div>
+
+  <!-- Actions -->
+  <div class="row g-3">
+    <div class="col-6">
+      <form method="POST" action="/driver/stop/{{ stop.id }}/delivered">
+        <button class="btn btn-primary w-100 py-3 fs-6">
+          <i class="fas fa-check me-2"></i>Delivered
+        </button>
+      </form>
+    </div>
+    <div class="col-6">
+      <form method="POST" action="/driver/stop/{{ stop.id }}/failed">
+        <button class="btn btn-danger w-100 py-3 fs-6">
+          <i class="fas fa-times me-2"></i>Failed
+        </button>
+      </form>
+    </div>
+  </div>
+
+</div>
+
+<div class="nav-bottom">
+  <div class="d-flex justify-content-around">
+    <a href="/driver"><i class="fas fa-home"></i>Home</a>
+    <a href="/driver/route/{{ stop.route_id }}"><i class="fas fa-list"></i>Route</a>
+    <a href="/admin"><i class="fas fa-chart-bar"></i>Admin</a>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const STOP_ID   = {{ stop.id }};
+const gpsDot    = document.getElementById('gps-dot');
+const gpsText   = document.getElementById('gps-text');
+const smsAlert  = document.getElementById('sms-alert');
+let smsTriggered = false;
+
+function sendLocation(lat, lng) {
+  fetch('/api/location', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({lat, lng, stop_id: STOP_ID})
+  })
+  .then(r => r.json())
+  .then(data => {
+    gpsDot.style.cssText = 'display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:10px;flex-shrink:0;background:#00ff88;animation:gpsPulse 1.5s infinite;';
+    if (data.sms_triggered && !smsTriggered) {
+      smsTriggered = true;
+      smsAlert.style.display = 'block';
+      gpsText.textContent = '✓ Customer notified — ' + (data.distance_miles || '?') + ' mi away';
+      gpsText.style.color = '#00ff88';
+    } else if (data.distance_miles !== null && data.distance_miles !== undefined) {
+      gpsText.textContent = 'Live GPS — ' + data.distance_miles + ' mi from stop';
+      gpsText.style.color = '#00ff88';
+    } else {
+      gpsText.textContent = 'GPS active';
+      gpsText.style.color = '#00ff88';
+    }
+  })
+  .catch(() => {
+    gpsText.textContent = 'GPS sync error — retrying...';
+    gpsText.style.color = '#ff6666';
+  });
+}
+
+if (navigator.geolocation) {
+  navigator.geolocation.watchPosition(
+    pos => sendLocation(pos.coords.latitude, pos.coords.longitude),
+    err => { gpsText.textContent = 'GPS unavailable: ' + err.message; gpsText.style.color = '#ff6666'; },
+    { enableHighAccuracy: true, timeout: 15000, maximumAge: 5000 }
+  );
+  setInterval(() => {
+    navigator.geolocation.getCurrentPosition(
+      pos => sendLocation(pos.coords.latitude, pos.coords.longitude),
+      () => {}
+    );
+  }, 10000);
+} else {
+  gpsText.textContent = 'GPS not available on this device';
+}
+</script>
+<style>
+@keyframes gpsPulse {
+  0%   { box-shadow: 0 0 0 0 rgba(0,255,136,.7); }
+  70%  { box-shadow: 0 0 0 8px rgba(0,255,136,0); }
+  100% { box-shadow: 0 0 0 0 rgba(0,255,136,0); }
+}
+</style>
+{% endblock %}

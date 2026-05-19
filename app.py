@@ -2,50 +2,48 @@ from flask import Flask, render_template, request, redirect, url_for, session, j
 from datetime import datetime
 from geopy.distance import geodesic
 from geopy.geocoders import Nominatim
-import sqlite3, os, json, requests, logging, traceback
+import sqlite3, os, json, requests, logging, traceback, csv, io, secrets
 from twilio.rest import Client
 
-# ─── LOGGING ───────────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s'
-)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 log = logging.getLogger(__name__)
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'unit-secret-2025')
 
-# ─── GLOBAL ERROR HANDLERS ─────────────────────────────────────
 @app.errorhandler(404)
 def not_found(e):
-    if request.path.startswith('/api/'):
-        return jsonify({'error': 'Not found'}), 404
+    if request.path.startswith('/api/'): return jsonify({'error': 'Not found'}), 404
     return render_template('error.html', code=404, msg='Page not found'), 404
 
 @app.errorhandler(500)
 def server_error(e):
-    log.error(f'500 error: {traceback.format_exc()}')
-    if request.path.startswith('/api/'):
-        return jsonify({'error': 'Server error'}), 500
-    return render_template('error.html', code=500, msg='Something went wrong — we\'re on it'), 500
+    log.error(f'500: {traceback.format_exc()}')
+    if request.path.startswith('/api/'): return jsonify({'error': 'Server error'}), 500
+    return render_template('error.html', code=500, msg='Something went wrong'), 500
 
 @app.errorhandler(Exception)
 def unhandled(e):
-    log.error(f'Unhandled exception: {traceback.format_exc()}')
-    if request.path.startswith('/api/'):
-        return jsonify({'error': str(e)}), 500
+    log.error(f'Unhandled: {traceback.format_exc()}')
+    if request.path.startswith('/api/'): return jsonify({'error': str(e)}), 500
     return render_template('error.html', code=500, msg='Unexpected error — please try again'), 500
 
 DB = 'data/unit.db'
-
 TWILIO_SID   = os.environ.get('TWILIO_SID', '')
 TWILIO_TOKEN = os.environ.get('TWILIO_TOKEN', '')
 TWILIO_PHONE = os.environ.get('TWILIO_PHONE', '')
-
-# How close (miles) before auto-SMS fires
 APPROACH_RADIUS_MILES = 0.5
+_geocache = {}
 
 # ─── DB ────────────────────────────────────────────────────────
+
+def safe_db():
+    os.makedirs('data', exist_ok=True)
+    conn = sqlite3.connect(DB, timeout=10, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute('PRAGMA journal_mode=WAL')
+    conn.execute('PRAGMA synchronous=NORMAL')
+    return conn
 
 def get_db():
     return safe_db()
@@ -53,49 +51,6 @@ def get_db():
 def init_db():
     db = get_db()
     db.executescript('''
-        CREATE TABLE IF NOT EXISTS buildings (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            address TEXT UNIQUE NOT NULL,
-            access_code TEXT,
-            buzzer_notes TEXT,
-            interior_directions TEXT,
-            access_type TEXT DEFAULT 'code',
-            lat REAL, lng REAL,
-            confirmed_count INTEGER DEFAULT 0,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        );
-
-        CREATE TABLE IF NOT EXISTS residents (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            address TEXT NOT NULL,
-            unit TEXT NOT NULL,
-            phone TEXT NOT NULL,
-            backup_phone TEXT,
-            drop_spot TEXT,
-            door_notes TEXT,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        );
-
-        CREATE TABLE IF NOT EXISTS deliveries (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            driver_id INTEGER,
-            driver_name TEXT,
-            address TEXT,
-            unit TEXT,
-            tracking TEXT,
-            dest_lat REAL,
-            dest_lng REAL,
-            driver_lat REAL,
-            driver_lng REAL,
-            status TEXT DEFAULT 'pending',
-            sms_sent INTEGER DEFAULT 0,
-            approach_sms_sent INTEGER DEFAULT 0,
-            resident_confirmed INTEGER DEFAULT 0,
-            timestamp TEXT DEFAULT CURRENT_TIMESTAMP,
-            delivered_at TEXT,
-            notes TEXT
-        );
-
         CREATE TABLE IF NOT EXISTS drivers (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
@@ -107,41 +62,70 @@ def init_db():
             last_seen TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS routes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            driver_id INTEGER,
+            driver_name TEXT,
+            name TEXT,
+            date TEXT,
+            blast_sent INTEGER DEFAULT 0,
+            blast_sent_at TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS stops (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            route_id INTEGER,
+            stop_number INTEGER,
+            address TEXT,
+            unit TEXT,
+            customer_name TEXT,
+            phone TEXT,
+            tracking TEXT,
+            notes TEXT,
+            dest_lat REAL,
+            dest_lng REAL,
+            driver_lat REAL,
+            driver_lng REAL,
+            status TEXT DEFAULT 'pending',
+            sms_blast_sent INTEGER DEFAULT 0,
+            approach_sms_sent INTEGER DEFAULT 0,
+            token TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS buildings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            address TEXT UNIQUE NOT NULL,
+            access_code TEXT,
+            buzzer_notes TEXT,
+            interior_directions TEXT,
+            access_type TEXT DEFAULT 'code',
+            lat REAL, lng REAL,
+            confirmed_count INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS residents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            address TEXT NOT NULL,
+            unit TEXT NOT NULL,
+            phone TEXT NOT NULL,
+            backup_phone TEXT,
+            drop_spot TEXT,
+            door_notes TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
     ''')
     db.commit()
-
-    # Seed driver
     try:
         db.execute("INSERT INTO drivers (name, phone, company, pin) VALUES (?,?,?,?)",
                    ('Director X', '3135550000', 'SpeedX', '1234'))
         db.commit()
-    except:
-        pass
-
-    # Seed buildings
-    buildings = [
-        ('4500 Cass Ave, Detroit, MI 48201',   '4500#', 'Press 4500 then #', 'Elevator to floor 9, turn right', 'code',      42.3534, -83.0654),
-        ('4701 Chrysler Dr, Detroit, MI 48201', None,   'Buzzer broken — text resident', '3rd floor east wing', 'text_only', 42.3612, -83.0481),
-        ('430 E Warren Ave, Detroit, MI 48201', '7721', 'Press 7721', 'Elevator left of lobby, 2nd floor', 'code',           42.3505, -83.0603),
-        ('4647 Chrysler Dr, Detroit, MI 48201', None,   'Key fob — text resident', 'Unit 102 ground floor left', 'text_only',42.3599, -83.0483),
-        ('3150 Woodward Ave, Detroit, MI 48201','3150', 'Front keypad 3150#', 'Main elevator, floors 3-5 right hall', 'code', 42.3458, -83.0516),
-    ]
-    for b in buildings:
-        try:
-            db.execute("INSERT INTO buildings (address,access_code,buzzer_notes,interior_directions,access_type,lat,lng) VALUES (?,?,?,?,?,?,?)", b)
-            db.commit()
-        except:
-            pass
+    except: pass
     db.close()
 
 # ─── HELPERS ───────────────────────────────────────────────────
 
-# Simple geocode cache — avoids hammering Nominatim
-_geocache = {}
-
 def geocode_address(address):
-    if address in _geocache:
-        return _geocache[address]
+    if address in _geocache: return _geocache[address]
     try:
         geo = Nominatim(user_agent='unit-delivery-app', timeout=8)
         loc = geo.geocode(address)
@@ -168,30 +152,26 @@ def send_sms(to_phone, message):
 
 def miles_away(lat1, lng1, lat2, lng2):
     try:
-        if None in (lat1, lng1, lat2, lng2):
-            return 999
+        if None in (lat1, lng1, lat2, lng2): return 999
         return geodesic((lat1, lng1), (lat2, lng2)).miles
-    except Exception as e:
-        log.warning(f'Distance calc failed: {e}')
-        return 999
-
-def safe_db():
-    """Get DB connection with WAL mode for concurrent access."""
-    os.makedirs('data', exist_ok=True)
-    conn = sqlite3.connect(DB, timeout=10, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute('PRAGMA journal_mode=WAL')
-    conn.execute('PRAGMA synchronous=NORMAL')
-    return conn
+    except: return 999
 
 def get_base_url():
     return request.host_url.rstrip('/')
 
-# ─── DRIVER ────────────────────────────────────────────────────
+def format_phone(phone):
+    digits = ''.join(c for c in str(phone) if c.isdigit())
+    if len(digits) == 10: return f'+1{digits}'
+    if len(digits) == 11 and digits[0] == '1': return f'+{digits}'
+    return phone
+
+# ─── ROUTES ────────────────────────────────────────────────────
 
 @app.route('/')
 def index():
     return render_template('index.html')
+
+# ─── DRIVER AUTH ───────────────────────────────────────────────
 
 @app.route('/driver/login', methods=['GET', 'POST'])
 def driver_login():
@@ -213,224 +193,288 @@ def driver_logout():
     session.clear()
     return redirect(url_for('driver_login'))
 
+# ─── DRIVER DASHBOARD ──────────────────────────────────────────
+
 @app.route('/driver')
 def driver_dashboard():
     if 'driver_id' not in session:
         return redirect(url_for('driver_login'))
     db = get_db()
-    recent = db.execute(
-        "SELECT * FROM deliveries WHERE driver_id=? ORDER BY timestamp DESC LIMIT 15",
-        (session['driver_id'],)
-    ).fetchall()
+    today = datetime.now().strftime('%Y-%m-%d')
+    route = db.execute(
+        "SELECT * FROM routes WHERE driver_id=? AND date=? ORDER BY id DESC LIMIT 1",
+        (session['driver_id'], today)
+    ).fetchone()
+    stops = []
+    if route:
+        stops = db.execute(
+            "SELECT * FROM stops WHERE route_id=? ORDER BY stop_number",
+            (route['id'],)
+        ).fetchall()
     db.close()
-    return render_template('driver_dashboard.html', deliveries=recent, driver=session['driver_name'])
+    return render_template('driver_dashboard.html', route=route, stops=stops, driver=session['driver_name'])
 
-@app.route('/driver/lookup', methods=['GET', 'POST'])
-def driver_lookup():
+# ─── ROUTE IMPORT ──────────────────────────────────────────────
+
+@app.route('/driver/route/new', methods=['GET', 'POST'])
+def route_new():
     if 'driver_id' not in session:
         return redirect(url_for('driver_login'))
 
-    building = None
-    resident = None
-    error = None
-    address = ''
-    unit = ''
-    delivery_id = None
-    sms_sent = False
-
     if request.method == 'POST':
-        address  = request.form.get('address', '').strip()
-        unit     = request.form.get('unit', '').strip()
-        tracking = request.form.get('tracking', '').strip()
         db = get_db()
+        today = datetime.now().strftime('%Y-%m-%d')
+        route_name = request.form.get('route_name', f'Route {today}')
 
-        street = address.split(',')[0].strip()
-
-        building = db.execute("SELECT * FROM buildings WHERE address LIKE ?", (f'%{street}%',)).fetchone()
-
-        if unit:
-            resident = db.execute(
-                "SELECT * FROM residents WHERE address LIKE ? AND unit=?",
-                (f'%{street}%', unit)
-            ).fetchone()
-
-        # Geocode destination
-        dest_lat, dest_lng = None, None
-        if building and building['lat']:
-            dest_lat, dest_lng = building['lat'], building['lng']
-        else:
-            dest_lat, dest_lng = geocode_address(address)
-            if building and dest_lat:
-                db.execute("UPDATE buildings SET lat=?, lng=? WHERE id=?",
-                           (dest_lat, dest_lng, building['id']))
-                db.commit()
-
-        # Create delivery record
+        # Create route
         db.execute(
-            "INSERT INTO deliveries (driver_id,driver_name,address,unit,tracking,dest_lat,dest_lng,status) VALUES (?,?,?,?,?,?,?,?)",
-            (session['driver_id'], session['driver_name'], address, unit, tracking, dest_lat, dest_lng, 'en_route')
+            "INSERT INTO routes (driver_id, driver_name, name, date) VALUES (?,?,?,?)",
+            (session['driver_id'], session['driver_name'], route_name, today)
         )
         db.commit()
-        delivery_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        route_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        # Parse CSV file if uploaded
+        csv_file = request.files.get('csv_file')
+        stops_added = 0
+
+        if csv_file and csv_file.filename:
+            content = csv_file.read().decode('utf-8', errors='ignore')
+            reader = csv.DictReader(io.StringIO(content))
+            for row in reader:
+                stop_num = row.get('Stop', stops_added + 1)
+                raw_addr = row.get('Address', '').strip()
+                city     = row.get('City', '').strip()
+                state    = row.get('State', '').strip()
+                zipcode  = row.get('ZIP', '').strip()
+                name     = row.get('Recipient', '').strip()
+                tracking = row.get('Tracking Number', '').strip()
+
+                if not raw_addr: continue
+
+                # Parse unit from address
+                unit = ''
+                if '#' in raw_addr:
+                    parts = raw_addr.split('#')
+                    raw_addr = parts[0].strip()
+                    unit = parts[1].strip()
+
+                full_addr = f"{raw_addr}, {city}, {state} {zipcode}".strip(', ')
+
+                # Try to match existing resident for phone
+                street = raw_addr.split(',')[0].strip()
+                resident = db.execute(
+                    "SELECT * FROM residents WHERE address LIKE ?",
+                    (f'%{street}%',)
+                ).fetchone()
+                phone = resident['phone'] if resident else ''
+
+                token = secrets.token_urlsafe(12)
+                db.execute(
+                    "INSERT INTO stops (route_id, stop_number, address, unit, customer_name, phone, tracking, token) VALUES (?,?,?,?,?,?,?,?)",
+                    (route_id, stop_num, full_addr, unit, name, phone, tracking, token)
+                )
+                stops_added += 1
+
+        db.commit()
         db.close()
 
-        if not building and not resident:
-            error = 'Building not in database yet. Add it below.'
+        if stops_added == 0:
+            # No CSV — go to manual stop entry
+            return redirect(url_for('route_stops', route_id=route_id))
 
-    return render_template('driver_lookup.html',
-                           building=building, resident=resident,
-                           address=address, unit=unit,
-                           sms_sent=sms_sent, error=error,
-                           delivery_id=delivery_id)
+        return redirect(url_for('route_detail', route_id=route_id))
 
-# ─── LOCATION API (called from driver browser JS) ─────────────
+    return render_template('route_new.html')
+
+@app.route('/driver/route/<int:route_id>')
+def route_detail(route_id):
+    if 'driver_id' not in session:
+        return redirect(url_for('driver_login'))
+    db = get_db()
+    route = db.execute("SELECT * FROM routes WHERE id=?", (route_id,)).fetchone()
+    stops = db.execute("SELECT * FROM stops WHERE route_id=? ORDER BY stop_number", (route_id,)).fetchall()
+    db.close()
+    total    = len(stops)
+    with_phone = sum(1 for s in stops if s['phone'])
+    return render_template('route_detail.html', route=route, stops=stops, total=total, with_phone=with_phone)
+
+@app.route('/driver/route/<int:route_id>/stop/<int:stop_id>/phone', methods=['POST'])
+def update_stop_phone(route_id, stop_id):
+    if 'driver_id' not in session:
+        return jsonify({'error': 'unauthorized'}), 401
+    phone = format_phone(request.form.get('phone', '').strip())
+    db = get_db()
+    db.execute("UPDATE stops SET phone=? WHERE id=? AND route_id=?", (phone, stop_id, route_id))
+    db.commit()
+    db.close()
+    return jsonify({'ok': True, 'phone': phone})
+
+@app.route('/driver/route/<int:route_id>/blast', methods=['POST'])
+def route_blast(route_id):
+    if 'driver_id' not in session:
+        return redirect(url_for('driver_login'))
+    db = get_db()
+    route = db.execute("SELECT * FROM routes WHERE id=?", (route_id,)).fetchone()
+    stops = db.execute(
+        "SELECT * FROM stops WHERE route_id=? AND phone != '' AND phone IS NOT NULL ORDER BY stop_number",
+        (route_id,)
+    ).fetchall()
+
+    sent = 0
+    failed = 0
+    for stop in stops:
+        if stop['sms_blast_sent']: continue
+        track_url = f"{get_base_url()}/track/{stop['token']}"
+        name_part = f"Hi {stop['customer_name'].split()[0]}! " if stop['customer_name'] else "Hi! "
+        msg = (f"{name_part}Your SpeedX delivery is out today. "
+               f"Your driver will notify you when they're heading to your stop.\n"
+               f"Track here: {track_url}")
+        ok, _ = send_sms(format_phone(stop['phone']), msg)
+        if ok:
+            db.execute("UPDATE stops SET sms_blast_sent=1 WHERE id=?", (stop['id'],))
+            sent += 1
+        else:
+            failed += 1
+
+    db.execute("UPDATE routes SET blast_sent=1, blast_sent_at=? WHERE id=?",
+               (datetime.now().isoformat(), route_id))
+    db.commit()
+    db.close()
+    return redirect(url_for('route_detail', route_id=route_id, blast_sent=sent, blast_failed=failed))
+
+# ─── PER-STOP DELIVERY ─────────────────────────────────────────
+
+@app.route('/driver/stop/<int:stop_id>/start', methods=['POST'])
+def stop_start(stop_id):
+    if 'driver_id' not in session:
+        return redirect(url_for('driver_login'))
+    db = get_db()
+    stop = db.execute("SELECT * FROM stops WHERE id=?", (stop_id,)).fetchone()
+    if not stop:
+        db.close()
+        return redirect(url_for('driver_dashboard'))
+
+    # Geocode if needed
+    if not stop['dest_lat']:
+        lat, lng = geocode_address(stop['address'])
+        db.execute("UPDATE stops SET dest_lat=?, dest_lng=?, status='en_route' WHERE id=?",
+                   (lat, lng, stop_id))
+    else:
+        db.execute("UPDATE stops SET status='en_route' WHERE id=?", (stop_id,))
+
+    db.commit()
+    db.close()
+    return redirect(url_for('stop_active', stop_id=stop_id))
+
+@app.route('/driver/stop/<int:stop_id>')
+def stop_active(stop_id):
+    if 'driver_id' not in session:
+        return redirect(url_for('driver_login'))
+    db = get_db()
+    stop = db.execute("SELECT * FROM stops WHERE id=?", (stop_id,)).fetchone()
+    db.close()
+    if not stop: return redirect(url_for('driver_dashboard'))
+    return render_template('stop_active.html', stop=stop)
+
+@app.route('/driver/stop/<int:stop_id>/delivered', methods=['POST'])
+def stop_delivered(stop_id):
+    if 'driver_id' not in session:
+        return redirect(url_for('driver_login'))
+    db = get_db()
+    stop = db.execute("SELECT * FROM stops WHERE id=?", (stop_id,)).fetchone()
+    db.execute("UPDATE stops SET status='delivered' WHERE id=?", (stop_id,))
+    db.commit()
+    # Redirect back to route
+    route_id = stop['route_id'] if stop else None
+    db.close()
+    return redirect(url_for('route_detail', route_id=route_id) if route_id else url_for('driver_dashboard'))
+
+@app.route('/driver/stop/<int:stop_id>/failed', methods=['POST'])
+def stop_failed(stop_id):
+    if 'driver_id' not in session:
+        return redirect(url_for('driver_login'))
+    db = get_db()
+    stop = db.execute("SELECT * FROM stops WHERE id=?", (stop_id,)).fetchone()
+    db.execute("UPDATE stops SET status='failed' WHERE id=?", (stop_id,))
+    db.commit()
+    route_id = stop['route_id'] if stop else None
+    db.close()
+    return redirect(url_for('route_detail', route_id=route_id) if route_id else url_for('driver_dashboard'))
+
+# ─── GPS API ───────────────────────────────────────────────────
 
 @app.route('/api/location', methods=['POST'])
 def update_location():
-    """Driver browser posts GPS coords every 10 seconds."""
     if 'driver_id' not in session:
         return jsonify({'error': 'unauthorized'}), 401
-
     data = request.get_json()
-    lat = data.get('lat')
-    lng = data.get('lng')
-    delivery_id = data.get('delivery_id')
-
+    lat  = data.get('lat')
+    lng  = data.get('lng')
+    stop_id = data.get('stop_id')
     if not lat or not lng:
         return jsonify({'error': 'no coords'}), 400
 
     db = get_db()
-
-    # Update driver location
     db.execute("UPDATE drivers SET current_lat=?, current_lng=?, last_seen=? WHERE id=?",
                (lat, lng, datetime.now().isoformat(), session['driver_id']))
 
-    result = {'status': 'ok', 'sms_triggered': False}
+    result = {'status': 'ok', 'sms_triggered': False, 'distance_miles': None}
 
-    if delivery_id:
-        # Update delivery driver location
-        db.execute("UPDATE deliveries SET driver_lat=?, driver_lng=? WHERE id=?",
-                   (lat, lng, delivery_id))
+    if stop_id:
+        db.execute("UPDATE stops SET driver_lat=?, driver_lng=? WHERE id=?", (lat, lng, stop_id))
+        stop = db.execute("SELECT * FROM stops WHERE id=?", (stop_id,)).fetchone()
 
-        delivery = db.execute("SELECT * FROM deliveries WHERE id=?", (delivery_id,)).fetchone()
+        if stop and stop['dest_lat'] and not stop['approach_sms_sent']:
+            distance = miles_away(lat, lng, stop['dest_lat'], stop['dest_lng'])
+            result['distance_miles'] = round(distance, 2)
 
-        if delivery and delivery['dest_lat'] and not delivery['approach_sms_sent']:
-            distance = miles_away(lat, lng, delivery['dest_lat'], delivery['dest_lng'])
-
-            if distance <= APPROACH_RADIUS_MILES:
-                # Find resident
-                street = delivery['address'].split(',')[0].strip()
-                resident = db.execute(
-                    "SELECT * FROM residents WHERE address LIKE ? AND unit=?",
-                    (f'%{street}%', delivery['unit'] or '')
-                ).fetchone()
-
-                if resident and resident['phone']:
-                    mins = max(1, int(distance * 3))  # rough ETA
-                    track_url = f"{get_base_url()}/track/{delivery_id}"
-                    msg = (f"Hi! Your UNIT driver is {mins} min away with your package"
-                           f"{' for unit ' + delivery['unit'] if delivery['unit'] else ''}.\n"
-                           f"Track live: {track_url}\n"
-                           f"Drop spot: {resident['drop_spot'] or 'front door'} if no answer.")
-                    ok, _ = send_sms(resident['phone'], msg)
-                    if ok:
-                        db.execute("UPDATE deliveries SET approach_sms_sent=1, sms_sent=1 WHERE id=?",
-                                   (delivery_id,))
-                        result['sms_triggered'] = True
-                        result['distance_miles'] = round(distance, 2)
-
-                # Even if no resident — mark so we don't keep checking
-                db.execute("UPDATE deliveries SET approach_sms_sent=1 WHERE id=?", (delivery_id,))
-
-        result['distance_miles'] = round(
-            miles_away(lat, lng, delivery['dest_lat'], delivery['dest_lng']), 2
-        ) if delivery and delivery['dest_lat'] else None
+            if distance <= APPROACH_RADIUS_MILES and stop['phone']:
+                track_url = f"{get_base_url()}/track/{stop['token']}"
+                mins = max(1, int(distance * 3))
+                name_part = stop['customer_name'].split()[0] if stop['customer_name'] else 'there'
+                msg = (f"Hey {name_part}! Your SpeedX driver is {mins} min away"
+                       f"{' — Unit ' + stop['unit'] if stop['unit'] else ''}.\n"
+                       f"Track live: {track_url}")
+                ok, _ = send_sms(format_phone(stop['phone']), msg)
+                if ok:
+                    db.execute("UPDATE stops SET approach_sms_sent=1 WHERE id=?", (stop_id,))
+                    result['sms_triggered'] = True
 
     db.commit()
     db.close()
     return jsonify(result)
 
-# ─── LIVE TRACKING PAGE (for residents) ───────────────────────
+# ─── TRACKING PAGE (for customers) ─────────────────────────────
 
-@app.route('/track/<int:delivery_id>')
-def track(delivery_id):
+@app.route('/track/<token>')
+def track(token):
     db = get_db()
-    delivery = db.execute("SELECT * FROM deliveries WHERE id=?", (delivery_id,)).fetchone()
+    stop = db.execute("SELECT * FROM stops WHERE token=?", (token,)).fetchone()
     db.close()
-    if not delivery:
-        return "Delivery not found", 404
-    return render_template('track.html', delivery=delivery)
+    if not stop: return "Delivery not found", 404
+    return render_template('track.html', stop=stop)
 
-@app.route('/api/track/<int:delivery_id>')
-def track_api(delivery_id):
-    """Polling endpoint — resident page calls this every 5s."""
+@app.route('/api/track/<token>')
+def track_api(token):
     db = get_db()
-    delivery = db.execute("SELECT * FROM deliveries WHERE id=?", (delivery_id,)).fetchone()
+    stop = db.execute("SELECT * FROM stops WHERE token=?", (token,)).fetchone()
     db.close()
-    if not delivery:
-        return jsonify({'error': 'not found'}), 404
-
+    if not stop: return jsonify({'error': 'not found'}), 404
     distance = None
-    if delivery['driver_lat'] and delivery['dest_lat']:
-        distance = round(miles_away(
-            delivery['driver_lat'], delivery['driver_lng'],
-            delivery['dest_lat'],   delivery['dest_lng']
-        ), 2)
-
+    if stop['driver_lat'] and stop['dest_lat']:
+        distance = round(miles_away(stop['driver_lat'], stop['driver_lng'],
+                                    stop['dest_lat'], stop['dest_lng']), 2)
     return jsonify({
-        'driver_lat':  delivery['driver_lat'],
-        'driver_lng':  delivery['driver_lng'],
-        'dest_lat':    delivery['dest_lat'],
-        'dest_lng':    delivery['dest_lng'],
-        'status':      delivery['status'],
-        'address':     delivery['address'],
-        'unit':        delivery['unit'],
+        'driver_lat': stop['driver_lat'],
+        'driver_lng': stop['driver_lng'],
+        'dest_lat':   stop['dest_lat'],
+        'dest_lng':   stop['dest_lng'],
+        'status':     stop['status'],
+        'address':    stop['address'],
+        'unit':       stop['unit'],
         'distance_miles': distance
     })
-
-# ─── DELIVERY ACTIONS ──────────────────────────────────────────
-
-@app.route('/driver/confirm/<int:delivery_id>')
-def confirm_delivery(delivery_id):
-    db = get_db()
-    db.execute("UPDATE deliveries SET status='delivered', delivered_at=? WHERE id=?",
-               (datetime.now().isoformat(), delivery_id))
-    db.commit()
-    db.close()
-    return redirect(url_for('driver_dashboard'))
-
-@app.route('/driver/failed/<int:delivery_id>')
-def failed_delivery(delivery_id):
-    db = get_db()
-    db.execute("UPDATE deliveries SET status='failed' WHERE id=?", (delivery_id,))
-    db.commit()
-    db.close()
-    return redirect(url_for('driver_dashboard'))
-
-@app.route('/driver/add_building', methods=['POST'])
-def add_building():
-    if 'driver_id' not in session:
-        return redirect(url_for('driver_login'))
-    address      = request.form.get('address')
-    access_code  = request.form.get('access_code')
-    buzzer_notes = request.form.get('buzzer_notes')
-    interior     = request.form.get('interior_directions')
-    access_type  = request.form.get('access_type', 'code')
-    lat, lng     = geocode_address(address)
-    db = get_db()
-    try:
-        db.execute(
-            "INSERT INTO buildings (address,access_code,buzzer_notes,interior_directions,access_type,lat,lng) VALUES (?,?,?,?,?,?,?)",
-            (address, access_code, buzzer_notes, interior, access_type, lat, lng)
-        )
-    except:
-        db.execute(
-            "UPDATE buildings SET access_code=?,buzzer_notes=?,interior_directions=?,access_type=?,confirmed_count=confirmed_count+1 WHERE address LIKE ?",
-            (access_code, buzzer_notes, interior, access_type, f'%{address.split(",")[0].strip()}%')
-        )
-    db.commit()
-    db.close()
-    return redirect(url_for('driver_lookup'))
 
 # ─── RESIDENT ──────────────────────────────────────────────────
 
@@ -455,24 +499,23 @@ def resident_portal():
 @app.route('/admin')
 def admin():
     db = get_db()
-    buildings  = db.execute("SELECT * FROM buildings ORDER BY confirmed_count DESC").fetchall()
-    deliveries = db.execute("SELECT * FROM deliveries ORDER BY timestamp DESC LIMIT 50").fetchall()
-    residents  = db.execute("SELECT * FROM residents ORDER BY created_at DESC").fetchall()
+    routes    = db.execute("SELECT * FROM routes ORDER BY created_at DESC LIMIT 20").fetchall()
+    buildings = db.execute("SELECT * FROM buildings ORDER BY confirmed_count DESC").fetchall()
     stats = {
-        'total':     db.execute("SELECT COUNT(*) FROM deliveries").fetchone()[0],
-        'delivered': db.execute("SELECT COUNT(*) FROM deliveries WHERE status='delivered'").fetchone()[0],
-        'failed':    db.execute("SELECT COUNT(*) FROM deliveries WHERE status='failed'").fetchone()[0],
-        'sms':       db.execute("SELECT COUNT(*) FROM deliveries WHERE sms_sent=1").fetchone()[0],
-        'buildings': db.execute("SELECT COUNT(*) FROM buildings").fetchone()[0],
-        'residents': db.execute("SELECT COUNT(*) FROM residents").fetchone()[0],
+        'total_deliveries': db.execute("SELECT COUNT(*) FROM stops").fetchone()[0],
+        'delivered':        db.execute("SELECT COUNT(*) FROM stops WHERE status='delivered'").fetchone()[0],
+        'failed':           db.execute("SELECT COUNT(*) FROM stops WHERE status='failed'").fetchone()[0],
+        'sms_sent':         db.execute("SELECT COUNT(*) FROM stops WHERE approach_sms_sent=1").fetchone()[0],
+        'buildings':        db.execute("SELECT COUNT(*) FROM buildings").fetchone()[0],
+        'residents':        db.execute("SELECT COUNT(*) FROM residents").fetchone()[0],
     }
     db.close()
-    return render_template('admin.html', buildings=buildings, deliveries=deliveries,
-                           residents=residents, stats=stats)
+    return render_template('admin.html', routes=routes, buildings=buildings, stats=stats)
+
+# ─── HEALTH ────────────────────────────────────────────────────
 
 @app.route('/health')
 def health():
-    """Railway/uptime monitoring health check."""
     try:
         db = get_db()
         db.execute('SELECT 1').fetchone()
@@ -481,8 +524,10 @@ def health():
     except Exception as e:
         return jsonify({'status': 'error', 'msg': str(e)}), 500
 
-if __name__ == '__main__':
+with app.app_context():
     init_db()
+
+if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5050))
     debug = os.environ.get('FLASK_ENV', 'development') != 'production'
     app.run(debug=debug, host='0.0.0.0', port=port)

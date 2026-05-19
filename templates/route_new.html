@@ -1,0 +1,58 @@
+{% extends 'base.html' %}
+{% block title %}UNIT — Import Route{% endblock %}
+{% block content %}
+<div class="container-fluid p-4 pb-nav">
+
+  <div class="d-flex align-items-center mb-4">
+    <a href="/driver" class="text-decoration-none me-3" style="color:#555;">
+      <i class="fas fa-chevron-left"></i>
+    </a>
+    <div class="unit-logo" style="font-size:1.4rem;">UNIT<span>.</span></div>
+  </div>
+
+  <h5 class="fw-bold mb-1">Import Route</h5>
+  <p class="text-secondary small mb-4">Upload your Speed X CSV to load all stops at once.</p>
+
+  <form method="POST" enctype="multipart/form-data">
+    <div class="card p-4 mb-3">
+      <div class="mb-3">
+        <label>Route Name</label>
+        <input type="text" name="route_name" class="form-control"
+               placeholder="Route B — DTW — May 19" value="Route — {{ today }}">
+      </div>
+      <div class="mb-3">
+        <label>Speed X CSV File</label>
+        <input type="file" name="csv_file" class="form-control" accept=".csv">
+        <small class="text-muted">The file Speed X gives you with your stops</small>
+      </div>
+    </div>
+
+    <button class="btn btn-primary w-100 py-3 fs-6">
+      <i class="fas fa-upload me-2"></i>Load Route
+    </button>
+  </form>
+
+  <div class="text-center mt-4">
+    <small class="text-muted">No CSV? <a href="/driver/route/manual" style="color:#00ff88;">Add stops manually →</a></small>
+  </div>
+
+</div>
+
+<div class="nav-bottom">
+  <div class="d-flex justify-content-around">
+    <a href="/driver"><i class="fas fa-home"></i>Home</a>
+    <a href="/driver/route/new" class="active"><i class="fas fa-upload"></i>New Route</a>
+    <a href="/admin"><i class="fas fa-chart-bar"></i>Admin</a>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+  // Pre-fill today's date in route name
+  const today = new Date().toLocaleDateString('en-US', {month:'short', day:'numeric'});
+  const nameInput = document.querySelector('[name="route_name"]');
+  if (nameInput && nameInput.value.includes('{{ today }}')) {
+    nameInput.value = `Route — ${today}`;
+  }
+</script>
+{% endblock %}
