@@ -138,7 +138,28 @@ def geocode_address(address):
     _geocache[address] = (None, None)
     return None, None
 
+TEXTBELT_KEY = os.environ.get('TEXTBELT_KEY', '')
+
 def send_sms(to_phone, message):
+    # Use Textbelt if key provided (no A2P registration needed)
+    if TEXTBELT_KEY:
+        try:
+            resp = requests.post('https://textbelt.com/text', {
+                'phone': to_phone,
+                'message': message,
+                'key': TEXTBELT_KEY
+            }, timeout=10).json()
+            if resp.get('success'):
+                log.info(f'Textbelt SMS sent to {to_phone}')
+                return True, 'textbelt'
+            else:
+                log.error(f'Textbelt failed: {resp}')
+                return False, resp.get('error', 'unknown')
+        except Exception as e:
+            log.error(f'Textbelt error: {e}')
+            return False, str(e)
+
+    # Fallback to Twilio
     if not TWILIO_SID or not TWILIO_TOKEN:
         log.info(f'[SMS MOCK] To: {to_phone} | {message[:80]}')
         return True, 'mock'
@@ -657,6 +678,21 @@ def admin():
     }
     db.close()
     return render_template('admin.html', routes=routes, buildings=buildings, stats=stats)
+
+# ─── TEST SMS ─────────────────────────────────────────────────
+
+@app.route('/admin/test-sms', methods=['POST'])
+def admin_test_sms():
+    if not session.get('admin'):
+        return jsonify({'error': 'Unauthorized'}), 401
+    data = request.get_json()
+    phone = format_phone(data.get('phone', '').strip())
+    if not phone:
+        return jsonify({'success': False, 'error': 'No phone number provided'})
+    msg = '🚚 UNIT Test — SMS delivery confirmed. Your system is working correctly.'
+    ok, detail = send_sms(phone, msg)
+    provider = 'textbelt' if TEXTBELT_KEY else ('twilio' if TWILIO_SID else 'mock')
+    return jsonify({'success': ok, 'provider': provider, 'detail': str(detail)})
 
 # ─── HEALTH ────────────────────────────────────────────────────
 

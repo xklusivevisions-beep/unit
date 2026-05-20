@@ -48,6 +48,20 @@
     </div>
   </div>
 
+  <!-- Test SMS -->
+  <h6 class="text-secondary mb-3" style="letter-spacing:0.1em;font-size:0.75rem;">SMS TEST</h6>
+  <div class="card p-3 mb-4" style="border-color:#ffaa0033;">
+    <div class="fw-bold mb-1" style="font-size:0.85rem;">Send a test text</div>
+    <small class="text-secondary d-block mb-3">Confirms your SMS provider is live before a real run.</small>
+    <div class="d-flex gap-2">
+      <input id="test-sms-phone" type="tel" class="form-control" placeholder="+13135550000" style="background:#111;border-color:#333;color:#fff;border-radius:10px;">
+      <button id="test-sms-btn" class="btn btn-sm" style="border:1px solid #ffaa00;color:#ffaa00;border-radius:10px;padding:6px 16px;white-space:nowrap;">
+        Send Test
+      </button>
+    </div>
+    <div id="test-sms-result" style="display:none;margin-top:10px;padding:8px 12px;border-radius:8px;font-size:0.85rem;font-weight:600;"></div>
+  </div>
+
   <!-- Buildings Database -->
   <h6 class="text-secondary mb-3" style="letter-spacing:0.1em;font-size:0.75rem;">BUILDINGS DATABASE</h6>
   {% for b in buildings %}
@@ -101,4 +115,50 @@
     </a>
   </div>
 </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.getElementById('test-sms-btn').addEventListener('click', function() {
+  const phone = document.getElementById('test-sms-phone').value.trim();
+  const result = document.getElementById('test-sms-result');
+  if (!phone) {
+    result.style.display = 'block';
+    result.style.background = '#ff333322';
+    result.style.color = '#ff6666';
+    result.textContent = 'Enter a phone number first.';
+    return;
+  }
+  this.textContent = 'Sending...';
+  this.disabled = true;
+  fetch('/admin/test-sms', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({phone})
+  })
+  .then(r => r.json())
+  .then(data => {
+    result.style.display = 'block';
+    if (data.success) {
+      result.style.background = '#00ff8822';
+      result.style.color = '#00ff88';
+      result.textContent = `✓ Sent via ${data.provider} — check your phone`;
+    } else {
+      result.style.background = '#ff333322';
+      result.style.color = '#ff6666';
+      result.textContent = `✕ Failed (${data.provider}): ${data.detail || data.error}`;
+    }
+    document.getElementById('test-sms-btn').textContent = 'Send Test';
+    document.getElementById('test-sms-btn').disabled = false;
+  })
+  .catch(() => {
+    result.style.display = 'block';
+    result.style.background = '#ff333322';
+    result.style.color = '#ff6666';
+    result.textContent = 'Request failed — check server.';
+    document.getElementById('test-sms-btn').textContent = 'Send Test';
+    document.getElementById('test-sms-btn').disabled = false;
+  });
+});
+</script>
 {% endblock %}
