@@ -644,7 +644,7 @@ def resident_portal():
 
 # ─── ADMIN ─────────────────────────────────────────────────────
 
-ADMIN_PIN = os.environ.get('ADMIN_PIN', '9999')
+ADMIN_PIN = os.environ.get('ADMIN_PIN', '8798')
 
 @app.route('/admin/login', methods=['GET', 'POST'])
 def admin_login():
