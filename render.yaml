@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: unit
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --workers 4 --timeout 120 --bind 0.0.0.0:$PORT
+    envVars:
+      - key: FLASK_ENV
+        value: production
+      - key: SECRET_KEY
+        generateValue: true
+      - key: ADMIN_PIN
+        value: 8798
+      - key: TWILIO_SID
+        sync: false
+      - key: TWILIO_TOKEN
+        sync: false
+      - key: TWILIO_PHONE
+        sync: false
+      - key: TEXTBELT_KEY
+        sync: false
+    disk:
+      name: unit-data
+      mountPath: /opt/render/project/src/data
+      sizeGB: 1
