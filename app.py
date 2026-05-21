@@ -10,8 +10,7 @@ DATABASE_URL = os.environ.get('DATABASE_URL', '')
 USE_PG = bool(DATABASE_URL)
 
 if USE_PG:
-    import psycopg2
-    import psycopg2.extras
+    import pg8000.dbapi as pg8000
 
 class DBWrapper:
     """Normalizes sqlite3 and psycopg2 so the rest of the app is unchanged."""
@@ -50,15 +49,21 @@ class DBWrapper:
             self._conn.executescript(script)
         return self
 
+    def _to_dict(self, row):
+        """Convert pg8000 tuple row to dict using cursor description."""
+        if row is None: return None
+        cols = [d[0] for d in self._cur.description]
+        return dict(zip(cols, row))
+
     def fetchone(self):
         row = self._cur.fetchone()
         if row is None: return None
-        if self._pg: return dict(row)
+        if self._pg: return self._to_dict(row)
         return row
 
     def fetchall(self):
         rows = self._cur.fetchall() or []
-        if self._pg: return [dict(r) for r in rows]
+        if self._pg: return [self._to_dict(r) for r in rows]
         return rows
 
     def __getitem__(self, key):
@@ -107,8 +112,17 @@ _geocache = {}
 
 def get_db():
     if USE_PG:
+        import urllib.parse
         url = DATABASE_URL.replace('postgres://', 'postgresql://', 1)
-        conn = psycopg2.connect(url, cursor_factory=psycopg2.extras.RealDictCursor)
+        p = urllib.parse.urlparse(url)
+        conn = pg8000.connect(
+            host=p.hostname,
+            port=p.port or 5432,
+            database=p.path.lstrip('/'),
+            user=p.username,
+            password=p.password,
+            ssl_context=True
+        )
         conn.autocommit = False
         return DBWrapper(conn, pg=True)
     else:
