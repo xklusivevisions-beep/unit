@@ -5,6 +5,73 @@ from geopy.geocoders import Nominatim
 import sqlite3, os, json, requests, logging, traceback, csv, io, secrets
 from twilio.rest import Client
 
+# ─── DATABASE ABSTRACTION (SQLite local / PostgreSQL on Render) ─
+DATABASE_URL = os.environ.get('DATABASE_URL', '')
+USE_PG = bool(DATABASE_URL)
+
+if USE_PG:
+    import psycopg2
+    import psycopg2.extras
+
+class DBWrapper:
+    """Normalizes sqlite3 and psycopg2 so the rest of the app is unchanged."""
+    def __init__(self, conn, pg=False):
+        self._conn = conn
+        self._pg   = pg
+        self._cur  = conn.cursor()
+        self._last = None
+
+    def _fix(self, q):
+        """Translate SQLite ? placeholders and functions to PostgreSQL."""
+        if not self._pg: return q
+        q = q.replace('?', '%s')
+        q = q.replace('last_insert_rowid()', 'lastval()')
+        q = q.replace('INTEGER PRIMARY KEY AUTOINCREMENT', 'SERIAL PRIMARY KEY')
+        q = q.replace('rowid', 'id')
+        return q
+
+    def execute(self, query, params=None):
+        self._cur.execute(self._fix(query), params or ())
+        self._last = self._cur
+        return self
+
+    def executescript(self, script):
+        """Execute multiple statements — splits on ; for PostgreSQL."""
+        if self._pg:
+            for stmt in script.split(';'):
+                stmt = stmt.strip()
+                if not stmt: continue
+                # Skip SQLite-only pragmas
+                if stmt.upper().startswith('PRAGMA'): continue
+                try:
+                    self._cur.execute(self._fix(stmt))
+                except Exception: pass
+        else:
+            self._conn.executescript(script)
+        return self
+
+    def fetchone(self):
+        row = self._cur.fetchone()
+        if row is None: return None
+        if self._pg: return dict(row)
+        return row
+
+    def fetchall(self):
+        rows = self._cur.fetchall() or []
+        if self._pg: return [dict(r) for r in rows]
+        return rows
+
+    def __getitem__(self, key):
+        """Allow row['col'] on last fetchone result (compatibility)."""
+        return self._cur.fetchone()[key]
+
+    def commit(self):
+        self._conn.commit()
+
+    def close(self):
+        try: self._conn.close()
+        except: pass
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 log = logging.getLogger(__name__)
 
@@ -32,22 +99,25 @@ DB = 'data/unit.db'
 TWILIO_SID   = os.environ.get('TWILIO_SID', '')
 TWILIO_TOKEN = os.environ.get('TWILIO_TOKEN', '')
 TWILIO_PHONE = os.environ.get('TWILIO_PHONE', '')
-APPROACH_RADIUS_MILES = 0.5      # SMS to customer
-GEOFENCE_RADIUS_MILES  = 0.028   # ~150 ft — "you're at the stop"
+APPROACH_RADIUS_MILES = 0.5
+GEOFENCE_RADIUS_MILES  = 0.028
 _geocache = {}
 
 # ─── DB ────────────────────────────────────────────────────────
 
-def safe_db():
-    os.makedirs('data', exist_ok=True)
-    conn = sqlite3.connect(DB, timeout=10, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute('PRAGMA journal_mode=WAL')
-    conn.execute('PRAGMA synchronous=NORMAL')
-    return conn
-
 def get_db():
-    return safe_db()
+    if USE_PG:
+        url = DATABASE_URL.replace('postgres://', 'postgresql://', 1)
+        conn = psycopg2.connect(url, cursor_factory=psycopg2.extras.RealDictCursor)
+        conn.autocommit = False
+        return DBWrapper(conn, pg=True)
+    else:
+        os.makedirs('data', exist_ok=True)
+        conn = sqlite3.connect(DB, timeout=10, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute('PRAGMA journal_mode=WAL')
+        conn.execute('PRAGMA synchronous=NORMAL')
+        return DBWrapper(conn, pg=False)
 
 def init_db():
     db = get_db()
@@ -271,12 +341,19 @@ def route_new():
         route_name = request.form.get('route_name', f'Route {today}')
 
         # Create route
-        db.execute(
-            "INSERT INTO routes (driver_id, driver_name, name, date) VALUES (?,?,?,?)",
-            (session['driver_id'], session['driver_name'], route_name, today)
-        )
+        if USE_PG:
+            route_id = db.execute(
+                "INSERT INTO routes (driver_id, driver_name, name, date) VALUES (%s,%s,%s,%s) RETURNING id",
+                (session['driver_id'], session['driver_name'], route_name, today)
+            ).fetchone()['id']
+        else:
+            db.execute(
+                "INSERT INTO routes (driver_id, driver_name, name, date) VALUES (?,?,?,?)",
+                (session['driver_id'], session['driver_name'], route_name, today)
+            )
+            db.commit()
+            route_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
         db.commit()
-        route_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
 
         # Parse CSV file if uploaded
         csv_file = request.files.get('csv_file')
@@ -369,12 +446,19 @@ def route_manual():
         db = get_db()
         today = datetime.now().strftime('%Y-%m-%d')
         route_name = request.form.get('route_name', f'Route {today}')
-        db.execute(
-            "INSERT INTO routes (driver_id, driver_name, name, date) VALUES (?,?,?,?)",
-            (session['driver_id'], session['driver_name'], route_name, today)
-        )
+        if USE_PG:
+            route_id = db.execute(
+                "INSERT INTO routes (driver_id, driver_name, name, date) VALUES (%s,%s,%s,%s) RETURNING id",
+                (session['driver_id'], session['driver_name'], route_name, today)
+            ).fetchone()['id']
+        else:
+            db.execute(
+                "INSERT INTO routes (driver_id, driver_name, name, date) VALUES (?,?,?,?)",
+                (session['driver_id'], session['driver_name'], route_name, today)
+            )
+            db.commit()
+            route_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
         db.commit()
-        route_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
 
         addresses = request.form.getlist('address')
         phones    = request.form.getlist('phone')
