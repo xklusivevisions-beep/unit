@@ -69,7 +69,8 @@
         </div>
         <div class="text-end ms-2">
           {% if stop.status == 'pending' %}
-            <form method="POST" action="/driver/stop/{{ stop.id }}/start" style="display:inline;">
+            <form method="POST" action="/driver/stop/{{ stop.id }}/start" style="display:inline;"
+              onsubmit="openMaps('{{ stop.address | replace("'", "") }}')">
               <button class="btn btn-sm fw-bold" style="background:#00ff88;color:#000;border-radius:10px;min-height:36px;padding:4px 12px;">
                 <i class="fas fa-play me-1"></i>Go
               </button>
@@ -108,4 +109,19 @@
     <a href="/account"><i class="fas fa-user"></i>Account</a>
   </div>
 </div>
+
+{% block scripts %}
+<script>
+function openMaps(address) {
+  const encoded = encodeURIComponent(address);
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+  if (isIOS) {
+    // Apple Maps with driving directions
+    window.location.href = 'maps://?daddr=' + encoded + '&dirflg=d';
+  } else {
+    window.open('https://www.google.com/maps/dir/?api=1&destination=' + encoded + '&travelmode=driving', '_blank');
+  }
+}
+</script>
+{% endblock %}
 {% endblock %}
