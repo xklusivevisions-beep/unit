@@ -1,5 +1,29 @@
 {% extends 'base.html' %}
 {% block title %}UNIT — Track Your Delivery{% endblock %}
+
+{% block extra_css %}
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<style>
+  #track-map {
+    height: 280px;
+    border-radius: 14px;
+    overflow: hidden;
+    border: 2px solid #222;
+    margin-bottom: 16px;
+  }
+  .leaflet-tile { filter: brightness(0.7) saturate(0.6); }
+  @keyframes gpsPulse {
+    0%   { box-shadow: 0 0 0 0 rgba(0,136,255,.7); }
+    70%  { box-shadow: 0 0 0 8px rgba(0,136,255,0); }
+    100% { box-shadow: 0 0 0 0 rgba(0,136,255,0); }
+  }
+  @keyframes deliveredPulse {
+    0%,100% { box-shadow: 0 0 0 0 rgba(0,255,136,.4); }
+    50%      { box-shadow: 0 0 0 12px rgba(0,255,136,0); }
+  }
+</style>
+{% endblock %}
+
 {% block content %}
 <div class="container-fluid p-4">
 
@@ -8,69 +32,152 @@
     <small class="text-secondary">Live Delivery Tracking</small>
   </div>
 
-  <div class="card p-4 mb-3">
-    <div class="fw-bold mb-1">Your Stop</div>
-    <div class="text-secondary">{{ stop.address }}</div>
-    {% if stop.unit %}<div class="text-secondary small">Unit {{ stop.unit }}</div>{% endif %}
-  </div>
-
-  <!-- Status -->
-  <div class="card p-4 mb-3 text-center" id="status-card">
+  <!-- Status Bar -->
+  <div class="card p-3 mb-3 text-center" id="status-card">
     {% if stop.status == 'delivered' %}
-      <i class="fas fa-check-circle fa-3x mb-3" style="color:#00ff88;"></i>
+      <i class="fas fa-check-circle fa-2x mb-2" style="color:#00ff88;"></i>
       <div class="fw-bold" style="color:#00ff88;">Delivered!</div>
     {% elif stop.status == 'failed' %}
-      <i class="fas fa-times-circle fa-3x mb-3" style="color:#ff3333;"></i>
+      <i class="fas fa-times-circle fa-2x mb-2" style="color:#ff3333;"></i>
       <div class="fw-bold" style="color:#ff3333;">Delivery Attempted</div>
       <small class="text-secondary">Driver was unable to complete delivery</small>
     {% elif stop.status == 'en_route' %}
-      <div id="gps-dot" style="display:inline-block;width:14px;height:14px;border-radius:50%;background:#0088ff;margin-bottom:12px;animation:gpsPulse 1.5s infinite;"></div>
-      <div class="fw-bold" style="color:#0088ff;">Driver On The Way</div>
-      <div id="distance-text" class="text-secondary mt-1">Getting location...</div>
+      <div class="d-flex align-items-center justify-content-center gap-2 mb-1">
+        <div id="gps-dot" style="width:12px;height:12px;border-radius:50%;background:#0088ff;flex-shrink:0;animation:gpsPulse 1.5s infinite;"></div>
+        <div class="fw-bold" style="color:#0088ff;">Driver On The Way</div>
+      </div>
+      <div id="distance-text" class="text-secondary" style="font-size:0.9rem;">Getting location...</div>
     {% else %}
-      <i class="fas fa-clock fa-3x mb-3 text-secondary"></i>
+      <i class="fas fa-clock fa-2x mb-2 text-secondary"></i>
       <div class="fw-bold text-secondary">Delivery Scheduled</div>
       <small class="text-secondary">Your driver hasn't started heading to you yet</small>
     {% endif %}
+  </div>
+
+  <!-- Live Map -->
+  {% if stop.status == 'en_route' or stop.status == 'delivered' %}
+  <div id="track-map"></div>
+  {% endif %}
+
+  <!-- Your Address -->
+  <div class="card p-3 mb-3">
+    <div class="fw-bold mb-1" style="font-size:0.8rem;color:#aaa;letter-spacing:0.08em;">YOUR ADDRESS</div>
+    <div style="font-size:0.95rem;">{{ stop.address }}</div>
+    {% if stop.unit %}<div style="color:#00ff88;font-size:0.85rem;" class="fw-bold mt-1">Unit {{ stop.unit }}</div>{% endif %}
   </div>
 
 </div>
 {% endblock %}
 
 {% block scripts %}
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 {% if stop.status == 'en_route' %}
 <script>
-const TOKEN = '{{ stop.token }}';
+const TOKEN    = '{{ stop.token }}';
+const DEST_LAT = {{ stop.dest_lat or 'null' }};
+const DEST_LNG = {{ stop.dest_lng or 'null' }};
+
+// ── MAP SETUP ──
+const map = L.map('track-map', { zoomControl: true, attributionControl: false });
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+
+// Destination pin (customer address)
+const destIcon = L.divIcon({
+  html: '<div style="background:#00ff88;width:16px;height:16px;border-radius:50%;border:3px solid #fff;box-shadow:0 0 8px rgba(0,255,136,0.8);"></div>',
+  className: '', iconAnchor: [8,8]
+});
+if (DEST_LAT && DEST_LNG) {
+  L.marker([DEST_LAT, DEST_LNG], {icon: destIcon}).addTo(map)
+   .bindPopup('Your Address').openPopup();
+  map.setView([DEST_LAT, DEST_LNG], 14);
+} else {
+  map.setView([42.33, -83.05], 13);
+}
+
+// Driver pin
+const driverIcon = L.divIcon({
+  html: '<div style="background:#0088ff;width:18px;height:18px;border-radius:50%;border:3px solid #fff;box-shadow:0 0 10px rgba(0,136,255,0.9);font-size:10px;line-height:12px;text-align:center;">🚗</div>',
+  className: '', iconAnchor: [9,9]
+});
+let driverMarker = null;
+let routeLine    = null;
 
 function poll() {
   fetch(`/api/track/${TOKEN}`)
     .then(r => r.json())
     .then(data => {
+      // Status update
       if (data.status === 'delivered') {
         document.getElementById('status-card').innerHTML = `
-          <i class="fas fa-check-circle fa-3x mb-3" style="color:#00ff88;"></i>
-          <div class="fw-bold" style="color:#00ff88;">Delivered!</div>`;
-        return;
+          <i class="fas fa-check-circle fa-2x mb-2" style="color:#00ff88;"></i>
+          <div class="fw-bold" style="color:#00ff88;animation:deliveredPulse 1.5s infinite;">Delivered!</div>`;
+        return; // stop polling
       }
+
+      // Distance text
       if (data.distance_miles !== null && data.distance_miles !== undefined) {
         const miles = data.distance_miles;
         const mins  = Math.max(1, Math.round(miles * 3));
         document.getElementById('distance-text').textContent =
-          miles < 0.1 ? 'Driver is right outside!' :
+          miles < 0.1 ? '🚗 Driver is right outside!' :
+          miles < 0.5 ? `Almost here — ${Math.round(miles * 5280)} ft away` :
           `About ${mins} min away (${miles} mi)`;
       }
-      setTimeout(poll, 8000);
+
+      // Driver marker on map
+      if (data.driver_lat && data.driver_lng) {
+        if (!driverMarker) {
+          driverMarker = L.marker([data.driver_lat, data.driver_lng], {icon: driverIcon}).addTo(map);
+          driverMarker.bindPopup('Your Driver');
+          // Fit map to show both driver + destination
+          if (DEST_LAT && DEST_LNG) {
+            map.fitBounds(
+              [[data.driver_lat, data.driver_lng], [DEST_LAT, DEST_LNG]],
+              {padding: [40, 40]}
+            );
+          }
+        } else {
+          driverMarker.setLatLng([data.driver_lat, data.driver_lng]);
+          // Re-fit if both pins exist
+          if (DEST_LAT && DEST_LNG) {
+            map.fitBounds(
+              [[data.driver_lat, data.driver_lng], [DEST_LAT, DEST_LNG]],
+              {padding: [50, 50], maxZoom: 16}
+            );
+          }
+        }
+
+        // Draw a line from driver to destination
+        if (DEST_LAT && DEST_LNG) {
+          if (routeLine) map.removeLayer(routeLine);
+          routeLine = L.polyline(
+            [[data.driver_lat, data.driver_lng], [DEST_LAT, DEST_LNG]],
+            {color: '#0088ff', weight: 3, opacity: 0.5, dashArray: '8,6'}
+          ).addTo(map);
+        }
+      }
+
+      setTimeout(poll, 6000);
     })
     .catch(() => setTimeout(poll, 12000));
 }
 poll();
 </script>
-<style>
-@keyframes gpsPulse {
-  0%   { box-shadow: 0 0 0 0 rgba(0,136,255,.7); }
-  70%  { box-shadow: 0 0 0 8px rgba(0,136,255,0); }
-  100% { box-shadow: 0 0 0 0 rgba(0,136,255,0); }
+{% elif stop.status == 'delivered' %}
+<script>
+// Show static map with just the destination for delivered stops
+const DEST_LAT = {{ stop.dest_lat or 'null' }};
+const DEST_LNG = {{ stop.dest_lng or 'null' }};
+if (DEST_LAT && DEST_LNG) {
+  const map = L.map('track-map', { zoomControl: false, attributionControl: false });
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+  const icon = L.divIcon({
+    html: '<div style="background:#00ff88;width:16px;height:16px;border-radius:50%;border:3px solid #fff;"></div>',
+    className:'', iconAnchor:[8,8]
+  });
+  L.marker([DEST_LAT, DEST_LNG], {icon}).addTo(map);
+  map.setView([DEST_LAT, DEST_LNG], 15);
 }
-</style>
+</script>
 {% endif %}
 {% endblock %}
