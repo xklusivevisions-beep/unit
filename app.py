@@ -83,6 +83,7 @@ def init_db():
             phone TEXT,
             tracking TEXT,
             notes TEXT,
+            drop_spot TEXT,
             dest_lat REAL,
             dest_lng REAL,
             driver_lat REAL,
@@ -129,6 +130,15 @@ def init_db():
                    ('Director X', '3135550000', 'SpeedX', '1234'))
         db.commit()
     except: pass
+    # Safe migrations — add columns if they don't exist yet
+    for migration in [
+        "ALTER TABLE stops ADD COLUMN drop_spot TEXT",
+        "CREATE TABLE IF NOT EXISTS pin_corrections (id INTEGER PRIMARY KEY AUTOINCREMENT, address TEXT UNIQUE NOT NULL, lat REAL NOT NULL, lng REAL NOT NULL, corrected_by TEXT, corrected_at TEXT DEFAULT CURRENT_TIMESTAMP)",
+    ]:
+        try:
+            db.execute(migration)
+            db.commit()
+        except: pass
     db.close()
 
 # ─── HELPERS ───────────────────────────────────────────────────
@@ -291,13 +301,33 @@ def route_new():
 
                 full_addr = f"{raw_addr}, {city}, {state} {zipcode}".strip(', ')
 
-                # Try to match existing resident for phone
+                # Match existing resident record for this address
                 street = raw_addr.split(',')[0].strip()
                 resident = db.execute(
                     "SELECT * FROM residents WHERE address LIKE ?",
                     (f'%{street}%',)
                 ).fetchone()
-                phone = resident['phone'] if resident else ''
+                phone      = resident['phone']      if resident else ''
+                drop_spot  = resident['drop_spot']  if resident else ''
+                door_notes = resident['door_notes'] if resident else ''
+                if resident and resident['unit'] and not unit:
+                    unit = resident['unit']
+
+                # Match building access info
+                building = db.execute(
+                    "SELECT * FROM buildings WHERE address LIKE ?",
+                    (f'%{street}%',)
+                ).fetchone()
+                access_note = ''
+                if building:
+                    parts = []
+                    if building['access_code']:         parts.append(f"Code: {building['access_code']}")
+                    if building['buzzer_notes']:         parts.append(f"Buzzer: {building['buzzer_notes']}")
+                    if building['interior_directions']:  parts.append(building['interior_directions'])
+                    access_note = ' | '.join(parts)
+
+                # Merge notes
+                full_notes = ' | '.join(filter(None, [door_notes, access_note]))
 
                 token = secrets.token_urlsafe(12)
 
@@ -310,8 +340,8 @@ def route_new():
                 saved_lng = correction['lng'] if correction else None
 
                 db.execute(
-                    "INSERT INTO stops (route_id, stop_number, address, unit, customer_name, phone, tracking, token, dest_lat, dest_lng) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                    (route_id, stop_num, full_addr, unit, name, phone, tracking, token, saved_lat, saved_lng)
+                    "INSERT INTO stops (route_id, stop_number, address, unit, customer_name, phone, tracking, token, dest_lat, dest_lng, notes, drop_spot) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (route_id, stop_num, full_addr, unit, name, phone, tracking, token, saved_lat, saved_lng, full_notes, drop_spot)
                 )
                 stops_added += 1
 

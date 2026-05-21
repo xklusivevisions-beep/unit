@@ -67,8 +67,23 @@
   <div class="card p-3 mb-3">
     <div class="fw-bold fs-5 mb-1">{{ stop.customer_name or 'Customer' }}</div>
     <div class="text-secondary">{{ stop.address }}</div>
-    {% if stop.unit %}<div style="color:#00ff88;" class="small fw-bold mt-1">{{ stop.unit }}</div>{% endif %}
-    {% if stop.notes %}<div class="text-secondary small mt-1">{{ stop.notes }}</div>{% endif %}
+    {% if stop.unit %}
+      <div class="mt-1"><span style="background:#00ff8822;color:#00ff88;border-radius:6px;padding:2px 8px;font-size:0.8rem;font-weight:700;">Unit {{ stop.unit }}</span></div>
+    {% endif %}
+
+    {% if stop.drop_spot %}
+      <div class="mt-2 d-flex align-items-start gap-2">
+        <span style="color:#ffaa00;font-size:0.8rem;"><i class="fas fa-box"></i></span>
+        <span class="small" style="color:#ffaa00;font-weight:600;">Drop: {{ stop.drop_spot }}</span>
+      </div>
+    {% endif %}
+
+    {% if stop.notes %}
+      <div class="mt-2 d-flex align-items-start gap-2">
+        <span style="color:#aaa;font-size:0.8rem;"><i class="fas fa-info-circle"></i></span>
+        <span class="small text-secondary">{{ stop.notes }}</span>
+      </div>
+    {% endif %}
   </div>
 
   <!-- At Stop Banner -->
