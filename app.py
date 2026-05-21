@@ -2,7 +2,14 @@ from flask import Flask, render_template, request, redirect, url_for, session, j
 from datetime import datetime
 from geopy.distance import geodesic
 from geopy.geocoders import Nominatim
-import sqlite3, os, json, requests, logging, traceback, csv, io, secrets
+import sqlite3, os, json, requests, logging, traceback, csv, io, secrets, re
+import pdfplumber
+from PIL import Image
+try:
+    import pytesseract
+    OCR_AVAILABLE = True
+except ImportError:
+    OCR_AVAILABLE = False
 from twilio.rest import Client
 import stripe
 
@@ -292,6 +299,20 @@ def miles_away(lat1, lng1, lat2, lng2):
 def get_base_url():
     return request.host_url.rstrip('/')
 
+def parse_stops_from_text(text):
+    """Extract stop addresses from raw text (PDF or OCR output)."""
+    stops = []
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    # Match lines that look like addresses (number + street name)
+    addr_pattern = re.compile(r'^\d+\s+[A-Za-z].*,(\s*\w+,)?\s*[A-Z]{2}\s+\d{5}', re.IGNORECASE)
+    loose_pattern = re.compile(r'^\d+\s+[A-Za-z][A-Za-z\s]+(?:St|Ave|Blvd|Dr|Rd|Ln|Way|Ct|Pl|Cir|Hwy|Pkwy|Terr?|Trail|Loop)[\.\s,]', re.IGNORECASE)
+    for i, line in enumerate(lines):
+        if addr_pattern.match(line) or loose_pattern.match(line):
+            # Try to grab customer name from previous line
+            name = lines[i-1] if i > 0 and not lines[i-1][0].isdigit() else ''
+            stops.append({'address': line, 'name': name})
+    return stops
+
 def format_phone(phone):
     digits = ''.join(c for c in str(phone) if c.isdigit())
     if len(digits) == 10: return f'+1{digits}'
@@ -374,76 +395,144 @@ def route_new():
             route_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
         db.commit()
 
-        # Parse CSV file if uploaded
-        csv_file = request.files.get('csv_file')
+        # Parse route file (CSV, PDF, or image screenshot)
+        route_file = request.files.get('route_file')
         stops_added = 0
 
-        if csv_file and csv_file.filename:
-            content = csv_file.read().decode('utf-8', errors='ignore')
-            reader = csv.DictReader(io.StringIO(content))
-            for row in reader:
-                stop_num = row.get('Stop', stops_added + 1)
-                raw_addr = row.get('Address', '').strip()
-                city     = row.get('City', '').strip()
-                state    = row.get('State', '').strip()
-                zipcode  = row.get('ZIP', '').strip()
-                name     = row.get('Recipient', '').strip()
-                tracking = row.get('Tracking Number', '').strip()
+        if route_file and route_file.filename:
+            fname = route_file.filename.lower()
 
-                if not raw_addr: continue
+            # ── PDF ──
+            if fname.endswith('.pdf'):
+                file_bytes = route_file.read()
+                raw_stops = []
+                with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+                    for page in pdf.pages:
+                        # Try table extraction first
+                        tables = page.extract_tables()
+                        if tables:
+                            for table in tables:
+                                for row_data in table:
+                                    if not row_data or not any(row_data): continue
+                                    flat = [str(c).strip() if c else '' for c in row_data]
+                                    raw_stops.append({'_raw': flat})
+                        else:
+                            text = page.extract_text() or ''
+                            for s in parse_stops_from_text(text):
+                                raw_stops.append(s)
+                # Process raw_stops into DB
+                for idx, rs in enumerate(raw_stops):
+                    if '_raw' in rs:
+                        flat = rs['_raw']
+                        full_addr = next((c for c in flat if re.search(r'\d+.*(?:St|Ave|Blvd|Dr|Rd|Ln|Way|Ct|Pl)', c, re.I)), '')
+                        if not full_addr: continue
+                        name = flat[1] if len(flat) > 1 else ''
+                        tracking = next((c for c in flat if c.upper().startswith('SPX')), '')
+                    else:
+                        full_addr = rs.get('address', '')
+                        name = rs.get('name', '')
+                        tracking = ''
+                    if not full_addr: continue
+                    token = secrets.token_urlsafe(12)
+                    correction = db.execute("SELECT lat, lng FROM pin_corrections WHERE address=?", (full_addr,)).fetchone()
+                    saved_lat = correction['lat'] if correction else None
+                    saved_lng = correction['lng'] if correction else None
+                    db.execute(
+                        "INSERT INTO stops (route_id, stop_number, address, customer_name, tracking, token, dest_lat, dest_lng) VALUES (?,?,?,?,?,?,?,?)",
+                        (route_id, idx+1, full_addr, name, tracking, token, saved_lat, saved_lng)
+                    )
+                    stops_added += 1
+                db.commit()
 
-                # Parse unit from address
-                unit = ''
-                if '#' in raw_addr:
-                    parts = raw_addr.split('#')
-                    raw_addr = parts[0].strip()
-                    unit = parts[1].strip()
+            # ── IMAGE / SCREENSHOT ──
+            elif fname.endswith(('.png', '.jpg', '.jpeg')):
+                if OCR_AVAILABLE:
+                    img = Image.open(io.BytesIO(route_file.read()))
+                    text = pytesseract.image_to_string(img)
+                    for idx, s in enumerate(parse_stops_from_text(text)):
+                        full_addr = s.get('address', '')
+                        if not full_addr: continue
+                        token = secrets.token_urlsafe(12)
+                        correction = db.execute("SELECT lat, lng FROM pin_corrections WHERE address=?", (full_addr,)).fetchone()
+                        saved_lat = correction['lat'] if correction else None
+                        saved_lng = correction['lng'] if correction else None
+                        db.execute(
+                            "INSERT INTO stops (route_id, stop_number, address, customer_name, token, dest_lat, dest_lng) VALUES (?,?,?,?,?,?,?)",
+                            (route_id, idx+1, full_addr, s.get('name',''), token, saved_lat, saved_lng)
+                        )
+                        stops_added += 1
+                    db.commit()
+                else:
+                    # OCR not available — go to manual entry
+                    stops_added = 0
 
-                full_addr = f"{raw_addr}, {city}, {state} {zipcode}".strip(', ')
+            # ── CSV (original) ──
+            elif fname.endswith('.csv'):
+                content = route_file.read().decode('utf-8', errors='ignore')
+                reader = csv.DictReader(io.StringIO(content))
+                for row in reader:
+                    stop_num = row.get('Stop', stops_added + 1)
+                    raw_addr = row.get('Address', '').strip()
+                    city     = row.get('City', '').strip()
+                    state    = row.get('State', '').strip()
+                    zipcode  = row.get('ZIP', '').strip()
+                    name     = row.get('Recipient', '').strip()
+                    tracking = row.get('Tracking Number', '').strip()
 
-                # Match existing resident record for this address
-                street = raw_addr.split(',')[0].strip()
-                resident = db.execute(
-                    "SELECT * FROM residents WHERE address LIKE ?",
-                    (f'%{street}%',)
-                ).fetchone()
-                phone      = resident['phone']      if resident else ''
-                drop_spot  = resident['drop_spot']  if resident else ''
-                door_notes = resident['door_notes'] if resident else ''
-                if resident and resident['unit'] and not unit:
-                    unit = resident['unit']
+                    if not raw_addr: continue
 
-                # Match building access info
-                building = db.execute(
-                    "SELECT * FROM buildings WHERE address LIKE ?",
-                    (f'%{street}%',)
-                ).fetchone()
-                access_note = ''
-                if building:
-                    parts = []
-                    if building['access_code']:         parts.append(f"Code: {building['access_code']}")
-                    if building['buzzer_notes']:         parts.append(f"Buzzer: {building['buzzer_notes']}")
-                    if building['interior_directions']:  parts.append(building['interior_directions'])
-                    access_note = ' | '.join(parts)
+                    # Parse unit from address
+                    unit = ''
+                    if '#' in raw_addr:
+                        parts = raw_addr.split('#')
+                        raw_addr = parts[0].strip()
+                        unit = parts[1].strip()
 
-                # Merge notes
-                full_notes = ' | '.join(filter(None, [door_notes, access_note]))
+                    full_addr = f"{raw_addr}, {city}, {state} {zipcode}".strip(', ')
 
-                token = secrets.token_urlsafe(12)
+                    # Match existing resident record for this address
+                    street = raw_addr.split(',')[0].strip()
+                    resident = db.execute(
+                        "SELECT * FROM residents WHERE address LIKE ?",
+                        (f'%{street}%',)
+                    ).fetchone()
+                    phone      = resident['phone']      if resident else ''
+                    drop_spot  = resident['drop_spot']  if resident else ''
+                    door_notes = resident['door_notes'] if resident else ''
+                    if resident and resident['unit'] and not unit:
+                        unit = resident['unit']
 
-                # Check for a saved pin correction for this address
-                correction = db.execute(
-                    "SELECT lat, lng FROM pin_corrections WHERE address=?",
-                    (full_addr,)
-                ).fetchone()
-                saved_lat = correction['lat'] if correction else None
-                saved_lng = correction['lng'] if correction else None
+                    # Match building access info
+                    building = db.execute(
+                        "SELECT * FROM buildings WHERE address LIKE ?",
+                        (f'%{street}%',)
+                    ).fetchone()
+                    access_note = ''
+                    if building:
+                        parts = []
+                        if building['access_code']:         parts.append(f"Code: {building['access_code']}")
+                        if building['buzzer_notes']:         parts.append(f"Buzzer: {building['buzzer_notes']}")
+                        if building['interior_directions']:  parts.append(building['interior_directions'])
+                        access_note = ' | '.join(parts)
 
-                db.execute(
-                    "INSERT INTO stops (route_id, stop_number, address, unit, customer_name, phone, tracking, token, dest_lat, dest_lng, notes, drop_spot) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (route_id, stop_num, full_addr, unit, name, phone, tracking, token, saved_lat, saved_lng, full_notes, drop_spot)
-                )
-                stops_added += 1
+                    # Merge notes
+                    full_notes = ' | '.join(filter(None, [door_notes, access_note]))
+
+                    token = secrets.token_urlsafe(12)
+
+                    # Check for a saved pin correction for this address
+                    correction = db.execute(
+                        "SELECT lat, lng FROM pin_corrections WHERE address=?",
+                        (full_addr,)
+                    ).fetchone()
+                    saved_lat = correction['lat'] if correction else None
+                    saved_lng = correction['lng'] if correction else None
+
+                    db.execute(
+                        "INSERT INTO stops (route_id, stop_number, address, unit, customer_name, phone, tracking, token, dest_lat, dest_lng, notes, drop_spot) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (route_id, stop_num, full_addr, unit, name, phone, tracking, token, saved_lat, saved_lng, full_notes, drop_spot)
+                    )
+                    stops_added += 1
 
         db.commit()
         db.close()
@@ -891,6 +980,38 @@ def admin_test_sms():
     ok, detail = send_sms(phone, msg)
     provider = 'textbelt' if TEXTBELT_KEY else ('twilio' if TWILIO_SID else 'mock')
     return jsonify({'success': ok, 'provider': provider, 'detail': str(detail)})
+
+# ─── ACCOUNT ─────────────────────────────────────────────────────
+
+@app.route('/account')
+def account():
+    if 'driver_id' not in session:
+        return redirect(url_for('driver_login'))
+    return render_template('account.html', driver=session['driver_name'])
+
+@app.route('/account/manage')
+def account_manage():
+    """Redirect to Stripe Customer Portal for billing/cancel."""
+    if 'driver_id' not in session:
+        return redirect(url_for('driver_login'))
+    try:
+        db = get_db()
+        driver = db.execute("SELECT * FROM drivers WHERE id=?", (session['driver_id'],)).fetchone()
+        db.close()
+        # Find Stripe customer by email/phone
+        customers = stripe.Customer.search(query=f"phone:'{driver['phone']}'")
+        if customers and customers.data:
+            customer_id = customers.data[0].id
+        else:
+            return redirect(url_for('account'))
+        portal = stripe.billing_portal.Session.create(
+            customer=customer_id,
+            return_url=get_base_url() + '/account'
+        )
+        return redirect(portal.url)
+    except Exception as e:
+        log.error(f'Portal error: {e}')
+        return redirect(url_for('account'))
 
 # ─── SIGNUP + STRIPE ─────────────────────────────────────────────────────
 

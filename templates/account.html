@@ -1,0 +1,53 @@
+{% extends 'base.html' %}
+{% block title %}UNIT — My Account{% endblock %}
+{% block content %}
+<div class="container-fluid p-4 pb-nav">
+
+  <div class="d-flex align-items-center mb-4">
+    <a href="/driver" class="text-decoration-none me-3" style="color:#555;">
+      <i class="fas fa-chevron-left"></i>
+    </a>
+    <div class="unit-logo" style="font-size:1.4rem;">UNIT<span>.</span></div>
+  </div>
+
+  <h5 class="fw-bold mb-4">My Account</h5>
+
+  <!-- Driver Info -->
+  <div class="card p-4 mb-3">
+    <div class="text-secondary small mb-1">Logged in as</div>
+    <div class="fw-bold fs-5">{{ driver }}</div>
+  </div>
+
+  <!-- Subscription -->
+  <div class="card p-4 mb-3">
+    <div class="fw-bold mb-3">Subscription</div>
+    <div class="d-flex justify-content-between align-items-center mb-2">
+      <span class="text-secondary">Plan</span>
+      <span class="fw-bold" style="color:#00ff88;">UNIT Driver — $20/month</span>
+    </div>
+    <div class="d-flex justify-content-between align-items-center mb-4">
+      <span class="text-secondary">Status</span>
+      <span class="badge" style="background:#00ff8822;color:#00ff88;padding:6px 12px;border-radius:8px;">Active</span>
+    </div>
+    <a href="/account/manage" class="btn w-100 py-3" style="background:#1a1a1a;border:1px solid #333;color:#fff;border-radius:12px;">
+      <i class="fas fa-credit-card me-2"></i>Manage Billing & Cancel
+    </a>
+    <small class="text-muted d-block text-center mt-2">Opens Stripe secure billing portal</small>
+  </div>
+
+  <!-- Logout -->
+  <a href="/driver/logout" class="btn w-100 py-3 mb-3" style="background:#ff333322;color:#ff4444;border:1px solid #ff333344;border-radius:12px;">
+    <i class="fas fa-sign-out-alt me-2"></i>Log Out
+  </a>
+
+</div>
+
+<div class="nav-bottom">
+  <div class="d-flex justify-content-around">
+    <a href="/driver"><i class="fas fa-home"></i>Home</a>
+    <a href="/driver/history"><i class="fas fa-history"></i>History</a>
+    <a href="/driver/route/new"><i class="fas fa-upload"></i>New Route</a>
+    <a href="/account" class="active"><i class="fas fa-user"></i>Account</a>
+  </div>
+</div>
+{% endblock %}

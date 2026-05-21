@@ -1,6 +1,9 @@
 gunicorn==21.2.0
 stripe==11.4.1
 pg8000==1.31.2
+pdfplumber==0.11.4
+pillow==11.2.1
+pytesseract==0.3.13
 aiohappyeyeballs==2.6.1
 aiohttp==3.13.5
 aiohttp-retry==2.9.1
