@@ -54,8 +54,8 @@
     {% endif %}
   </div>
 
-  <!-- Live Map -->
-  {% if stop.status == 'en_route' or stop.status == 'delivered' %}
+  <!-- Live Map (en_route only) -->
+  {% if stop.status == 'en_route' %}
   <div id="track-map"></div>
   {% endif %}
 
@@ -162,22 +162,6 @@ function poll() {
     .catch(() => setTimeout(poll, 12000));
 }
 poll();
-</script>
-{% elif stop.status == 'delivered' %}
-<script>
-// Show static map with just the destination for delivered stops
-const DEST_LAT = {{ stop.dest_lat or 'null' }};
-const DEST_LNG = {{ stop.dest_lng or 'null' }};
-if (DEST_LAT && DEST_LNG) {
-  const map = L.map('track-map', { zoomControl: false, attributionControl: false });
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
-  const icon = L.divIcon({
-    html: '<div style="background:#00ff88;width:16px;height:16px;border-radius:50%;border:3px solid #fff;"></div>',
-    className:'', iconAnchor:[8,8]
-  });
-  L.marker([DEST_LAT, DEST_LNG], {icon}).addTo(map);
-  map.setView([DEST_LAT, DEST_LNG], 15);
-}
 </script>
 {% endif %}
 {% endblock %}
