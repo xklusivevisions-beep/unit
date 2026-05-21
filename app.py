@@ -699,6 +699,16 @@ def admin_test_sms():
     provider = 'textbelt' if TEXTBELT_KEY else ('twilio' if TWILIO_SID else 'mock')
     return jsonify({'success': ok, 'provider': provider, 'detail': str(detail)})
 
+# ─── LEGAL ─────────────────────────────────────────────────────
+
+@app.route('/terms')
+def terms():
+    return render_template('terms.html')
+
+@app.route('/privacy')
+def privacy():
+    return render_template('privacy.html')
+
 # ─── HEALTH ────────────────────────────────────────────────────
 
 @app.route('/health')
