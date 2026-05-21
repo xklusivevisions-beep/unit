@@ -46,8 +46,21 @@
       </div>
       <div class="mb-4">
         <label>Door Notes (optional)</label>
-        <input type="text" name="door_notes" class="form-control" placeholder="e.g. Gate code 1234, brown house, side entrance, ring bell">
+        <input type="text" name="door_notes" class="form-control" placeholder="e.g. Brown house, side entrance, ring bell — avoid full access codes">
+        <small class="text-muted">Tip: Use hints instead of full codes (e.g. "last 4 of address" instead of the actual code)</small>
       </div>
+
+      <!-- SMS Consent -->
+      <div class="mb-4 p-3" style="background:#0a1a0a;border:1px solid #00ff8833;border-radius:12px;">
+        <div class="form-check">
+          <input class="form-check-input" type="checkbox" name="sms_consent" id="sms_consent" required>
+          <label class="form-check-label small" for="sms_consent" style="color:#ccc;line-height:1.5;">
+            I agree to receive SMS delivery notifications from UNIT and my driver, including pre-route alerts and proximity notifications. Message &amp; data rates may apply. Reply <strong>STOP</strong> to opt out at any time.
+            <a href="/terms" style="color:#00ff88;">Terms</a> &amp; <a href="/privacy" style="color:#00ff88;">Privacy Policy</a>.
+          </label>
+        </div>
+      </div>
+
       <button class="btn btn-primary w-100 py-3 fs-6">
         <i class="fas fa-check me-2"></i>Save My Delivery Profile
       </button>

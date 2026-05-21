@@ -19,6 +19,16 @@
           <input type="number" name="pin" class="form-control text-center fs-3 fw-bold"
                  placeholder="••••" maxlength="4" autofocus>
         </div>
+        <!-- Driver Location Consent -->
+        <div class="mb-3 p-3" style="background:#0a0a1a;border:1px solid #0088ff33;border-radius:12px;">
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" name="location_consent" id="location_consent" required>
+            <label class="form-check-label" for="location_consent" style="font-size:0.8rem;color:#aaa;line-height:1.5;">
+              I agree that my GPS location is shared with customers during active deliveries only. Location is not tracked outside of active stops.
+            </label>
+          </div>
+        </div>
+
         <button class="btn btn-primary w-100 fs-6">
           <i class="fas fa-arrow-right me-2"></i>Enter
         </button>

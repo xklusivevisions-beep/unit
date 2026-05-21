@@ -121,6 +121,8 @@ def init_db():
             backup_phone TEXT,
             drop_spot TEXT,
             door_notes TEXT,
+            sms_consent INTEGER DEFAULT 0,
+            sms_consent_at TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
     ''')
@@ -133,6 +135,8 @@ def init_db():
     # Safe migrations — add columns if they don't exist yet
     for migration in [
         "ALTER TABLE stops ADD COLUMN drop_spot TEXT",
+        "ALTER TABLE residents ADD COLUMN sms_consent INTEGER DEFAULT 0",
+        "ALTER TABLE residents ADD COLUMN sms_consent_at TEXT",
         "CREATE TABLE IF NOT EXISTS pin_corrections (id INTEGER PRIMARY KEY AUTOINCREMENT, address TEXT UNIQUE NOT NULL, lat REAL NOT NULL, lng REAL NOT NULL, corrected_by TEXT, corrected_at TEXT DEFAULT CURRENT_TIMESTAMP)",
     ]:
         try:
@@ -716,10 +720,12 @@ def resident_portal():
     if request.method == 'POST':
         db = get_db()
         db.execute(
-            "INSERT INTO residents (address,unit,phone,backup_phone,drop_spot,door_notes) VALUES (?,?,?,?,?,?)",
+            "INSERT INTO residents (address,unit,phone,backup_phone,drop_spot,door_notes,sms_consent,sms_consent_at) VALUES (?,?,?,?,?,?,?,?)",
             (request.form.get('address'), request.form.get('unit'),
              request.form.get('phone'),   request.form.get('backup_phone'),
-             request.form.get('drop_spot'), request.form.get('door_notes'))
+             request.form.get('drop_spot'), request.form.get('door_notes'),
+             1 if request.form.get('sms_consent') else 0,
+             datetime.now().isoformat() if request.form.get('sms_consent') else None)
         )
         db.commit()
         db.close()
