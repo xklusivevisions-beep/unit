@@ -4,6 +4,7 @@ from geopy.distance import geodesic
 from geopy.geocoders import Nominatim
 import sqlite3, os, json, requests, logging, traceback, csv, io, secrets
 from twilio.rest import Client
+import stripe
 
 # ─── DATABASE ABSTRACTION (SQLite local / PostgreSQL on Render) ─
 DATABASE_URL = os.environ.get('DATABASE_URL', '')
@@ -104,6 +105,10 @@ DB = 'data/unit.db'
 TWILIO_SID   = os.environ.get('TWILIO_SID', '')
 TWILIO_TOKEN = os.environ.get('TWILIO_TOKEN', '')
 TWILIO_PHONE = os.environ.get('TWILIO_PHONE', '')
+STRIPE_SECRET      = os.environ.get('STRIPE_SECRET_KEY', '')
+STRIPE_PUB_KEY     = os.environ.get('STRIPE_PUBLISHABLE_KEY', '')
+STRIPE_PRICE_ID    = os.environ.get('STRIPE_PRICE_ID', 'price_1TZeWUEQpiT0nKEdHs158Phk')
+stripe.api_key     = STRIPE_SECRET
 APPROACH_RADIUS_MILES = 0.5
 GEOFENCE_RADIUS_MILES  = 0.028
 _geocache = {}
@@ -886,6 +891,71 @@ def admin_test_sms():
     ok, detail = send_sms(phone, msg)
     provider = 'textbelt' if TEXTBELT_KEY else ('twilio' if TWILIO_SID else 'mock')
     return jsonify({'success': ok, 'provider': provider, 'detail': str(detail)})
+
+# ─── SIGNUP + STRIPE ─────────────────────────────────────────────────────
+
+@app.route('/signup', methods=['GET', 'POST'])
+def signup():
+    error = None
+    if request.method == 'POST':
+        name    = request.form.get('name', '').strip()
+        phone   = format_phone(request.form.get('phone', '').strip())
+        company = request.form.get('company', '').strip()
+        email   = request.form.get('email', '').strip()
+        if not name or not phone or not email:
+            error = 'Name, phone, and email are required.'
+        else:
+            return render_template('signup_checkout.html',
+                name=name, phone=phone, company=company, email=email,
+                publishable_key=STRIPE_PUB_KEY)
+    return render_template('signup.html', error=error)
+
+@app.route('/signup/complete', methods=['POST'])
+def signup_complete():
+    data = request.get_json()
+    name    = data.get('name', '').strip()
+    phone   = format_phone(data.get('phone', '').strip())
+    company = data.get('company', '').strip()
+    email   = data.get('email', '').strip()
+    pm_id   = data.get('payment_method_id', '')
+
+    try:
+        # Create Stripe customer
+        customer = stripe.Customer.create(
+            name=name, email=email, phone=phone,
+            payment_method=pm_id,
+            invoice_settings={'default_payment_method': pm_id}
+        )
+        # Create subscription with 14-day trial
+        stripe.Subscription.create(
+            customer=customer.id,
+            items=[{'price': STRIPE_PRICE_ID}],
+            trial_period_days=14,
+            expand=['latest_invoice.payment_intent']
+        )
+        # Generate PIN and create driver account
+        pin = str(secrets.randbelow(9000) + 1000)  # 4-digit PIN
+        db = get_db()
+        db.execute(
+            "INSERT INTO drivers (name, phone, company, pin) VALUES (?,?,?,?)",
+            (name, phone, company, pin)
+        )
+        db.commit()
+        db.close()
+        # Send PIN via SMS
+        send_sms(phone, f"Your UNIT driver PIN is: {pin}\nLogin at: {get_base_url()}/driver/login\nTrial ends in 14 days. $20/month after.")
+        return jsonify({'success': True, 'pin': pin})
+    except stripe.error.StripeError as e:
+        log.error(f'Stripe error: {e}')
+        return jsonify({'success': False, 'error': str(e.user_message)})
+    except Exception as e:
+        log.error(f'Signup error: {e}')
+        return jsonify({'success': False, 'error': 'Something went wrong. Please try again.'})
+
+@app.route('/signup/success')
+def signup_success():
+    pin = request.args.get('pin', '----')
+    return render_template('signup_success.html', pin=pin)
 
 # ─── LEGAL ─────────────────────────────────────────────────────
 

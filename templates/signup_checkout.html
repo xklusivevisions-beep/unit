@@ -1,0 +1,124 @@
+{% extends 'base.html' %}
+{% block title %}UNIT — Complete Setup{% endblock %}
+{% block extra_css %}
+<style>
+  #card-element {
+    background: #1a1a1a;
+    border: 1px solid #333;
+    border-radius: 10px;
+    padding: 14px;
+    color: #fff;
+  }
+  #card-errors {
+    color: #ff4444;
+    font-size: 0.85rem;
+    margin-top: 8px;
+    min-height: 20px;
+  }
+</style>
+{% endblock %}
+{% block content %}
+<div class="min-vh-100 d-flex align-items-center justify-content-center p-4">
+  <div class="w-100" style="max-width:420px;">
+
+    <div class="text-center mb-4">
+      <div class="unit-logo mb-2">UNIT<span>.</span></div>
+    </div>
+
+    <div class="text-center p-3 mb-4" style="background:#0a1a0a;border:1px solid #00ff8844;border-radius:14px;">
+      <div class="fw-bold" style="color:#00ff88;">14-Day Free Trial</div>
+      <small class="text-secondary">No charge today. $20/month after trial.</small>
+    </div>
+
+    <div class="card p-4">
+      <div class="mb-3 pb-3" style="border-bottom:1px solid #222;">
+        <div class="text-secondary small mb-1">Setting up account for</div>
+        <div class="fw-bold">{{ name }}</div>
+        <div class="text-secondary small">{{ email }}</div>
+      </div>
+
+      <form id="payment-form">
+        <div class="mb-3">
+          <label class="mb-2">Card Details</label>
+          <div id="card-element"></div>
+          <div id="card-errors"></div>
+        </div>
+        <button id="submit-btn" class="btn btn-primary w-100 py-3 fs-6 fw-bold mt-2">
+          <span id="btn-text"><i class="fas fa-lock me-2"></i>Start Free Trial</span>
+          <span id="btn-spinner" style="display:none;"><i class="fas fa-spinner fa-spin me-2"></i>Processing...</span>
+        </button>
+        <div class="text-center mt-2">
+          <small class="text-muted" style="font-size:0.75rem;"><i class="fas fa-lock me-1"></i>Secured by Stripe. Cancel anytime.</small>
+        </div>
+      </form>
+    </div>
+
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://js.stripe.com/v3/"></script>
+<script>
+const stripe  = Stripe('{{ publishable_key }}');
+const elements = stripe.elements();
+const card = elements.create('card', {
+  style: {
+    base: {
+      color: '#ffffff',
+      fontFamily: 'system-ui, sans-serif',
+      fontSize: '16px',
+      '::placeholder': { color: '#555' }
+    },
+    invalid: { color: '#ff4444' }
+  }
+});
+card.mount('#card-element');
+card.on('change', e => {
+  document.getElementById('card-errors').textContent = e.error ? e.error.message : '';
+});
+
+document.getElementById('payment-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  document.getElementById('btn-text').style.display    = 'none';
+  document.getElementById('btn-spinner').style.display = 'inline';
+  document.getElementById('submit-btn').disabled = true;
+
+  const { paymentMethod, error } = await stripe.createPaymentMethod({
+    type: 'card',
+    card: card,
+    billing_details: { name: '{{ name }}', email: '{{ email }}' }
+  });
+
+  if (error) {
+    document.getElementById('card-errors').textContent = error.message;
+    document.getElementById('btn-text').style.display    = 'inline';
+    document.getElementById('btn-spinner').style.display = 'none';
+    document.getElementById('submit-btn').disabled = false;
+    return;
+  }
+
+  const resp = await fetch('/signup/complete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      payment_method_id: paymentMethod.id,
+      name: '{{ name }}',
+      phone: '{{ phone }}',
+      company: '{{ company }}',
+      email: '{{ email }}'
+    })
+  });
+  const data = await resp.json();
+
+  if (data.success) {
+    window.location.href = '/signup/success?pin=' + data.pin;
+  } else {
+    document.getElementById('card-errors').textContent = data.error || 'Something went wrong. Try again.';
+    document.getElementById('btn-text').style.display    = 'inline';
+    document.getElementById('btn-spinner').style.display = 'none';
+    document.getElementById('submit-btn').disabled = false;
+  }
+});
+</script>
+{% endblock %}

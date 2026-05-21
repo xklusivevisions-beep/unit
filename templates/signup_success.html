@@ -1,0 +1,30 @@
+{% extends 'base.html' %}
+{% block title %}UNIT — You're In{% endblock %}
+{% block content %}
+<div class="min-vh-100 d-flex align-items-center justify-content-center p-4">
+  <div class="w-100 text-center" style="max-width:380px;">
+
+    <div class="unit-logo mb-4">UNIT<span>.</span></div>
+
+    <div class="card p-4 mb-4">
+      <i class="fas fa-check-circle fa-3x mb-3" style="color:#00ff88;"></i>
+      <h4 class="fw-bold mb-2" style="color:#00ff88;">You're In!</h4>
+      <p class="text-secondary mb-4">Your 14-day free trial has started. Save your PIN — you'll need it to log in.</p>
+
+      <div class="p-3 mb-3" style="background:#0a1a0a;border:2px solid #00ff88;border-radius:14px;">
+        <div class="text-secondary small mb-1">Your Driver PIN</div>
+        <div style="font-size:2.5rem;font-weight:900;letter-spacing:0.2em;color:#00ff88;">{{ pin }}</div>
+      </div>
+
+      <small class="text-muted">We also sent your PIN to your phone and email.</small>
+    </div>
+
+    <a href="/driver/login" class="btn btn-primary w-100 py-3 fs-6 fw-bold mb-3">
+      <i class="fas fa-arrow-right me-2"></i>Log In Now
+    </a>
+
+    <small class="text-muted">Trial ends in 14 days. You'll be charged $20/month after that.<br>Cancel anytime at <a href="mailto:support@unitdelivery.app" style="color:#555;">support@unitdelivery.app</a></small>
+
+  </div>
+</div>
+{% endblock %}
