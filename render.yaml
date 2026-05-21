@@ -18,7 +18,7 @@ services:
       - key: TWILIO_PHONE
         sync: false
       - key: TEXTBELT_KEY
-        sync: false
+        value: 1e75c135dcdcffe0d5d988a6f94a8c493f4c5e2fE4HPIiQ70HFrxcFHSXXy5RRgZ
     disk:
       name: unit-data
       mountPath: /opt/render/project/src/data

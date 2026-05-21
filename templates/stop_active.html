@@ -117,6 +117,15 @@
     </div>
   </div>
 
+  <!-- Manual Send Link -->
+  {% set track_url = 'https://unit-6gxn.onrender.com/track/' + stop.token %}
+  {% set sms_body = "Hi " + (stop.customer_name or 'there') + "! Your driver is nearby. Track your delivery live here: " + track_url %}
+  <a href="sms:?body={{ sms_body | urlencode }}"
+     class="btn w-100 py-3 fs-6 mb-3 fw-bold"
+     style="background:#0088ff22;color:#0088ff;border:1px solid #0088ff44;border-radius:14px;">
+    <i class="fas fa-share me-2"></i>Send Tracking Link (Your Phone)
+  </a>
+
   <!-- Delivery Actions -->
   <div class="row g-3 mb-3">
     <div class="col-6">

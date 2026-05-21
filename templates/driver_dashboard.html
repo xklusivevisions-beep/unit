@@ -19,6 +19,13 @@
           <div class="fw-bold" style="color:#00ff88;">{{ route.name }}</div>
           <small class="text-secondary">{{ stops|length }} stops total</small>
         </div>
+        <form method="POST" action="/driver/route/{{ route.id }}/clear" style="display:inline;">
+          <button type="submit" class="btn btn-sm fw-bold"
+            onclick="return confirm('Clear all stops and start over?')"
+            style="background:#ff333322;color:#ff4444;border:1px solid #ff333344;border-radius:10px;">
+            <i class="fas fa-trash-alt me-1"></i>Clear
+          </button>
+        </form>
         {% if not route.blast_sent %}
         <a href="/driver/route/{{ route.id }}/blast" 
            onclick="return confirm('Send SMS to all customers now?')"

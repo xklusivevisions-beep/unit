@@ -509,6 +509,23 @@ def stop_failed(stop_id):
     db.close()
     return redirect(url_for('route_detail', route_id=route_id) if route_id else url_for('driver_dashboard'))
 
+@app.route('/driver/route/<int:route_id>/clear', methods=['POST'])
+def route_clear(route_id):
+    if 'driver_id' not in session:
+        return redirect(url_for('driver_login'))
+    db = get_db()
+    # Verify this route belongs to the logged-in driver
+    route = db.execute(
+        "SELECT * FROM routes WHERE id=? AND driver_id=?",
+        (route_id, session['driver_id'])
+    ).fetchone()
+    if route:
+        db.execute("DELETE FROM stops WHERE route_id=?", (route_id,))
+        db.execute("DELETE FROM routes WHERE id=?", (route_id,))
+        db.commit()
+    db.close()
+    return redirect(url_for('driver_dashboard'))
+
 # ─── ADDRESS SUGGESTIONS (internal DB) ────────────────────────
 
 
