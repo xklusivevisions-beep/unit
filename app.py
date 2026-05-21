@@ -104,6 +104,14 @@ def init_db():
             confirmed_count INTEGER DEFAULT 0,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS pin_corrections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            address TEXT UNIQUE NOT NULL,
+            lat REAL NOT NULL,
+            lng REAL NOT NULL,
+            corrected_by TEXT,
+            corrected_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
         CREATE TABLE IF NOT EXISTS residents (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             address TEXT NOT NULL,
@@ -292,9 +300,18 @@ def route_new():
                 phone = resident['phone'] if resident else ''
 
                 token = secrets.token_urlsafe(12)
+
+                # Check for a saved pin correction for this address
+                correction = db.execute(
+                    "SELECT lat, lng FROM pin_corrections WHERE address=?",
+                    (full_addr,)
+                ).fetchone()
+                saved_lat = correction['lat'] if correction else None
+                saved_lng = correction['lng'] if correction else None
+
                 db.execute(
-                    "INSERT INTO stops (route_id, stop_number, address, unit, customer_name, phone, tracking, token) VALUES (?,?,?,?,?,?,?,?)",
-                    (route_id, stop_num, full_addr, unit, name, phone, tracking, token)
+                    "INSERT INTO stops (route_id, stop_number, address, unit, customer_name, phone, tracking, token, dest_lat, dest_lng) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (route_id, stop_num, full_addr, unit, name, phone, tracking, token, saved_lat, saved_lng)
                 )
                 stops_added += 1
 
@@ -333,13 +350,20 @@ def route_manual():
         for i, addr in enumerate(addresses):
             if not addr.strip(): continue
             token = secrets.token_urlsafe(12)
+            clean_addr = addr.strip()
+            correction = db.execute(
+                "SELECT lat, lng FROM pin_corrections WHERE address=?",
+                (clean_addr,)
+            ).fetchone()
+            saved_lat = correction['lat'] if correction else None
+            saved_lng = correction['lng'] if correction else None
             db.execute(
-                "INSERT INTO stops (route_id, stop_number, address, unit, customer_name, phone, token) VALUES (?,?,?,?,?,?,?)",
-                (route_id, i+1, addr.strip(),
+                "INSERT INTO stops (route_id, stop_number, address, unit, customer_name, phone, token, dest_lat, dest_lng) VALUES (?,?,?,?,?,?,?,?,?)",
+                (route_id, i+1, clean_addr,
                  units[i].strip() if i < len(units) else '',
                  names[i].strip() if i < len(names) else '',
                  format_phone(phones[i].strip()) if i < len(phones) and phones[i].strip() else '',
-                 token)
+                 token, saved_lat, saved_lng)
             )
         db.commit()
         db.close()
@@ -479,7 +503,20 @@ def stop_pin(stop_id):
     data = request.get_json()
     lat, lng = data.get('lat'), data.get('lng')
     db = get_db()
+    # Save to this stop
+    stop = db.execute("SELECT address FROM stops WHERE id=?", (stop_id,)).fetchone()
     db.execute("UPDATE stops SET dest_lat=?, dest_lng=?, approach_sms_sent=0 WHERE id=?", (lat, lng, stop_id))
+    # Save permanently to pin_corrections — survives future routes
+    if stop:
+        db.execute('''
+            INSERT INTO pin_corrections (address, lat, lng, corrected_by, corrected_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(address) DO UPDATE SET
+                lat=excluded.lat,
+                lng=excluded.lng,
+                corrected_by=excluded.corrected_by,
+                corrected_at=excluded.corrected_at
+        ''', (stop['address'], lat, lng, session.get('driver_name', 'driver'), datetime.now().isoformat()))
     db.commit()
     db.close()
     return jsonify({'ok': True})
