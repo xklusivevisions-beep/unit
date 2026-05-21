@@ -129,41 +129,8 @@ function poll() {
         if (!driverMarker) {
           driverMarker = L.marker([data.driver_lat, data.driver_lng], {icon: driverIcon}).addTo(map);
           driverMarker.bindPopup('Your Driver');
-          // Fit map to show both driver + destination
-          if (DEST_LAT && DEST_LNG) {
-            map.fitBounds(
-              [[data.driver_lat, data.driver_lng], [DEST_LAT, DEST_LNG]],
-              {padding: [40, 40]}
-            );
-          }
         } else {
           driverMarker.setLatLng([data.driver_lat, data.driver_lng]);
-          // Auto-zoom based on distance
-          if (DEST_LAT && DEST_LNG && data.distance_miles !== null) {
-            const miles = data.distance_miles;
-            if (miles < 0.05) {
-              // Right outside — zoom tight to destination
-              map.setView([DEST_LAT, DEST_LNG], 18, {animate: true});
-            } else if (miles < 0.15) {
-              // Very close — zoom in on both
-              map.fitBounds(
-                [[data.driver_lat, data.driver_lng], [DEST_LAT, DEST_LNG]],
-                {padding: [30, 30], maxZoom: 17, animate: true}
-              );
-            } else if (miles < 0.4) {
-              // Close — moderate zoom
-              map.fitBounds(
-                [[data.driver_lat, data.driver_lng], [DEST_LAT, DEST_LNG]],
-                {padding: [40, 40], maxZoom: 16, animate: true}
-              );
-            } else {
-              // Far — show full picture
-              map.fitBounds(
-                [[data.driver_lat, data.driver_lng], [DEST_LAT, DEST_LNG]],
-                {padding: [50, 50], maxZoom: 15, animate: true}
-              );
-            }
-          }
         }
 
         // Draw a line from driver to destination
@@ -173,6 +140,26 @@ function poll() {
             [[data.driver_lat, data.driver_lng], [DEST_LAT, DEST_LNG]],
             {color: '#0088ff', weight: 3, opacity: 0.5, dashArray: '8,6'}
           ).addTo(map);
+        }
+      }
+
+      // Auto-zoom every poll based on distance (fires regardless of GPS update)
+      if (DEST_LAT && DEST_LNG && data.distance_miles !== null && data.distance_miles !== undefined) {
+        const miles = data.distance_miles;
+        const dLat  = data.driver_lat  || DEST_LAT;
+        const dLng  = data.driver_lng  || DEST_LNG;
+
+        if (miles < 0.05) {
+          // Right outside — lock onto destination
+          map.setView([DEST_LAT, DEST_LNG], 19, {animate: true});
+        } else if (miles < 0.15) {
+          map.fitBounds([[dLat, dLng], [DEST_LAT, DEST_LNG]], {padding: [25, 25], maxZoom: 18, animate: true});
+        } else if (miles < 0.3) {
+          map.fitBounds([[dLat, dLng], [DEST_LAT, DEST_LNG]], {padding: [35, 35], maxZoom: 17, animate: true});
+        } else if (miles < 0.6) {
+          map.fitBounds([[dLat, dLng], [DEST_LAT, DEST_LNG]], {padding: [45, 45], maxZoom: 16, animate: true});
+        } else {
+          map.fitBounds([[dLat, dLng], [DEST_LAT, DEST_LNG]], {padding: [50, 50], maxZoom: 14, animate: true});
         }
       }
 
