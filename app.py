@@ -1000,6 +1000,29 @@ def address_suggest():
     db.close()
     return jsonify([{'address': r['address'], 'unit': r['unit'] or '', 'name': r['customer_name'] or ''} for r in results])
 
+@app.route('/api/name-suggest')
+def name_suggest():
+    """Search stops by customer name — returns address + unit for autofill."""
+    q = request.args.get('q', '').strip()
+    if len(q) < 2:
+        return jsonify([])
+    db = get_db()
+    results = db.execute(
+        """SELECT customer_name, address, unit, phone
+           FROM stops
+           WHERE customer_name LIKE ?
+           GROUP BY customer_name, address, unit, phone
+           ORDER BY MAX(id) DESC LIMIT 8""",
+        (f'%{q}%',)
+    ).fetchall()
+    db.close()
+    return jsonify([{
+        'name':    r['customer_name'],
+        'address': r['address'] or '',
+        'unit':    r['unit'] or '',
+        'phone':   r['phone'] or ''
+    } for r in results if r['customer_name']])
+
 @app.route('/api/resident-suggest')
 def resident_suggest():
     """Search residents by name — returns address + delivery prefs for manual entry autofill."""

@@ -214,25 +214,26 @@ function attachNameSuggestions(input) {
     if (q.length < 2) { sugg.style.display = 'none'; return; }
     timer = setTimeout(() => {
       // Search residents by address fragment matching the name field
-      fetch(`/api/address-suggest?q=${encodeURIComponent(q)}`)
+      fetch(`/api/name-suggest?q=${encodeURIComponent(q)}`)
         .then(r => r.json())
-        .then(history => {
+        .then(results => {
           sugg.innerHTML = '';
-          if (!history.length) { sugg.style.display = 'none'; return; }
-          history.forEach(item => {
-            if (!item.name) return;
+          if (!results.length) { sugg.style.display = 'none'; return; }
+          results.forEach(item => {
             const li = document.createElement('li');
             li.innerHTML = `
               <div style="font-size:0.88rem;color:#fff;font-weight:600;">${item.name}</div>
-              <div style="font-size:0.72rem;color:#00ff88;">${item.address}${item.unit ? ' · ' + item.unit : ''}</div>`;
+              <div style="font-size:0.72rem;color:#00ff88;">${item.address}${item.unit ? ' · Unit ' + item.unit : ''}</div>`;
             li.style.cssText = 'padding:10px 14px;cursor:pointer;border-bottom:1px solid #222;';
             li.addEventListener('click', () => {
               input.value = item.name;
               if (row) {
                 const addrInput = row.querySelector('input[name="address"]');
                 const unitInput = row.querySelector('input[name="unit"]');
+                const phoneInput = row.querySelector('input[name="phone"]');
                 if (addrInput && !addrInput.value) addrInput.value = item.address;
                 if (unitInput && !unitInput.value && item.unit) unitInput.value = item.unit;
+                if (phoneInput && !phoneInput.value && item.phone) phoneInput.value = item.phone;
               }
               sugg.style.display = 'none';
             });
