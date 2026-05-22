@@ -458,8 +458,12 @@ def driver_login():
         if driver:
             session['driver_id'] = driver['id']
             session['driver_name'] = driver['name']
-            # First-time driver → show walkthrough
-            if not driver['onboarded']:
+            # First-time driver → show walkthrough (safe fallback if column missing)
+            try:
+                is_new = not driver['onboarded']
+            except (KeyError, IndexError):
+                is_new = True
+            if is_new:
                 return redirect(url_for('driver_walkthrough'))
             return redirect(url_for('driver_dashboard'))
         error = 'Invalid PIN'
