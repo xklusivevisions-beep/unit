@@ -881,6 +881,15 @@ def stop_delivered(stop_id):
     stop = db.execute("SELECT * FROM stops WHERE id=?", (stop_id,)).fetchone()
     db.execute("UPDATE stops SET status='delivered' WHERE id=?", (stop_id,))
     db.commit()
+    # Send delivery confirmation SMS with resident portal link
+    if stop and stop['phone']:
+        name_part = stop['customer_name'].split()[0] if stop['customer_name'] else 'there'
+        resident_url = f"{get_base_url()}/resident"
+        msg = (
+            f"Hey {name_part}! Your SpeedX package has been delivered. "
+            f"Save your drop preferences for future deliveries: {resident_url}"
+        )
+        send_sms(format_phone(stop['phone']), msg)
     # Redirect back to route
     route_id = stop['route_id'] if stop else None
     db.close()
@@ -1093,6 +1102,44 @@ def admin():
     return render_template('admin.html', routes=routes, buildings=buildings, stats=stats)
 
 # ─── TEST SMS ─────────────────────────────────────────────────
+
+@app.route('/admin/building', methods=['POST'])
+def admin_add_building():
+    if 'driver_id' not in session:
+        return redirect(url_for('driver_login'))
+    db = get_db()
+    address            = request.form.get('address', '').strip()
+    access_code        = request.form.get('access_code', '').strip()
+    buzzer_notes       = request.form.get('buzzer_notes', '').strip()
+    interior_directions = request.form.get('interior_directions', '').strip()
+    access_type        = request.form.get('access_type', 'code').strip()
+    if address:
+        try:
+            db.execute(
+                """INSERT INTO buildings (address, access_code, buzzer_notes, interior_directions, access_type)
+                   VALUES (?,?,?,?,?)
+                   ON CONFLICT(address) DO UPDATE SET
+                     access_code=excluded.access_code,
+                     buzzer_notes=excluded.buzzer_notes,
+                     interior_directions=excluded.interior_directions,
+                     access_type=excluded.access_type""",
+                (address, access_code, buzzer_notes, interior_directions, access_type)
+            )
+            db.commit()
+        except Exception as e:
+            log.error(f'Building save error: {e}')
+    db.close()
+    return redirect(url_for('admin'))
+
+@app.route('/admin/building/<int:building_id>/delete', methods=['POST'])
+def admin_delete_building(building_id):
+    if 'driver_id' not in session:
+        return redirect(url_for('driver_login'))
+    db = get_db()
+    db.execute("DELETE FROM buildings WHERE id=?", (building_id,))
+    db.commit()
+    db.close()
+    return redirect(url_for('admin'))
 
 @app.route('/admin/test-sms', methods=['POST'])
 def admin_test_sms():
