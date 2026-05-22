@@ -21,10 +21,11 @@
                placeholder="Route B — DTW — May 19" value="Route — {{ today }}">
       </div>
       <div class="mb-3">
-        <label>Upload Route File</label>
-        <input type="file" name="route_file" class="form-control" accept=".csv,.pdf,.png,.jpg,.jpeg">
-        <small class="text-muted">Accepts CSV, PDF, or a screenshot of your stop list</small>
+        <label>Upload Route Screenshots</label>
+        <input type="file" name="route_files" class="form-control" accept=".csv,.pdf,.png,.jpg,.jpeg" multiple>
+        <small class="text-muted">Select all screenshots at once — app combines them into one route</small>
       </div>
+      <div id="file-count" class="text-center mb-2" style="color:#00ff88;font-size:0.85rem;display:none;"></div>
     </div>
 
     <button class="btn btn-primary w-100 py-3 fs-6">
@@ -54,5 +55,21 @@
   if (nameInput && nameInput.value.includes('{{ today }}')) {
     nameInput.value = `Route — ${today}`;
   }
+
+  // Show file count when multiple selected
+  const fileInput = document.querySelector('[name="route_files"]');
+  const fileCount = document.getElementById('file-count');
+  fileInput.addEventListener('change', function() {
+    const n = this.files.length;
+    if (n > 1) {
+      fileCount.textContent = `${n} screenshots selected — will be combined into one route`;
+      fileCount.style.display = 'block';
+    } else if (n === 1) {
+      fileCount.textContent = `1 file selected`;
+      fileCount.style.display = 'block';
+    } else {
+      fileCount.style.display = 'none';
+    }
+  });
 </script>
 {% endblock %}
