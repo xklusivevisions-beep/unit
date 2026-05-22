@@ -979,7 +979,7 @@ def delivery_history():
                    LEFT JOIN routes r ON s.route_id = r.id
                    LEFT JOIN residents res ON s.address LIKE '%' || res.address || '%'
                                           OR res.address LIKE '%' || s.address || '%'
-                   WHERE s.address LIKE ? OR s.customer_name LIKE ?
+                   WHERE LOWER(s.address) LIKE LOWER(?) OR LOWER(s.customer_name) LIKE LOWER(?)
                    ORDER BY s.created_at DESC LIMIT 50""",
                 (f'%{street}%', f'%{query}%')
             ).fetchall()
@@ -994,7 +994,7 @@ def address_suggest():
     db = get_db()
     results = db.execute(
         """SELECT address, unit, customer_name FROM stops
-           WHERE address LIKE ? GROUP BY address, unit, customer_name ORDER BY MAX(id) DESC LIMIT 8""",
+           WHERE LOWER(address) LIKE LOWER(?) GROUP BY address, unit, customer_name ORDER BY MAX(id) DESC LIMIT 8""",
         (f'%{q}%',)
     ).fetchall()
     db.close()
@@ -1010,7 +1010,7 @@ def name_suggest():
     results = db.execute(
         """SELECT customer_name, address, unit, phone
            FROM stops
-           WHERE customer_name LIKE ?
+           WHERE LOWER(customer_name) LIKE LOWER(?)
            GROUP BY customer_name, address, unit, phone
            ORDER BY MAX(id) DESC LIMIT 8""",
         (f'%{q}%',)
