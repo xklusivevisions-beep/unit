@@ -480,15 +480,25 @@ def route_new():
 
             # ── IMAGE / SCREENSHOT (most common for Speed X) ──
             if fname.endswith(('.png', '.jpg', '.jpeg')):
-                if not OCR_AVAILABLE: continue
-                img = Image.open(io.BytesIO(route_file.read()))
-                w, h = img.size
-                img  = img.resize((w*2, h*2), Image.LANCZOS)
-                text = pytesseract.image_to_string(img, config='--psm 6')
-                for s in parse_stops_from_text(text):
-                    key = s.get('tracking') or s.get('address', '')
-                    if key and key not in collected:
-                        collected[key] = s
+                try:
+                    img_bytes = route_file.read()
+                    img = Image.open(io.BytesIO(img_bytes)).convert('RGB')
+                    w, h = img.size
+                    # Only upscale if image is small — prevents memory crash on large screenshots
+                    if w < 1200:
+                        img = img.resize((w*2, h*2), Image.LANCZOS)
+                    if OCR_AVAILABLE:
+                        text = pytesseract.image_to_string(img, config='--psm 6 --oem 3')
+                    else:
+                        # OCR not available — skip silently
+                        continue
+                    for s in parse_stops_from_text(text):
+                        key = s.get('tracking') or s.get('address', '')
+                        if key and key not in collected:
+                            collected[key] = s
+                except Exception as img_err:
+                    log.error(f'Image OCR error on {fname}: {img_err}')
+                    continue  # skip bad image, keep processing others
 
             # ── PDF ──
             elif fname.endswith('.pdf'):
