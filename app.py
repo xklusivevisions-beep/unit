@@ -631,8 +631,8 @@ def route_new():
         db.close()
 
         if stops_added == 0:
-            # No CSV — go to manual stop entry
-            return redirect(url_for('route_stops', route_id=route_id))
+            # Nothing parsed — go to manual stop entry
+            return redirect(url_for('route_manual'))
 
         return redirect(url_for('route_detail', route_id=route_id))
 
