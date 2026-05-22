@@ -94,11 +94,13 @@ class DBWrapper:
             for stmt in script.split(';'):
                 stmt = stmt.strip()
                 if not stmt: continue
-                # Skip SQLite-only pragmas
                 if stmt.upper().startswith('PRAGMA'): continue
                 try:
                     self._cur.execute(self._fix(stmt))
-                except Exception: pass
+                    self._conn.commit()
+                except Exception:
+                    try: self._conn.rollback()
+                    except: pass
         else:
             self._conn.executescript(script)
         return self
