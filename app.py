@@ -103,11 +103,22 @@ class DBWrapper:
             self._conn.executescript(script)
         return self
 
+    class _RowDict(dict):
+        """Dict that also supports integer index access (row[0] == first value)."""
+        def __getitem__(self, key):
+            if isinstance(key, int):
+                return list(self.values())[key]
+            return super().__getitem__(key)
+        def __contains__(self, key):
+            if isinstance(key, int):
+                return key < len(self)
+            return super().__contains__(key)
+
     def _to_dict(self, row):
-        """Convert pg8000 tuple row to dict using cursor description."""
+        """Convert pg8000 tuple row to RowDict supporting both col name and int index."""
         if row is None: return None
         cols = [d[0] for d in self._cur.description]
-        return dict(zip(cols, row))
+        return DBWrapper._RowDict(zip(cols, row))
 
     def fetchone(self):
         row = self._cur.fetchone()
