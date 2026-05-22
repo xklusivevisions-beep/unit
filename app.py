@@ -279,6 +279,7 @@ def init_db():
         "ALTER TABLE stops ADD COLUMN drop_spot TEXT",
         "ALTER TABLE residents ADD COLUMN sms_consent INTEGER DEFAULT 0",
         "ALTER TABLE residents ADD COLUMN sms_consent_at TEXT",
+        "ALTER TABLE drivers ADD COLUMN onboarded INTEGER DEFAULT 0",
         "CREATE TABLE IF NOT EXISTS pin_corrections (id INTEGER PRIMARY KEY AUTOINCREMENT, address TEXT UNIQUE NOT NULL, lat REAL NOT NULL, lng REAL NOT NULL, corrected_by TEXT, corrected_at TEXT DEFAULT CURRENT_TIMESTAMP)",
     ]:
         try:
@@ -457,9 +458,28 @@ def driver_login():
         if driver:
             session['driver_id'] = driver['id']
             session['driver_name'] = driver['name']
+            # First-time driver → show walkthrough
+            if not driver['onboarded']:
+                return redirect(url_for('driver_walkthrough'))
             return redirect(url_for('driver_dashboard'))
         error = 'Invalid PIN'
     return render_template('driver_login.html', error=error)
+
+@app.route('/driver/walkthrough')
+def driver_walkthrough():
+    if 'driver_id' not in session:
+        return redirect(url_for('driver_login'))
+    return render_template('driver_walkthrough.html', driver=session['driver_name'])
+
+@app.route('/driver/walkthrough/complete', methods=['POST'])
+def driver_walkthrough_complete():
+    if 'driver_id' not in session:
+        return redirect(url_for('driver_login'))
+    db = get_db()
+    db.execute("UPDATE drivers SET onboarded=1 WHERE id=?", (session['driver_id'],))
+    db.commit()
+    db.close()
+    return redirect(url_for('driver_dashboard'))
 
 @app.route('/driver/logout')
 def driver_logout():

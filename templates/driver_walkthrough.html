@@ -1,0 +1,328 @@
+{% extends 'base.html' %}
+{% block title %}UNIT — Getting Started{% endblock %}
+{% block content %}
+<style>
+  .wt-wrap {
+    position: fixed; inset: 0; background: #0a0a0a;
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  .wt-header {
+    padding: 20px 24px 0;
+    display: flex; justify-content: space-between; align-items: center;
+    flex-shrink: 0;
+  }
+  .wt-progress-bar {
+    margin: 16px 24px 0;
+    height: 3px; background: #1a1a1a; border-radius: 99px; overflow: hidden;
+    flex-shrink: 0;
+  }
+  .wt-progress-fill {
+    height: 100%; background: #00ff88; border-radius: 99px;
+    transition: width 0.35s ease;
+  }
+  .wt-slides {
+    flex: 1; display: flex; overflow: hidden; position: relative;
+  }
+  .wt-slide {
+    min-width: 100%; padding: 32px 28px 24px;
+    display: flex; flex-direction: column;
+    transition: transform 0.35s cubic-bezier(.4,0,.2,1);
+    overflow-y: auto;
+  }
+  .wt-icon {
+    font-size: 3.2rem; margin-bottom: 20px; line-height: 1;
+  }
+  .wt-step-label {
+    font-size: 0.7rem; font-weight: 700; letter-spacing: 0.15em;
+    color: #00ff88; margin-bottom: 8px; text-transform: uppercase;
+  }
+  .wt-title {
+    font-size: 1.5rem; font-weight: 800; line-height: 1.25;
+    margin-bottom: 14px; color: #fff;
+  }
+  .wt-body {
+    color: #ccc; font-size: 0.92rem; line-height: 1.65; flex: 1;
+  }
+  .wt-body ol, .wt-body ul {
+    padding-left: 20px; margin: 10px 0 0;
+  }
+  .wt-body li { margin-bottom: 8px; }
+  .wt-body strong { color: #fff; }
+  .wt-tip {
+    margin-top: 16px; padding: 12px 14px;
+    background: #00ff8811; border: 1px solid #00ff8833;
+    border-radius: 10px; font-size: 0.82rem; color: #00ff88;
+  }
+  .wt-footer {
+    padding: 16px 24px 32px;
+    display: flex; gap: 10px; flex-shrink: 0;
+  }
+  .btn-wt-back {
+    flex: 0 0 56px; background: #1a1a1a; color: #fff;
+    border: none; border-radius: 14px; font-size: 1.1rem;
+    font-weight: 700; cursor: pointer;
+  }
+  .btn-wt-next {
+    flex: 1; background: #00ff88; color: #000;
+    border: none; border-radius: 14px; font-size: 0.95rem;
+    font-weight: 800; padding: 16px; cursor: pointer;
+    letter-spacing: 0.03em;
+  }
+  .btn-wt-next:active { opacity: 0.85; }
+  .dot-row {
+    display: flex; justify-content: center; gap: 6px;
+    margin: 0 24px 4px;
+  }
+  .dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: #333; transition: background 0.25s, transform 0.25s;
+  }
+  .dot.active { background: #00ff88; transform: scale(1.3); }
+</style>
+
+<div class="wt-wrap">
+  <div class="wt-header">
+    <div class="unit-logo" style="font-size:1.2rem;">UNIT<span>.</span></div>
+    <a href="/driver/walkthrough/complete" style="color:#555;font-size:0.8rem;text-decoration:none;">Skip</a>
+  </div>
+  <div class="wt-progress-bar">
+    <div class="wt-progress-fill" id="wt-prog" style="width:11.1%;"></div>
+  </div>
+
+  <div class="wt-slides" id="wt-slides">
+
+    <!-- SLIDE 0: Welcome -->
+    <div class="wt-slide">
+      <div class="wt-icon">👋</div>
+      <div class="wt-step-label">Welcome</div>
+      <div class="wt-title">Hey {{ driver }},<br>let's get you set up.</div>
+      <div class="wt-body">
+        This quick walkthrough covers everything you need to use UNIT like a pro.
+        <br><br>
+        Takes about 2 minutes. You can always replay it from your <strong>Account</strong> page.
+      </div>
+      <div class="wt-tip">💡 Swipe or tap Next to move through the steps.</div>
+    </div>
+
+    <!-- SLIDE 1: Import Routes -->
+    <div class="wt-slide">
+      <div class="wt-icon">📦</div>
+      <div class="wt-step-label">Step 1 of 8</div>
+      <div class="wt-title">How to Import Your Route</div>
+      <div class="wt-body">
+        <ol>
+          <li>Open the <strong>Speed X app</strong> and go to your route for today.</li>
+          <li>Screenshot or copy your stop list.</li>
+          <li>In UNIT, tap <strong>"New Route"</strong> at the bottom.</li>
+          <li>Paste or upload your route — UNIT reads the addresses automatically.</li>
+          <li>Tap <strong>Import</strong> and your stops will load in order.</li>
+        </ol>
+        <div class="wt-tip">💡 UNIT auto-fills phone numbers and drop spots for addresses already in the system.</div>
+      </div>
+    </div>
+
+    <!-- SLIDE 2: Delete Routes -->
+    <div class="wt-slide">
+      <div class="wt-icon">🗑️</div>
+      <div class="wt-step-label">Step 2 of 8</div>
+      <div class="wt-title">How to Delete a Route</div>
+      <div class="wt-body">
+        <ol>
+          <li>Go to your <strong>Home</strong> screen (the dashboard).</li>
+          <li>Find your active route at the top.</li>
+          <li>Tap the red <strong>Clear</strong> button in the top-right corner of the route.</li>
+          <li>Confirm the prompt — all stops will be removed.</li>
+        </ol>
+        <div class="wt-tip">⚠️ This deletes all stops for that route. Only do this when you're starting a new day or imported the wrong file.</div>
+      </div>
+    </div>
+
+    <!-- SLIDE 3: Cancel Subscription -->
+    <div class="wt-slide">
+      <div class="wt-icon">💳</div>
+      <div class="wt-step-label">Step 3 of 8</div>
+      <div class="wt-title">How to Cancel Your Subscription</div>
+      <div class="wt-body">
+        <ol>
+          <li>Tap <strong>Account</strong> in the bottom nav.</li>
+          <li>Scroll down to <strong>Billing</strong>.</li>
+          <li>Tap <strong>Manage Subscription</strong> — this opens your Stripe billing portal.</li>
+          <li>Tap <strong>Cancel Plan</strong> and confirm.</li>
+        </ol>
+        <div class="wt-tip">💡 Your account stays active until the end of your billing period after cancelling.</div>
+      </div>
+    </div>
+
+    <!-- SLIDE 4: Manual Tracking Link -->
+    <div class="wt-slide">
+      <div class="wt-icon">🔗</div>
+      <div class="wt-step-label">Step 4 of 8</div>
+      <div class="wt-title">How to Send the Tracking Link Manually</div>
+      <div class="wt-body">
+        If a customer didn't get an SMS or wants to track you manually:
+        <ol>
+          <li>Open a stop by tapping <strong>Active</strong> or the stop address.</li>
+          <li>Tap <strong>"Send Link"</strong> — this opens your phone's default texting app with the link pre-filled.</li>
+          <li>Hit send. The customer gets a live map showing your location.</li>
+        </ol>
+        <div class="wt-tip">💡 This uses your personal number — great backup when automated SMS isn't working.</div>
+      </div>
+    </div>
+
+    <!-- SLIDE 5: Location for Safari -->
+    <div class="wt-slide">
+      <div class="wt-icon">📍</div>
+      <div class="wt-step-label">Step 5 of 8</div>
+      <div class="wt-title">How to Turn On Location in Safari</div>
+      <div class="wt-body">
+        UNIT needs your location to track your route and trigger proximity alerts.
+        <br><br><strong>On iPhone:</strong>
+        <ol>
+          <li>Go to <strong>Settings → Privacy & Security → Location Services</strong>.</li>
+          <li>Scroll down and tap <strong>Safari Websites</strong>.</li>
+          <li>Set to <strong>"While Using the App"</strong>.</li>
+          <li>Come back to UNIT and refresh the page.</li>
+        </ol>
+        <div class="wt-tip">💡 If UNIT is added to your home screen, location permissions may be separate — allow when prompted on launch.</div>
+      </div>
+    </div>
+
+    <!-- SLIDE 6: Add to Home Screen -->
+    <div class="wt-slide">
+      <div class="wt-icon">📱</div>
+      <div class="wt-step-label">Step 6 of 8</div>
+      <div class="wt-title">How to Add UNIT to Your Home Screen</div>
+      <div class="wt-body">
+        Run UNIT like a native app — no App Store needed.
+        <br><br><strong>On iPhone (Safari):</strong>
+        <ol>
+          <li>Open UNIT in <strong>Safari</strong> (not Chrome).</li>
+          <li>Tap the <strong>Share</strong> icon (box with arrow) at the bottom.</li>
+          <li>Scroll down and tap <strong>"Add to Home Screen"</strong>.</li>
+          <li>Tap <strong>Add</strong> — UNIT appears on your home screen like an app.</li>
+        </ol>
+        <div class="wt-tip">💡 Opening from your home screen gives you full-screen mode and faster load times.</div>
+      </div>
+    </div>
+
+    <!-- SLIDE 7: Pin Correction -->
+    <div class="wt-slide">
+      <div class="wt-icon">📌</div>
+      <div class="wt-step-label">Step 7 of 8</div>
+      <div class="wt-title">How to Move a Pin (Fix Wrong Location)</div>
+      <div class="wt-body">
+        If the geofence isn't triggering or the map pin is in the wrong spot:
+        <ol>
+          <li>Tap the stop to open it (Active view).</li>
+          <li>Tap <strong>"Fix Pin"</strong> on the map.</li>
+          <li>Drag the pin to the correct delivery location.</li>
+          <li>Tap <strong>Save Location</strong>.</li>
+        </ol>
+        The corrected pin is <strong>saved permanently</strong> — every driver going to that address will use your correction automatically.
+        <div class="wt-tip">💡 The geofence radius is ~150 ft. If the pin is off, the proximity alert may fire too early or not at all.</div>
+      </div>
+    </div>
+
+    <!-- SLIDE 8: Change Phone Number -->
+    <div class="wt-slide">
+      <div class="wt-icon">📞</div>
+      <div class="wt-step-label">Step 8 of 8</div>
+      <div class="wt-title">How to Change Your Phone Number</div>
+      <div class="wt-body">
+        <ol>
+          <li>Tap <strong>Account</strong> in the bottom nav.</li>
+          <li>Tap <strong>Edit Profile</strong>.</li>
+          <li>Update your phone number and tap <strong>Save</strong>.</li>
+        </ol>
+        Your new number will be used for all future SMS delivery alerts and your manual tracking link.
+        <div class="wt-tip">💡 Make sure your number is correct — customers receive texts from this number when you use the manual send option.</div>
+      </div>
+    </div>
+
+    <!-- SLIDE 9: Done -->
+    <div class="wt-slide" style="justify-content:center; text-align:center;">
+      <div class="wt-icon" style="text-align:center;">✅</div>
+      <div class="wt-title" style="text-align:center;">You're all set.</div>
+      <div class="wt-body" style="text-align:center;">
+        You now know everything you need to run your route with UNIT.
+        <br><br>
+        Tap <strong>Start Delivering</strong> to go to your dashboard.
+        <br><br>
+        You can replay this walkthrough anytime from your <strong>Account</strong> page.
+      </div>
+    </div>
+
+  </div><!-- /wt-slides -->
+
+  <div class="dot-row" id="wt-dots"></div>
+
+  <div class="wt-footer">
+    <button class="btn-wt-back" id="wt-back">‹</button>
+    <button class="btn-wt-next" id="wt-next">Next →</button>
+  </div>
+</div>
+
+<script>
+const TOTAL = 9; // 0 = welcome, 1-8 = steps, last = done
+let cur = 0;
+
+const slidesEl = document.getElementById('wt-slides');
+const allSlides = slidesEl.querySelectorAll('.wt-slide');
+const nextBtn   = document.getElementById('wt-next');
+const backBtn   = document.getElementById('wt-back');
+const prog      = document.getElementById('wt-prog');
+const dotsEl    = document.getElementById('wt-dots');
+
+// Build dots
+for (let i = 0; i < TOTAL; i++) {
+  const d = document.createElement('div');
+  d.className = 'dot' + (i === 0 ? ' active' : '');
+  dotsEl.appendChild(d);
+}
+
+function render() {
+  allSlides.forEach((s, i) => {
+    s.style.transform = `translateX(${(i - cur) * 100}%)`;
+  });
+  prog.style.width = ((cur + 1) / TOTAL * 100) + '%';
+  dotsEl.querySelectorAll('.dot').forEach((d, i) => {
+    d.classList.toggle('active', i === cur);
+  });
+  backBtn.style.opacity = cur === 0 ? '0.3' : '1';
+  if (cur === TOTAL - 1) {
+    nextBtn.textContent = 'Start Delivering 🚀';
+    nextBtn.style.background = '#00ff88';
+  } else {
+    nextBtn.textContent = 'Next →';
+  }
+}
+
+nextBtn.addEventListener('click', () => {
+  if (cur < TOTAL - 1) {
+    cur++;
+    render();
+  } else {
+    // Mark complete and go to dashboard
+    fetch('/driver/walkthrough/complete', { method: 'POST' })
+      .then(() => window.location.href = '/driver');
+  }
+});
+
+backBtn.addEventListener('click', () => {
+  if (cur > 0) { cur--; render(); }
+});
+
+// Swipe support
+let startX = 0;
+slidesEl.addEventListener('touchstart', e => { startX = e.touches[0].clientX; }, { passive: true });
+slidesEl.addEventListener('touchend', e => {
+  const dx = e.changedTouches[0].clientX - startX;
+  if (Math.abs(dx) > 50) {
+    if (dx < 0 && cur < TOTAL - 1) { cur++; render(); }
+    else if (dx > 0 && cur > 0)   { cur--; render(); }
+  }
+});
+
+render();
+</script>
+{% endblock %}
