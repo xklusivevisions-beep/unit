@@ -923,15 +923,6 @@ def stop_delivered(stop_id):
     stop = db.execute("SELECT * FROM stops WHERE id=?", (stop_id,)).fetchone()
     db.execute("UPDATE stops SET status='delivered' WHERE id=?", (stop_id,))
     db.commit()
-    # Send delivery confirmation SMS with resident portal link
-    if stop and stop['phone']:
-        name_part = stop['customer_name'].split()[0] if stop['customer_name'] else 'there'
-        resident_url = f"{get_base_url()}/resident"
-        msg = (
-            f"Hey {name_part}! Your SpeedX package has been delivered. "
-            f"Save your drop preferences for future deliveries: {resident_url}"
-        )
-        send_sms(format_phone(stop['phone']), msg)
     # Redirect back to route
     route_id = stop['route_id'] if stop else None
     db.close()

@@ -66,6 +66,21 @@
     {% if stop.unit %}<div style="color:#00ff88;font-size:0.85rem;" class="fw-bold mt-1">Unit {{ stop.unit }}</div>{% endif %}
   </div>
 
+  {% if stop.status == 'delivered' %}
+  <!-- Registration CTA -->
+  <div class="card p-4 mb-3 text-center" style="border-color:#00ff8844;background:#00ff8808;">
+    <div style="font-size:2rem;margin-bottom:10px;">📦</div>
+    <div class="fw-bold mb-2" style="color:#00ff88;font-size:1rem;">Make Future Deliveries Smoother</div>
+    <p class="text-secondary mb-3" style="font-size:0.85rem;line-height:1.55;">
+      Tell your driver exactly where to drop your packages, add door notes, and save your preferences — once and done.
+    </p>
+    <a href="/resident" class="btn w-100 py-3 fw-bold" style="background:#00ff88;color:#000;border-radius:12px;font-size:0.95rem;">
+      <i class="fas fa-user-check me-2"></i>Set My Delivery Preferences
+    </a>
+    <small class="text-muted d-block mt-2">Free · Takes 30 seconds</small>
+  </div>
+  {% endif %}
+
 </div>
 {% endblock %}
 
