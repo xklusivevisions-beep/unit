@@ -643,13 +643,26 @@ def route_new():
             full_addr = s.get('address', '')
             if not full_addr: continue
             street    = full_addr.split(',')[0].strip()
-            resident  = db.execute("SELECT * FROM residents WHERE address LIKE ?", (f'%{street}%',)).fetchone()
+            resident  = db.execute("SELECT * FROM residents WHERE LOWER(address) LIKE LOWER(?)", (f'%{street}%',)).fetchone()
             phone      = resident['phone']      if resident else ''
             drop_spot  = resident['drop_spot']  if resident else ''
             door_notes = resident['door_notes'] if resident else ''
             unit       = s.get('unit', '') or (resident['unit'] if resident and resident.get('unit') else '')
+            # If no resident profile, pull phone from stop history
+            if not phone:
+                hist = db.execute(
+                    """SELECT phone, customer_name FROM stops
+                       WHERE LOWER(address) LIKE LOWER(?) AND phone != ''
+                       ORDER BY id DESC LIMIT 1""",
+                    (f'%{street}%',)
+                ).fetchone()
+                if hist:
+                    phone = hist['phone'] or ''
+                    # Also fill name from history if not parsed from import
+                    if not s.get('name') and hist['customer_name']:
+                        s['name'] = hist['customer_name']
             # Building access
-            building   = db.execute("SELECT * FROM buildings WHERE address LIKE ?", (f'%{street}%',)).fetchone()
+            building   = db.execute("SELECT * FROM buildings WHERE LOWER(address) LIKE LOWER(?)", (f'%{street}%',)).fetchone()
             access_note = ''
             if building:
                 parts = []
@@ -712,6 +725,42 @@ def route_manual():
             if not addr.strip(): continue
             token = secrets.token_urlsafe(12)
             clean_addr = addr.strip()
+            street_m   = clean_addr.split(',')[0].strip()
+            # Auto-fill from residents table
+            resident_m = db.execute(
+                "SELECT * FROM residents WHERE LOWER(address) LIKE LOWER(?)", (f'%{street_m}%',)
+            ).fetchone()
+            auto_phone = phones[i].strip() if i < len(phones) and phones[i].strip() else ''
+            auto_name  = names[i].strip()  if i < len(names)  and names[i].strip()  else ''
+            auto_unit  = units[i].strip()  if i < len(units)  and units[i].strip()  else ''
+            auto_drop  = ''
+            auto_notes = ''
+            if resident_m:
+                if not auto_phone: auto_phone = resident_m['phone'] or ''
+                if not auto_unit:  auto_unit  = resident_m['unit']  or ''
+                auto_drop  = resident_m['drop_spot']  or ''
+                auto_notes = resident_m['door_notes'] or ''
+            # Fallback to stop history for phone + name
+            if not auto_phone or not auto_name:
+                hist_m = db.execute(
+                    """SELECT phone, customer_name FROM stops
+                       WHERE LOWER(address) LIKE LOWER(?) AND (phone != '' OR customer_name != '')
+                       ORDER BY id DESC LIMIT 1""",
+                    (f'%{street_m}%',)
+                ).fetchone()
+                if hist_m:
+                    if not auto_phone: auto_phone = hist_m['phone'] or ''
+                    if not auto_name:  auto_name  = hist_m['customer_name'] or ''
+            # Building access codes
+            building_m = db.execute(
+                "SELECT * FROM buildings WHERE LOWER(address) LIKE LOWER(?)", (f'%{street_m}%',)
+            ).fetchone()
+            if building_m:
+                parts = []
+                if building_m['access_code']:  parts.append(f"Code: {building_m['access_code']}")
+                if building_m['buzzer_notes']: parts.append(f"Buzzer: {building_m['buzzer_notes']}")
+                if building_m['interior_directions']: parts.append(building_m['interior_directions'])
+                if parts: auto_notes = ' | '.join(filter(None, [auto_notes, ' | '.join(parts)]))
             correction = db.execute(
                 "SELECT lat, lng FROM pin_corrections WHERE address=?",
                 (clean_addr,)
@@ -719,12 +768,11 @@ def route_manual():
             saved_lat = correction['lat'] if correction else None
             saved_lng = correction['lng'] if correction else None
             db.execute(
-                "INSERT INTO stops (route_id, stop_number, address, unit, customer_name, phone, token, dest_lat, dest_lng) VALUES (?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO stops (route_id, stop_number, address, unit, customer_name, phone, drop_spot, notes, token, dest_lat, dest_lng) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (route_id, i+1, clean_addr,
-                 units[i].strip() if i < len(units) else '',
-                 names[i].strip() if i < len(names) else '',
-                 format_phone(phones[i].strip()) if i < len(phones) and phones[i].strip() else '',
-                 token, saved_lat, saved_lng)
+                 auto_unit, auto_name,
+                 format_phone(auto_phone) if auto_phone else '',
+                 auto_drop, auto_notes, token, saved_lat, saved_lng)
             )
         db.commit()
         db.close()
