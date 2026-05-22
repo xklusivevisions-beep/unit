@@ -1231,7 +1231,25 @@ def admin_test_sms():
 def account():
     if 'driver_id' not in session:
         return redirect(url_for('driver_login'))
-    return render_template('account.html', driver=session['driver_name'])
+    db = get_db()
+    driver = db.execute("SELECT * FROM drivers WHERE id=?", (session['driver_id'],)).fetchone()
+    db.close()
+    return render_template('account.html', driver=session['driver_name'], phone=driver['phone'] or '')
+
+@app.route('/account/edit', methods=['POST'])
+def account_edit():
+    if 'driver_id' not in session:
+        return redirect(url_for('driver_login'))
+    name  = request.form.get('name', '').strip()
+    phone = request.form.get('phone', '').strip()
+    db = get_db()
+    if name and phone:
+        db.execute("UPDATE drivers SET name=?, phone=? WHERE id=?",
+                   (name, format_phone(phone), session['driver_id']))
+        db.commit()
+        session['driver_name'] = name
+    db.close()
+    return redirect(url_for('account'))
 
 @app.route('/account/manage')
 def account_manage():

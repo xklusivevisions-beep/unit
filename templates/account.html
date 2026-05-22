@@ -12,10 +12,22 @@
 
   <h5 class="fw-bold mb-4">My Account</h5>
 
-  <!-- Driver Info -->
+  <!-- Edit Profile -->
   <div class="card p-4 mb-3">
-    <div class="text-secondary small mb-1">Logged in as</div>
-    <div class="fw-bold fs-5">{{ driver }}</div>
+    <div class="fw-bold mb-3">Edit Profile</div>
+    <form method="POST" action="/account/edit">
+      <div class="mb-3">
+        <label class="text-secondary small">Full Name</label>
+        <input type="text" name="name" class="form-control mt-1" value="{{ driver }}" required>
+      </div>
+      <div class="mb-3">
+        <label class="text-secondary small">Phone Number <span style="color:#555;font-size:0.75rem;">(used for manual tracking link)</span></label>
+        <input type="tel" name="phone" class="form-control mt-1" value="{{ phone }}" placeholder="+13135550000" required>
+      </div>
+      <button type="submit" class="btn w-100 py-3" style="background:#00ff88;color:#000;font-weight:700;border-radius:12px;">
+        <i class="fas fa-save me-2"></i>Save Changes
+      </button>
+    </form>
   </div>
 
   <!-- Subscription -->
