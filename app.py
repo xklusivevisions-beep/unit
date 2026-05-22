@@ -963,12 +963,16 @@ def delivery_history():
             street = query.split(',')[0].strip()
             db = get_db()
             results = db.execute(
-                """SELECT s.*, r.name as route_name, r.date as route_date
+                """SELECT s.*, r.name as route_name, r.date as route_date,
+                          res.drop_spot as res_drop_spot, res.door_notes as res_door_notes,
+                          res.phone as res_phone
                    FROM stops s
                    LEFT JOIN routes r ON s.route_id = r.id
-                   WHERE s.address LIKE ?
+                   LEFT JOIN residents res ON s.address LIKE '%' || res.address || '%'
+                                          OR res.address LIKE '%' || s.address || '%'
+                   WHERE s.address LIKE ? OR s.customer_name LIKE ?
                    ORDER BY s.created_at DESC LIMIT 50""",
-                (f'%{street}%',)
+                (f'%{street}%', f'%{query}%')
             ).fetchall()
             db.close()
     return render_template('delivery_history.html', results=results, query=query)
@@ -986,6 +990,29 @@ def address_suggest():
     ).fetchall()
     db.close()
     return jsonify([{'address': r['address'], 'unit': r['unit'] or '', 'name': r['customer_name'] or ''} for r in results])
+
+@app.route('/api/resident-suggest')
+def resident_suggest():
+    """Search residents by name — returns address + delivery prefs for manual entry autofill."""
+    q = request.args.get('q', '').strip()
+    if len(q) < 2:
+        return jsonify([])
+    db = get_db()
+    results = db.execute(
+        """SELECT address, unit, phone, drop_spot, door_notes
+           FROM residents
+           WHERE address LIKE ? OR unit LIKE ?
+           ORDER BY id DESC LIMIT 10""",
+        (f'%{q}%', f'%{q}%')
+    ).fetchall()
+    db.close()
+    return jsonify([{
+        'address':    r['address'],
+        'unit':       r['unit'] or '',
+        'phone':      r['phone'] or '',
+        'drop_spot':  r['drop_spot'] or '',
+        'door_notes': r['door_notes'] or ''
+    } for r in results])
 
 # ─── GPS API ───────────────────────────────────────────────────
 

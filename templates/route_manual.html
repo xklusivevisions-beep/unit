@@ -36,9 +36,10 @@
             <label>Unit / Suite</label>
             <input type="text" name="unit" class="form-control" placeholder="Apt 4B (optional)">
           </div>
-          <div class="col-6">
+          <div class="col-6" style="position:relative;">
             <label>Customer Name</label>
-            <input type="text" name="name" class="form-control" placeholder="John D.">
+            <input type="text" name="name" class="form-control name-input" placeholder="John D." autocomplete="off">
+            <ul class="name-suggestions" style="position:absolute;z-index:1001;width:200%;left:0;background:#1a1a1a;border:1px solid #333;border-radius:8px;list-style:none;padding:0;margin:0;display:none;"></ul>
           </div>
         </div>
         <div>
@@ -92,9 +93,10 @@ document.getElementById('add-stop').addEventListener('click', function() {
         <label>Unit / Suite</label>
         <input type="text" name="unit" class="form-control" placeholder="Apt 4B (optional)">
       </div>
-      <div class="col-6">
+      <div class="col-6" style="position:relative;">
         <label>Customer Name</label>
-        <input type="text" name="name" class="form-control" placeholder="John D.">
+        <input type="text" name="name" class="form-control name-input" placeholder="John D." autocomplete="off">
+        <ul class="name-suggestions" style="position:absolute;z-index:1001;width:200%;left:0;background:#1a1a1a;border:1px solid #333;border-radius:8px;list-style:none;padding:0;margin:0;display:none;"></ul>
       </div>
     </div>
     <div>
@@ -190,9 +192,62 @@ function attachSuggestions(input) {
 }
 
 document.querySelectorAll('.address-input').forEach(attachSuggestions);
+document.querySelectorAll('.name-input').forEach(attachNameSuggestions);
 
 document.getElementById('add-stop').addEventListener('click', function() {
-  setTimeout(() => document.querySelectorAll('.address-input').forEach(attachSuggestions), 100);
+  setTimeout(() => {
+    document.querySelectorAll('.address-input').forEach(attachSuggestions);
+    document.querySelectorAll('.name-input').forEach(attachNameSuggestions);
+  }, 100);
 });
+
+function attachNameSuggestions(input) {
+  if (input.dataset.nac) return;
+  input.dataset.nac = '1';
+  const row = input.closest('.stop-row');
+  const sugg = input.closest('div').querySelector('.name-suggestions');
+  let timer;
+
+  input.addEventListener('input', function() {
+    clearTimeout(timer);
+    const q = this.value.trim();
+    if (q.length < 2) { sugg.style.display = 'none'; return; }
+    timer = setTimeout(() => {
+      // Search residents by address fragment matching the name field
+      fetch(`/api/address-suggest?q=${encodeURIComponent(q)}`)
+        .then(r => r.json())
+        .then(history => {
+          sugg.innerHTML = '';
+          if (!history.length) { sugg.style.display = 'none'; return; }
+          history.forEach(item => {
+            if (!item.name) return;
+            const li = document.createElement('li');
+            li.innerHTML = `
+              <div style="font-size:0.88rem;color:#fff;font-weight:600;">${item.name}</div>
+              <div style="font-size:0.72rem;color:#00ff88;">${item.address}${item.unit ? ' · ' + item.unit : ''}</div>`;
+            li.style.cssText = 'padding:10px 14px;cursor:pointer;border-bottom:1px solid #222;';
+            li.addEventListener('click', () => {
+              input.value = item.name;
+              if (row) {
+                const addrInput = row.querySelector('input[name="address"]');
+                const unitInput = row.querySelector('input[name="unit"]');
+                if (addrInput && !addrInput.value) addrInput.value = item.address;
+                if (unitInput && !unitInput.value && item.unit) unitInput.value = item.unit;
+              }
+              sugg.style.display = 'none';
+            });
+            sugg.appendChild(li);
+          });
+          if (sugg.children.length) sugg.style.display = 'block';
+          else sugg.style.display = 'none';
+        })
+        .catch(() => { sugg.style.display = 'none'; });
+    }, 300);
+  });
+
+  document.addEventListener('click', e => {
+    if (!input.contains(e.target) && !sugg.contains(e.target)) sugg.style.display = 'none';
+  });
+}
 </script>
 {% endblock %}

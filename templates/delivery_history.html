@@ -17,7 +17,7 @@
   <form method="POST" class="mb-4">
     <div class="d-flex gap-2">
       <input type="text" name="address" class="form-control"
-             placeholder="Search address or street..."
+             placeholder="Search name or address..."
              value="{{ query }}" required>
       <button class="btn btn-primary px-4" style="white-space:nowrap;">
         <i class="fas fa-search"></i>
@@ -72,7 +72,18 @@
       {% endif %}
     </div>
 
-    <div class="d-flex justify-content-between">
+    {% if r.res_drop_spot or r.res_door_notes %}
+    <div class="mt-2 p-2" style="background:#00ff8808;border:1px solid #00ff8822;border-radius:8px;">
+      <div style="font-size:0.7rem;color:#00ff88;font-weight:700;letter-spacing:0.08em;margin-bottom:4px;">📋 RESIDENT PREFERENCES</div>
+      {% if r.res_drop_spot %}
+      <div style="font-size:0.8rem;color:#ccc;"><strong style="color:#fff;">Drop spot:</strong> {{ r.res_drop_spot }}</div>
+      {% endif %}
+      {% if r.res_door_notes %}
+      <div style="font-size:0.8rem;color:#ccc;"><strong style="color:#fff;">Notes:</strong> {{ r.res_door_notes }}</div>
+      {% endif %}
+    </div>
+    {% endif %}
+    <div class="d-flex justify-content-between mt-2">
       <small class="text-muted">{{ r.route_name or 'Manual' }}</small>
       <small class="text-muted">{{ r.created_at[:16] if r.created_at else '' }}</small>
     </div>
