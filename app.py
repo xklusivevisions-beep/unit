@@ -471,12 +471,13 @@ def driver_login():
         if driver:
             session['driver_id'] = driver['id']
             session['driver_name'] = driver['name']
-            # First-time driver → show walkthrough (safe fallback if column missing)
+            # Check onboarded — DB flag + session backup
             try:
-                is_new = not driver['onboarded']
-            except (KeyError, IndexError):
-                is_new = True
-            if is_new:
+                db_onboarded = driver['onboarded'] == 1
+            except (KeyError, IndexError, TypeError):
+                db_onboarded = False
+            session_onboarded = session.get('onboarded', False)
+            if not db_onboarded and not session_onboarded:
                 return redirect(url_for('driver_walkthrough'))
             return redirect(url_for('driver_dashboard'))
         error = 'Invalid PIN'
@@ -501,6 +502,7 @@ def driver_walkthrough_complete():
         try: db._conn.rollback()
         except: pass
     db.close()
+    session['onboarded'] = True  # session backup in case DB update fails
     return redirect(url_for('driver_dashboard'))
 
 @app.route('/driver/logout')
