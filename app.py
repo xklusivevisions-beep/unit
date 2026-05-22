@@ -702,6 +702,39 @@ def route_detail(route_id):
     with_phone = sum(1 for s in stops if s['phone'])
     return render_template('route_detail.html', route=route, stops=stops, total=total, with_phone=with_phone)
 
+@app.route('/driver/route/<int:route_id>/add-stop', methods=['POST'])
+def route_add_stop(route_id):
+    if 'driver_id' not in session:
+        return jsonify({'error': 'unauthorized'}), 401
+    data    = request.get_json()
+    address = data.get('address', '').strip()
+    name    = data.get('name', '').strip()
+    phone   = format_phone(data.get('phone', '').strip()) if data.get('phone', '').strip() else ''
+    if not address:
+        return jsonify({'ok': False, 'error': 'Address required'})
+    db = get_db()
+    # Get next stop number
+    last = db.execute("SELECT MAX(stop_number) as mx FROM stops WHERE route_id=?", (route_id,)).fetchone()
+    next_num = (last['mx'] or 0) + 1
+    # Check resident profile
+    street    = address.split(',')[0].strip()
+    resident  = db.execute("SELECT * FROM residents WHERE address LIKE ?", (f'%{street}%',)).fetchone()
+    if not phone and resident:   phone     = resident['phone'] or ''
+    drop_spot  = resident['drop_spot']  if resident else ''
+    door_notes = resident['door_notes'] if resident else ''
+    # Pin correction
+    correction = db.execute("SELECT lat, lng FROM pin_corrections WHERE address=?", (address,)).fetchone()
+    saved_lat  = correction['lat'] if correction else None
+    saved_lng  = correction['lng'] if correction else None
+    token      = secrets.token_urlsafe(12)
+    db.execute(
+        "INSERT INTO stops (route_id, stop_number, address, customer_name, phone, drop_spot, notes, token, dest_lat, dest_lng) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (route_id, next_num, address, name, phone, drop_spot, door_notes, token, saved_lat, saved_lng)
+    )
+    db.commit()
+    db.close()
+    return jsonify({'ok': True})
+
 @app.route('/driver/route/<int:route_id>/stop/<int:stop_id>/phone', methods=['POST'])
 def update_stop_phone(route_id, stop_id):
     if 'driver_id' not in session:

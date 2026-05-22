@@ -69,10 +69,36 @@
   </div>
   {% endif %}
 
+  <!-- Search Bar -->
+  <div class="mb-3">
+    <div style="position:relative;">
+      <i class="fas fa-search" style="position:absolute;left:14px;top:50%;transform:translateY(-50%);color:#555;"></i>
+      <input type="text" id="stop-search" class="form-control" placeholder="Search by name, address, stop #, or tracking..." style="padding-left:40px;">
+    </div>
+    <div id="search-count" class="text-secondary small mt-1" style="display:none;"></div>
+  </div>
+
+  <!-- Add Stop to Route -->
+  <div class="mb-4">
+    <button class="btn w-100 py-2" style="background:#1a1a1a;border:1px solid #333;color:#aaa;border-radius:12px;font-size:0.85rem;"
+      onclick="toggleAddStop()">
+      <i class="fas fa-plus me-2"></i>Add Stop to This Route
+    </button>
+    <div id="add-stop-form" style="display:none;" class="card p-3 mt-2">
+      <div class="mb-2">
+        <input type="text" id="new-address" class="form-control" placeholder="Address" style="margin-bottom:8px;">
+        <input type="text" id="new-name" class="form-control" placeholder="Customer name (optional)" style="margin-bottom:8px;">
+        <input type="tel" id="new-phone" class="form-control" placeholder="Phone (optional)">
+      </div>
+      <button class="btn btn-primary w-100 py-2" onclick="addStop()">Add Stop</button>
+    </div>
+  </div>
+
   <!-- Stop List -->
   <h6 class="text-secondary mb-3" style="letter-spacing:0.1em;font-size:0.75rem;">ALL STOPS</h6>
   {% for stop in stops %}
-  <div class="card p-3 mb-2" id="stop-{{ stop.id }}"
+  <div class="card p-3 mb-2 stop-card" id="stop-{{ stop.id }}"
+       data-search="{{ (stop.stop_number|string + ' ' + (stop.customer_name or '') + ' ' + stop.address + ' ' + (stop.tracking or ''))|lower }}"
        style="border-color:{% if stop.status=='delivered' %}#00ff8844{% elif stop.status=='failed' %}#ff333344{% elif stop.status=='en_route' %}#0088ff44{% else %}#222{% endif %};">
     <div class="d-flex align-items-start gap-2">
       <span style="background:#1a1a1a;color:#aaa;border-radius:8px;padding:4px 8px;font-size:0.8rem;font-weight:700;min-width:32px;text-align:center;flex-shrink:0;">{{ stop.stop_number }}</span>
@@ -139,12 +165,60 @@
   <div class="d-flex justify-content-around">
     <a href="/driver"><i class="fas fa-home"></i>Home</a>
     <a href="/driver/route/new"><i class="fas fa-upload"></i>New Route</a>
-    
+    <a href="/account"><i class="fas fa-user"></i>Account</a>
   </div>
 </div>
 {% endblock %}
 {% block scripts %}
 <script>
+// ── SEARCH ──
+const searchInput = document.getElementById('stop-search');
+const searchCount = document.getElementById('search-count');
+const allCards    = document.querySelectorAll('.stop-card');
+
+searchInput.addEventListener('input', function() {
+  const q = this.value.toLowerCase().trim();
+  let visible = 0;
+  allCards.forEach(card => {
+    const match = !q || card.dataset.search.includes(q);
+    card.style.display = match ? '' : 'none';
+    if (match) visible++;
+  });
+  if (q) {
+    searchCount.textContent = `${visible} stop${visible !== 1 ? 's' : ''} found`;
+    searchCount.style.display = 'block';
+  } else {
+    searchCount.style.display = 'none';
+  }
+});
+
+// ── ADD STOP ──
+function toggleAddStop() {
+  const form = document.getElementById('add-stop-form');
+  form.style.display = form.style.display === 'none' ? 'block' : 'none';
+  if (form.style.display === 'block') document.getElementById('new-address').focus();
+}
+
+function addStop() {
+  const address = document.getElementById('new-address').value.trim();
+  const name    = document.getElementById('new-name').value.trim();
+  const phone   = document.getElementById('new-phone').value.trim();
+  if (!address) { alert('Address is required'); return; }
+  fetch('/driver/route/{{ route.id }}/add-stop', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({address, name, phone})
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (data.ok) {
+      location.reload();
+    } else {
+      alert('Error adding stop: ' + (data.error || 'unknown'));
+    }
+  });
+}
+
 function editPhone(stopId, current) {
   document.getElementById(`phone-edit-${stopId}`).style.display = 'block';
   document.getElementById(`phone-input-${stopId}`).focus();
