@@ -914,8 +914,8 @@ def address_suggest():
         return jsonify([])
     db = get_db()
     results = db.execute(
-        """SELECT DISTINCT address, unit, customer_name FROM stops
-           WHERE address LIKE ? ORDER BY rowid DESC LIMIT 8""",
+        """SELECT address, unit, customer_name FROM stops
+           WHERE address LIKE ? GROUP BY address, unit, customer_name ORDER BY MAX(id) DESC LIMIT 8""",
         (f'%{q}%',)
     ).fetchall()
     db.close()

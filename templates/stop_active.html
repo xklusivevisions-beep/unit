@@ -341,12 +341,12 @@ function handlePosition(pos) {
     fillOpacity: 0.06, weight: 1, dashArray: '4,4'
   }).addTo(map);
 
-  // Warn driver if signal is weak — don't send bad readings
-  if (accuracy > 50) {
-    gpsDot.style.background = '#ff3333';
-    gpsText.textContent = `⚠️ Weak GPS — ±${accFt}ft. Step outside or near a window.`;
-    gpsText.style.color = '#ff6666';
-    return;
+  // Warn driver if signal is very weak but still send location
+  if (accuracy > 100) {
+    gpsDot.style.background = '#ffaa00';
+    gpsText.textContent = `⚠️ Weak GPS signal — ±${accFt}ft. Move outside for better accuracy.`;
+    gpsText.style.color = '#ffaa00';
+    // Still send location — don't block on cold start
   }
 
   sendLocation(lat, lng);
