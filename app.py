@@ -299,16 +299,89 @@ def miles_away(lat1, lng1, lat2, lng2):
 def get_base_url():
     return request.host_url.rstrip('/')
 
-def parse_stops_from_text(text):
-    """Extract stop addresses from raw text (PDF or OCR output)."""
+def parse_speedx_screenshot(text):
+    """Parse Speed X app screenshot OCR text into structured stops."""
     stops = []
     lines = [l.strip() for l in text.splitlines() if l.strip()]
-    # Match lines that look like addresses (number + street name)
+
+    tracking_pat = re.compile(r'(SPXDTW\w+)', re.IGNORECASE)
+    stop_num_pat = re.compile(r'Stop[:\s]+?(\d+)', re.IGNORECASE)
+    # Address: starts with number, contains city/state/zip
+    addr_pat     = re.compile(r'^(\d+\s+.+?),\s*([A-Za-z\s]+),\s*([A-Z]{2})[,\s]+(\d{5})', re.IGNORECASE)
+    # Loose address for two-line format
+    street_pat   = re.compile(r'^\d+\s+[A-Za-z]', re.IGNORECASE)
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+
+        # Look for tracking number as anchor
+        tracking_match = tracking_pat.search(line)
+        if tracking_match:
+            tracking = tracking_match.group(1)
+            # Look back up to 4 lines for address + customer
+            address = ''
+            customer = ''
+            stop_num = ''
+            for j in range(max(0, i-4), i):
+                m = addr_pat.match(lines[j])
+                if m:
+                    street = m.group(1).strip()
+                    city   = m.group(2).strip()
+                    state  = m.group(3).strip()
+                    zipcode = m.group(4).strip()
+                    address = f"{street}, {city}, {state} {zipcode}"
+                elif street_pat.match(lines[j]) and j+1 < len(lines):
+                    # Two-line address — combine with next
+                    next_line = lines[j+1]
+                    combined = lines[j] + ',' + next_line
+                    m2 = addr_pat.match(combined)
+                    if m2:
+                        street  = m2.group(1).strip()
+                        city    = m2.group(2).strip()
+                        state   = m2.group(3).strip()
+                        zipcode = m2.group(4).strip()
+                        address = f"{street}, {city}, {state} {zipcode}"
+                # Customer name — no digits, no SPXDTW, reasonable length
+                if (not re.search(r'\d', lines[j]) and
+                    'SPXDTW' not in lines[j].upper() and
+                    'Stop' not in lines[j] and
+                    'parcel' not in lines[j].lower() and
+                    'arrival' not in lines[j].lower() and
+                    3 < len(lines[j]) < 40):
+                    customer = lines[j]
+            # Look forward for stop number
+            for j in range(i, min(i+3, len(lines))):
+                sn = stop_num_pat.search(lines[j])
+                if sn:
+                    stop_num = sn.group(1)
+                    break
+            if address:
+                # Clean address — remove USA suffix
+                address = re.sub(r',?\s*USA\s*$', '', address, flags=re.IGNORECASE).strip()
+                stops.append({
+                    'address':  address,
+                    'name':     customer,
+                    'tracking': tracking,
+                    'stop_num': stop_num
+                })
+        i += 1
+    return stops
+
+def parse_stops_from_text(text):
+    """Try Speed X parser first, fall back to generic address extraction."""
+    # Try SpeedX format first
+    speedx_stops = parse_speedx_screenshot(text)
+    if speedx_stops:
+        return speedx_stops
+
+    # Generic fallback
+    stops = []
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
     addr_pattern = re.compile(r'^\d+\s+[A-Za-z].*,(\s*\w+,)?\s*[A-Z]{2}\s+\d{5}', re.IGNORECASE)
     loose_pattern = re.compile(r'^\d+\s+[A-Za-z][A-Za-z\s]+(?:St|Ave|Blvd|Dr|Rd|Ln|Way|Ct|Pl|Cir|Hwy|Pkwy|Terr?|Trail|Loop)[\.\s,]', re.IGNORECASE)
     for i, line in enumerate(lines):
         if addr_pattern.match(line) or loose_pattern.match(line):
-            # Try to grab customer name from previous line
             name = lines[i-1] if i > 0 and not lines[i-1][0].isdigit() else ''
             stops.append({'address': line, 'name': name})
     return stops
@@ -448,22 +521,32 @@ def route_new():
             elif fname.endswith(('.png', '.jpg', '.jpeg')):
                 if OCR_AVAILABLE:
                     img = Image.open(io.BytesIO(route_file.read()))
-                    text = pytesseract.image_to_string(img)
-                    for idx, s in enumerate(parse_stops_from_text(text)):
+                    # Upscale for better OCR accuracy
+                    w, h = img.size
+                    img = img.resize((w*2, h*2), Image.LANCZOS)
+                    text = pytesseract.image_to_string(img, config='--psm 6')
+                    parsed = parse_stops_from_text(text)
+                    for idx, s in enumerate(parsed):
                         full_addr = s.get('address', '')
                         if not full_addr: continue
+                        # Match resident profile
+                        street = full_addr.split(',')[0].strip()
+                        resident = db.execute("SELECT * FROM residents WHERE address LIKE ?", (f'%{street}%',)).fetchone()
+                        phone     = resident['phone']     if resident else ''
+                        drop_spot = resident['drop_spot'] if resident else ''
+                        door_notes= resident['door_notes']if resident else ''
                         token = secrets.token_urlsafe(12)
                         correction = db.execute("SELECT lat, lng FROM pin_corrections WHERE address=?", (full_addr,)).fetchone()
                         saved_lat = correction['lat'] if correction else None
                         saved_lng = correction['lng'] if correction else None
+                        stop_num  = s.get('stop_num') or idx + 1
                         db.execute(
-                            "INSERT INTO stops (route_id, stop_number, address, customer_name, token, dest_lat, dest_lng) VALUES (?,?,?,?,?,?,?)",
-                            (route_id, idx+1, full_addr, s.get('name',''), token, saved_lat, saved_lng)
+                            "INSERT INTO stops (route_id, stop_number, address, customer_name, tracking, phone, drop_spot, notes, token, dest_lat, dest_lng) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                            (route_id, stop_num, full_addr, s.get('name',''), s.get('tracking',''), phone, drop_spot, door_notes, token, saved_lat, saved_lng)
                         )
                         stops_added += 1
                     db.commit()
                 else:
-                    # OCR not available — go to manual entry
                     stops_added = 0
 
             # ── CSV (original) ──
