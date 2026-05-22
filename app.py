@@ -1139,8 +1139,15 @@ def admin():
     if not session.get('admin'):
         return redirect(url_for('admin_login'))
     db = get_db()
-    routes    = db.execute("SELECT * FROM routes ORDER BY created_at DESC LIMIT 20").fetchall()
-    buildings = db.execute("SELECT * FROM buildings ORDER BY confirmed_count DESC").fetchall()
+    routes     = db.execute("SELECT * FROM routes ORDER BY created_at DESC LIMIT 20").fetchall()
+    buildings  = db.execute("SELECT * FROM buildings ORDER BY confirmed_count DESC").fetchall()
+    deliveries = db.execute(
+        """SELECT s.*, r.name as route_name, r.date as route_date, d.name as driver_name
+           FROM stops s
+           LEFT JOIN routes r ON s.route_id = r.id
+           LEFT JOIN drivers d ON r.driver_id = d.id
+           ORDER BY s.created_at DESC LIMIT 50"""
+    ).fetchall()
     stats = {
         'total_deliveries': db.execute("SELECT COUNT(*) FROM stops").fetchone()[0],
         'delivered':        db.execute("SELECT COUNT(*) FROM stops WHERE status='delivered'").fetchone()[0],
@@ -1150,7 +1157,7 @@ def admin():
         'residents':        db.execute("SELECT COUNT(*) FROM residents").fetchone()[0],
     }
     db.close()
-    return render_template('admin.html', routes=routes, buildings=buildings, stats=stats)
+    return render_template('admin.html', routes=routes, buildings=buildings, deliveries=deliveries, stats=stats)
 
 # ─── TEST SMS ─────────────────────────────────────────────────
 
