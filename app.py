@@ -493,8 +493,13 @@ def driver_walkthrough_complete():
     if 'driver_id' not in session:
         return redirect(url_for('driver_login'))
     db = get_db()
-    db.execute("UPDATE drivers SET onboarded=1 WHERE id=?", (session['driver_id'],))
-    db.commit()
+    try:
+        db.execute("UPDATE drivers SET onboarded=1 WHERE id=?", (session['driver_id'],))
+        db.commit()
+    except Exception as e:
+        log.error(f'Walkthrough complete error: {e}')
+        try: db._conn.rollback()
+        except: pass
     db.close()
     return redirect(url_for('driver_dashboard'))
 

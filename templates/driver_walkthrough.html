@@ -90,9 +90,7 @@
   <!-- Header -->
   <div class="wt-header">
     <div class="unit-logo" style="font-size:1.1rem;">UNIT<span>.</span></div>
-    <form method="POST" action="/driver/walkthrough/complete" style="margin:0;">
-      <button type="submit" style="background:none;border:none;color:#555;font-size:0.8rem;cursor:pointer;padding:4px 8px;">Skip</button>
-    </form>
+    <button onclick="document.getElementById('complete-form').submit()" style="background:none;border:none;color:#555;font-size:0.8rem;cursor:pointer;padding:4px 8px;">Skip</button>
   </div>
 
   <!-- Progress -->
@@ -272,6 +270,9 @@
     <button class="btn-wt-back" id="wt-back" aria-label="Back">‹</button>
     <button class="btn-wt-next" id="wt-next">Next →</button>
   </div>
+
+  <!-- Hidden form to mark walkthrough complete -->
+  <form id="complete-form" method="POST" action="/driver/walkthrough/complete" style="display:none;"></form>
 </div>
 
 <script>
@@ -303,8 +304,7 @@ nextBtn.addEventListener('click', () => {
   if (cur < TOTAL - 1) {
     goTo(cur + 1);
   } else {
-    fetch('/driver/walkthrough/complete', { method: 'POST' })
-      .then(() => { window.location.href = '/driver'; });
+    document.getElementById('complete-form').submit();
   }
 });
 
