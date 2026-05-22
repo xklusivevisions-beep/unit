@@ -2,14 +2,60 @@ from flask import Flask, render_template, request, redirect, url_for, session, j
 from datetime import datetime
 from geopy.distance import geodesic
 from geopy.geocoders import Nominatim
-import sqlite3, os, json, requests, logging, traceback, csv, io, secrets, re
+import sqlite3, os, json, requests, logging, traceback, csv, io, secrets, re, base64
 import pdfplumber
 from PIL import Image
-try:
-    import pytesseract
-    OCR_AVAILABLE = True
-except ImportError:
-    OCR_AVAILABLE = False
+import anthropic
+
+ANTHROPIC_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
+
+def extract_stops_from_image(img_bytes):
+    """Use Claude Vision to extract stops from a Speed X screenshot."""
+    if not ANTHROPIC_KEY:
+        return []
+    try:
+        client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+        b64    = base64.standard_b64encode(img_bytes).decode('utf-8')
+        resp   = client.messages.create(
+            model='claude-haiku-4-5',
+            max_tokens=2048,
+            messages=[{
+                'role': 'user',
+                'content': [
+                    {
+                        'type': 'image',
+                        'source': {'type': 'base64', 'media_type': 'image/jpeg', 'data': b64}
+                    },
+                    {
+                        'type': 'text',
+                        'text': '''This is a Speed X delivery app screenshot. Extract ALL delivery stops visible.
+Return ONLY a JSON array, no other text. Format:
+[{"stop_num": "88", "address": "18078 Joseph Campau, Detroit, MI 48201", "name": "John Smith", "tracking": "SPXDTW001234"}]
+Rules:
+- address must be full street address with city, state, zip
+- Remove ",USA" from end of addresses
+- stop_num is the number after "Stop:" label
+- tracking starts with SPXDTW
+- name is the customer name
+- Include every stop visible on screen'''
+                    }
+                ]
+            }]
+        )
+        text = resp.content[0].text.strip()
+        # Extract JSON array from response
+        match = re.search(r'\[.*\]', text, re.DOTALL)
+        if match:
+            stops = json.loads(match.group())
+            return [{
+                'address':  s.get('address','').strip(),
+                'name':     s.get('name','').strip(),
+                'tracking': s.get('tracking','').strip(),
+                'stop_num': str(s.get('stop_num','')).strip()
+            } for s in stops if s.get('address')]
+    except Exception as e:
+        log.error(f'Claude Vision error: {e}')
+    return []
 from twilio.rest import Client
 import stripe
 
@@ -478,27 +524,23 @@ def route_new():
             if not route_file or not route_file.filename: continue
             fname = route_file.filename.lower()
 
-            # ── IMAGE / SCREENSHOT (most common for Speed X) ──
+            # ── IMAGE / SCREENSHOT — Claude Vision ──
             if fname.endswith(('.png', '.jpg', '.jpeg')):
                 try:
                     img_bytes = route_file.read()
+                    # Convert to JPEG for smaller payload to Claude
                     img = Image.open(io.BytesIO(img_bytes)).convert('RGB')
-                    w, h = img.size
-                    # Only upscale if image is small — prevents memory crash on large screenshots
-                    if w < 1200:
-                        img = img.resize((w*2, h*2), Image.LANCZOS)
-                    if OCR_AVAILABLE:
-                        text = pytesseract.image_to_string(img, config='--psm 6 --oem 3')
-                    else:
-                        # OCR not available — skip silently
-                        continue
-                    for s in parse_stops_from_text(text):
+                    buf = io.BytesIO()
+                    img.save(buf, format='JPEG', quality=85)
+                    img_bytes = buf.getvalue()
+                    stops_from_img = extract_stops_from_image(img_bytes)
+                    for s in stops_from_img:
                         key = s.get('tracking') or s.get('address', '')
                         if key and key not in collected:
                             collected[key] = s
                 except Exception as img_err:
-                    log.error(f'Image OCR error on {fname}: {img_err}')
-                    continue  # skip bad image, keep processing others
+                    log.error(f'Image processing error on {fname}: {img_err}')
+                    continue
 
             # ── PDF ──
             elif fname.endswith('.pdf'):
