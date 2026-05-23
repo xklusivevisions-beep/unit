@@ -1216,11 +1216,22 @@ def admin_logout():
     session.pop('admin', None)
     return redirect(url_for('index'))
 
+@app.route('/admin/mark-onboarded/<int:driver_id>', methods=['POST'])
+def admin_mark_onboarded(driver_id):
+    if not session.get('admin'):
+        return redirect(url_for('admin_login'))
+    db = get_db()
+    db.execute("UPDATE drivers SET onboarded=1 WHERE id=?", (driver_id,))
+    db.commit()
+    db.close()
+    return redirect(url_for('admin'))
+
 @app.route('/admin')
 def admin():
     if not session.get('admin'):
         return redirect(url_for('admin_login'))
     db = get_db()
+    drivers_list = db.execute("SELECT * FROM drivers ORDER BY created_at DESC").fetchall()
     routes     = db.execute("SELECT * FROM routes ORDER BY created_at DESC LIMIT 20").fetchall()
     buildings  = db.execute("SELECT * FROM buildings ORDER BY confirmed_count DESC").fetchall()
     deliveries = db.execute(
@@ -1239,7 +1250,7 @@ def admin():
         'residents':        db.execute("SELECT COUNT(*) FROM residents").fetchone()[0],
     }
     db.close()
-    return render_template('admin.html', routes=routes, buildings=buildings, deliveries=deliveries, stats=stats)
+    return render_template('admin.html', routes=routes, buildings=buildings, deliveries=deliveries, stats=stats, drivers_list=drivers_list)
 
 # ─── TEST SMS ─────────────────────────────────────────────────
 

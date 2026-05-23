@@ -112,6 +112,28 @@
   {% endfor %}
 
   <!-- Recent Deliveries -->
+  <!-- Drivers -->
+  <h6 class="text-secondary mt-4 mb-3" style="letter-spacing:0.1em;font-size:0.75rem;">REGISTERED DRIVERS</h6>
+  {% for d in drivers_list %}
+  <div class="card p-3 mb-2">
+    <div class="d-flex justify-content-between align-items-center">
+      <div>
+        <div class="fw-bold" style="font-size:0.9rem;">{{ d.name }}</div>
+        <small class="text-secondary">{{ d.phone or 'No phone' }} &bull; PIN: {{ d.pin }}</small>
+      </div>
+      <div class="d-flex gap-2 align-items-center">
+        {% if d.onboarded %}
+        <span class="badge" style="background:#00ff8822;color:#00ff88;font-size:0.7rem;">✓ Onboarded</span>
+        {% else %}
+        <form method="POST" action="/admin/mark-onboarded/{{ d.id }}">
+          <button type="submit" class="btn btn-sm" style="background:#ffaa0022;color:#ffaa00;border:1px solid #ffaa0044;font-size:0.75rem;border-radius:8px;">Fix Walkthrough</button>
+        </form>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+
   <h6 class="text-secondary mt-4 mb-3" style="letter-spacing:0.1em;font-size:0.75rem;">RECENT DELIVERIES</h6>
   {% for d in deliveries %}
   <div class="card p-3 mb-2">
