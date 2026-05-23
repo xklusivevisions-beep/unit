@@ -1,215 +1,253 @@
 {% extends 'base.html' %}
 {% block title %}UNIT — Admin{% endblock %}
 {% block content %}
-<div class="container-fluid p-4 pb-nav">
+<style>
+  .tab-btn {
+    flex: 1; padding: 10px 4px; background: #111; border: none;
+    color: #666; font-size: 0.78rem; font-weight: 700;
+    letter-spacing: 0.05em; cursor: pointer;
+    border-bottom: 2px solid transparent; transition: all 0.2s;
+  }
+  .tab-btn.active { color: #00ff88; border-bottom-color: #00ff88; }
+  .tab-pane { display: none; }
+  .tab-pane.active { display: block; }
+  .stat-card {
+    background: #111; border-radius: 14px; padding: 16px 12px;
+    text-align: center; border: 1px solid #222;
+  }
+  .stat-number { font-size: 1.8rem; font-weight: 900; color: #00ff88; }
+  .driver-card {
+    background: #111; border-radius: 12px; padding: 14px 16px;
+    border: 1px solid #222; margin-bottom: 10px;
+  }
+  .pill {
+    display: inline-block; padding: 2px 10px; border-radius: 20px;
+    font-size: 0.7rem; font-weight: 700;
+  }
+</style>
 
-  <div class="d-flex align-items-center mb-4">
-    <div class="unit-logo me-auto" style="font-size:1.4rem;">UNIT<span>.</span></div>
-    <span class="badge" style="background:#00ff8822;color:#00ff88;">ADMIN</span>
+<div class="container-fluid p-3 pb-nav">
+
+  <!-- Header -->
+  <div class="d-flex align-items-center mb-3">
+    <div class="unit-logo me-auto" style="font-size:1.3rem;">UNIT<span>.</span></div>
+    <span class="pill" style="background:#00ff8822;color:#00ff88;">ADMIN</span>
+    <a href="/admin/logout" class="ms-3" style="color:#555;font-size:0.8rem;">Logout</a>
   </div>
 
-  <!-- Stats -->
-  <div class="row g-3 mb-4">
-    <div class="col-6">
+  <!-- Stats Row -->
+  <div class="row g-2 mb-3">
+    <div class="col-4">
       <div class="stat-card">
         <div class="stat-number">{{ stats.total_deliveries }}</div>
-        <small class="text-secondary">Total Stops</small>
+        <small class="text-secondary" style="font-size:0.7rem;">Total Stops</small>
       </div>
     </div>
-    <div class="col-6">
+    <div class="col-4">
       <div class="stat-card">
-        <div class="stat-number">{{ stats.delivered }}</div>
-        <small class="text-secondary">Delivered</small>
+        <div class="stat-number" style="color:#00ff88;">{{ stats.delivered }}</div>
+        <small class="text-secondary" style="font-size:0.7rem;">Delivered</small>
       </div>
     </div>
-    <div class="col-6">
-      <div class="stat-card">
-        <div class="stat-number" style="color:#ffaa00;">{{ stats.sms_sent }}</div>
-        <small class="text-secondary">SMS Sent</small>
-      </div>
-    </div>
-    <div class="col-6">
+    <div class="col-4">
       <div class="stat-card">
         <div class="stat-number" style="color:#ff3333;">{{ stats.failed }}</div>
-        <small class="text-secondary">Failed</small>
+        <small class="text-secondary" style="font-size:0.7rem;">Failed</small>
       </div>
     </div>
-    <div class="col-6">
+  </div>
+  <div class="row g-2 mb-4">
+    <div class="col-4">
       <div class="stat-card">
-        <div class="stat-number" style="color:#0088ff;">{{ stats.buildings }}</div>
-        <small class="text-secondary">Buildings</small>
+        <div class="stat-number" style="color:#0088ff;">{{ stats.sms_sent }}</div>
+        <small class="text-secondary" style="font-size:0.7rem;">SMS Sent</small>
       </div>
     </div>
-    <div class="col-6">
+    <div class="col-4">
       <div class="stat-card">
-        <div class="stat-number" style="color:#aa00ff;">{{ stats.residents }}</div>
-        <small class="text-secondary">Residents</small>
+        <div class="stat-number" style="color:#ffaa00;">{{ stats.residents }}</div>
+        <small class="text-secondary" style="font-size:0.7rem;">Residents</small>
+      </div>
+    </div>
+    <div class="col-4">
+      <div class="stat-card">
+        <div class="stat-number" style="color:#aaa;">{{ stats.buildings }}</div>
+        <small class="text-secondary" style="font-size:0.7rem;">Buildings</small>
       </div>
     </div>
   </div>
 
-  <!-- Test SMS -->
-  <h6 class="text-secondary mb-3" style="letter-spacing:0.1em;font-size:0.75rem;">SMS TEST</h6>
-  <div class="card p-3 mb-4" style="border-color:#ffaa0033;">
-    <div class="fw-bold mb-1" style="font-size:0.85rem;">Send a test text</div>
-    <small class="text-secondary d-block mb-3">Confirms your SMS provider is live before a real run.</small>
-    <div class="d-flex gap-2">
-      <input id="test-sms-phone" type="tel" class="form-control" placeholder="+13135550000" style="background:#111;border-color:#333;color:#fff;border-radius:10px;">
-      <button id="test-sms-btn" class="btn btn-sm" style="border:1px solid #ffaa00;color:#ffaa00;border-radius:10px;padding:6px 16px;white-space:nowrap;">
-        Send Test
+  <!-- Tabs -->
+  <div class="d-flex mb-3" style="border-bottom:1px solid #222;">
+    <button class="tab-btn active" onclick="switchTab('drivers')">DRIVERS</button>
+    <button class="tab-btn" onclick="switchTab('buildings')">BUILDINGS</button>
+    <button class="tab-btn" onclick="switchTab('deliveries')">DELIVERIES</button>
+    <button class="tab-btn" onclick="switchTab('tools')">TOOLS</button>
+  </div>
+
+  <!-- TAB: DRIVERS -->
+  <div class="tab-pane active" id="tab-drivers">
+
+    <!-- Cleanup button if dupes exist -->
+    {% if drivers_list|length > 1 %}
+    <form method="POST" action="/admin/cleanup-drivers" class="mb-3">
+      <button type="submit" class="btn w-100 py-2" style="background:#ffaa0022;color:#ffaa00;border:1px solid #ffaa0044;border-radius:10px;font-size:0.85rem;font-weight:700;">
+        🧹 Remove Duplicate Drivers ({{ drivers_list|length }} found)
       </button>
-    </div>
-    <div id="test-sms-result" style="display:none;margin-top:10px;padding:8px 12px;border-radius:8px;font-size:0.85rem;font-weight:600;"></div>
-  </div>
-
-  <!-- Buildings Database -->
-  <h6 class="text-secondary mb-3" style="letter-spacing:0.1em;font-size:0.75rem;">BUILDINGS DATABASE</h6>
-
-  <!-- Add Building Form -->
-  <form method="POST" action="/admin/building" class="card p-3 mb-3">
-    <div class="fw-bold small mb-2" style="color:#00ff88;">+ Add / Update Building Access</div>
-    <input name="address" class="form-control form-control-sm mb-2" placeholder="Full address (e.g. 123 Main St, Detroit, MI)" required>
-    <div class="row g-2 mb-2">
-      <div class="col-6">
-        <input name="access_code" class="form-control form-control-sm" placeholder="Access code">
-      </div>
-      <div class="col-6">
-        <select name="access_type" class="form-select form-select-sm">
-          <option value="code">Code</option>
-          <option value="buzzer">Buzzer</option>
-          <option value="key">Key</option>
-          <option value="open">No Lock</option>
-        </select>
-      </div>
-    </div>
-    <input name="buzzer_notes" class="form-control form-control-sm mb-2" placeholder="Buzzer notes (e.g. Ring unit 3B)">
-    <input name="interior_directions" class="form-control form-control-sm mb-2" placeholder="Interior directions (e.g. 2nd floor, turn left)">
-    <button type="submit" class="btn btn-sm w-100" style="background:#00ff88;color:#000;font-weight:700;">SAVE BUILDING</button>
-  </form>
-
-  {% for b in buildings %}
-  <div class="card p-3 mb-2">
-    <div class="fw-bold small">{{ b.address }}</div>
-    <div class="d-flex gap-2 mt-1 flex-wrap">
-      {% if b.access_code %}
-      <span class="badge" style="background:#00ff8822;color:#00ff88;">Code: {{ b.access_code }}</span>
-      {% endif %}
-      <span class="badge" style="background:#0088ff22;color:#0088ff;">{{ b.access_type }}</span>
-      {% if b.confirmed_count > 0 %}
-      <span class="badge" style="background:#22222;color:#aaa;">✓ {{ b.confirmed_count }}x confirmed</span>
-      {% endif %}
-    </div>
-    {% if b.interior_directions %}
-    <small class="text-secondary mt-1 d-block">{{ b.interior_directions[:80] }}{% if b.interior_directions|length > 80 %}...{% endif %}</small>
-    {% endif %}
-    {% if b.buzzer_notes %}
-    <small class="text-secondary d-block">Buzzer: {{ b.buzzer_notes }}</small>
-    {% endif %}
-    <form method="POST" action="/admin/building/{{ b.id }}/delete" class="mt-2">
-      <button type="submit" class="btn btn-sm" style="background:#ff333322;color:#ff3333;font-size:0.7rem;padding:2px 10px;">Delete</button>
     </form>
-  </div>
-  {% endfor %}
+    {% endif %}
 
-  <!-- Recent Deliveries -->
-  <!-- Drivers -->
-  <h6 class="text-secondary mt-4 mb-3" style="letter-spacing:0.1em;font-size:0.75rem;">REGISTERED DRIVERS</h6>
-  {% for d in drivers_list %}
-  <div class="card p-3 mb-2">
-    <div class="d-flex justify-content-between align-items-center">
-      <div>
-        <div class="fw-bold" style="font-size:0.9rem;">{{ d.name }}</div>
-        <small class="text-secondary">{{ d.phone or 'No phone' }} &bull; PIN: {{ d.pin }}</small>
+    {% for d in drivers_list %}
+    <div class="driver-card">
+      <div class="d-flex justify-content-between align-items-start">
+        <div>
+          <div class="fw-bold" style="font-size:0.95rem;">{{ d.name }}</div>
+          <small class="text-secondary">{{ d.phone or '—' }}</small>
+          <small class="text-secondary ms-2">PIN: <strong style="color:#fff;">{{ d.pin }}</strong></small>
+        </div>
+        <div class="d-flex flex-column gap-1 align-items-end">
+          {% if d.onboarded %}
+          <span class="pill" style="background:#00ff8822;color:#00ff88;">✓ Active</span>
+          {% else %}
+          <form method="POST" action="/admin/mark-onboarded/{{ d.id }}">
+            <button type="submit" class="pill" style="background:#ffaa0022;color:#ffaa00;border:1px solid #ffaa0033;cursor:pointer;">Fix Walkthrough</button>
+          </form>
+          {% endif %}
+          <form method="POST" action="/admin/delete-driver/{{ d.id }}"
+            onsubmit="return confirm('Delete {{ d.name }}?')">
+            <button type="submit" style="background:none;border:none;color:#555;font-size:0.7rem;cursor:pointer;padding:0;">✕ Remove</button>
+          </form>
+        </div>
       </div>
-      <div class="d-flex gap-2 align-items-center">
-        {% if d.onboarded %}
-        <span class="badge" style="background:#00ff8822;color:#00ff88;font-size:0.7rem;">✓ Onboarded</span>
-        {% else %}
-        <form method="POST" action="/admin/mark-onboarded/{{ d.id }}">
-          <button type="submit" class="btn btn-sm" style="background:#ffaa0022;color:#ffaa00;border:1px solid #ffaa0044;font-size:0.75rem;border-radius:8px;">Fix Walkthrough</button>
-        </form>
+    </div>
+    {% else %}
+    <p class="text-secondary text-center py-4">No drivers registered yet.</p>
+    {% endfor %}
+  </div>
+
+  <!-- TAB: BUILDINGS -->
+  <div class="tab-pane" id="tab-buildings">
+
+    <form method="POST" action="/admin/building" class="card p-3 mb-3">
+      <div class="fw-bold small mb-2" style="color:#00ff88;">+ Add / Update Building</div>
+      <input name="address" class="form-control form-control-sm mb-2" placeholder="Full address" required>
+      <div class="row g-2 mb-2">
+        <div class="col-6">
+          <input name="access_code" class="form-control form-control-sm" placeholder="Access code">
+        </div>
+        <div class="col-6">
+          <select name="access_type" class="form-select form-select-sm">
+            <option value="code">Code</option>
+            <option value="buzzer">Buzzer</option>
+            <option value="key">Key</option>
+            <option value="open">No Lock</option>
+          </select>
+        </div>
+      </div>
+      <input name="buzzer_notes" class="form-control form-control-sm mb-2" placeholder="Buzzer notes">
+      <input name="interior_directions" class="form-control form-control-sm mb-2" placeholder="Interior directions">
+      <button type="submit" class="btn btn-sm w-100" style="background:#00ff88;color:#000;font-weight:700;">SAVE BUILDING</button>
+    </form>
+
+    {% for b in buildings %}
+    <div class="card p-3 mb-2">
+      <div class="fw-bold small">{{ b.address }}</div>
+      <div class="d-flex gap-2 mt-1 flex-wrap">
+        {% if b.access_code %}
+        <span class="pill" style="background:#00ff8822;color:#00ff88;">Code: {{ b.access_code }}</span>
         {% endif %}
+        <span class="pill" style="background:#0088ff22;color:#0088ff;">{{ b.access_type }}</span>
       </div>
+      {% if b.buzzer_notes %}<small class="text-secondary d-block mt-1">Buzzer: {{ b.buzzer_notes }}</small>{% endif %}
+      {% if b.interior_directions %}<small class="text-secondary d-block">{{ b.interior_directions[:60] }}</small>{% endif %}
+      <form method="POST" action="/admin/building/{{ b.id }}/delete" class="mt-2">
+        <button type="submit" class="btn btn-sm" style="background:#ff333322;color:#ff3333;font-size:0.7rem;padding:2px 10px;">Delete</button>
+      </form>
     </div>
+    {% else %}
+    <p class="text-secondary text-center py-4">No buildings saved yet.</p>
+    {% endfor %}
   </div>
-  {% endfor %}
 
-  <h6 class="text-secondary mt-4 mb-3" style="letter-spacing:0.1em;font-size:0.75rem;">RECENT DELIVERIES</h6>
-  {% for d in deliveries %}
-  <div class="card p-3 mb-2">
-    <div class="d-flex justify-content-between">
-      <div style="flex:1;">
-        <div class="fw-bold" style="font-size:0.85rem;">{{ d.address[:35] }}{% if d.address|length > 35 %}...{% endif %}</div>
-        <small class="text-secondary">{{ d.driver_name }} • Unit {{ d.unit or '—' }}</small>
+  <!-- TAB: DELIVERIES -->
+  <div class="tab-pane" id="tab-deliveries">
+    {% for d in deliveries %}
+    <div class="card p-3 mb-2">
+      <div class="d-flex justify-content-between align-items-start mb-1">
+        <div style="flex:1;">
+          <div class="fw-bold" style="font-size:0.85rem;">{{ d.address[:35] }}{% if d.address|length > 35 %}...{% endif %}</div>
+          <small class="text-secondary">{{ d.driver_name or '—' }} · {{ d.route_date or '' }}</small>
+        </div>
+        <span class="pill ms-2
+          {% if d.status == 'delivered' %}' style='background:#00ff8822;color:#00ff88;'
+          {% elif d.status == 'failed' %}' style='background:#ff333322;color:#ff3333;'
+          {% else %}' style='background:#1a1a1a;color:#aaa;'{% endif %}">
+          {{ d.status.upper() }}
+        </span>
       </div>
-      <div class="text-end">
-        <span class="status-pill pill-{{ d.status }}">{{ d.status.upper() }}</span>
-        {% if d.sms_sent %}<div><small style="color:#00ff88;font-size:0.65rem;"><i class="fas fa-sms"></i> SMS</small></div>{% endif %}
-      </div>
+      {% if d.customer_name %}<small class="text-secondary"><i class="fas fa-user me-1"></i>{{ d.customer_name }}</small>{% endif %}
     </div>
+    {% else %}
+    <p class="text-secondary text-center py-4">No deliveries yet.</p>
+    {% endfor %}
   </div>
-  {% endfor %}
+
+  <!-- TAB: TOOLS -->
+  <div class="tab-pane" id="tab-tools">
+
+    <!-- Test SMS -->
+    <div class="card p-3 mb-3">
+      <div class="fw-bold small mb-2" style="color:#00ff88;">Test SMS</div>
+      <input type="tel" id="test-sms-phone" class="form-control form-control-sm mb-2" placeholder="+13135550000">
+      <button onclick="sendTestSms()" class="btn btn-sm w-100" style="background:#0088ff;color:#fff;font-weight:700;">Send Test SMS</button>
+      <div id="test-sms-result" style="display:none;margin-top:8px;padding:8px;border-radius:8px;font-size:0.8rem;"></div>
+    </div>
+
+    <!-- Routes list -->
+    <div class="fw-bold small mb-2" style="color:#aaa;letter-spacing:0.1em;">RECENT ROUTES</div>
+    {% for r in routes %}
+    <div class="card p-3 mb-2">
+      <div class="fw-bold" style="font-size:0.85rem;">{{ r.name or 'Unnamed' }}</div>
+      <small class="text-secondary">{{ r.driver_name }} · {{ r.date }}</small>
+    </div>
+    {% endfor %}
+  </div>
 
 </div>
 
 <!-- Bottom Nav -->
 <div class="nav-bottom">
   <div class="d-flex justify-content-around">
-    <a href="/driver">
-      <i class="fas fa-home"></i>Home
-    </a>
-    <a href="/driver/lookup">
-      <i class="fas fa-search"></i>Lookup
-    </a>
-    <a href="/admin" class="active">
-      <i class="fas fa-chart-bar"></i>Admin
-    </a>
+    <a href="/driver"><i class="fas fa-home"></i>Home</a>
+    <a href="/driver/lookup"><i class="fas fa-search"></i>Lookup</a>
+    <a href="/admin" class="active"><i class="fas fa-chart-bar"></i>Admin</a>
   </div>
 </div>
-{% endblock %}
 
-{% block scripts %}
 <script>
-document.getElementById('test-sms-btn').addEventListener('click', function() {
+function switchTab(name) {
+  document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  event.target.classList.add('active');
+}
+
+function sendTestSms() {
   const phone = document.getElementById('test-sms-phone').value.trim();
   const result = document.getElementById('test-sms-result');
-  if (!phone) {
-    result.style.display = 'block';
-    result.style.background = '#ff333322';
-    result.style.color = '#ff6666';
-    result.textContent = 'Enter a phone number first.';
-    return;
-  }
-  this.textContent = 'Sending...';
-  this.disabled = true;
+  if (!phone) return;
   fetch('/admin/test-sms', {
     method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({phone})
+    headers: {'Content-Type':'application/x-www-form-urlencoded'},
+    body: 'phone=' + encodeURIComponent(phone)
   })
   .then(r => r.json())
-  .then(data => {
+  .then(d => {
     result.style.display = 'block';
-    if (data.success) {
-      result.style.background = '#00ff8822';
-      result.style.color = '#00ff88';
-      result.textContent = `✓ Sent via ${data.provider} — check your phone`;
-    } else {
-      result.style.background = '#ff333322';
-      result.style.color = '#ff6666';
-      result.textContent = `✕ Failed (${data.provider}): ${data.detail || data.error}`;
-    }
-    document.getElementById('test-sms-btn').textContent = 'Send Test';
-    document.getElementById('test-sms-btn').disabled = false;
-  })
-  .catch(() => {
-    result.style.display = 'block';
-    result.style.background = '#ff333322';
-    result.style.color = '#ff6666';
-    result.textContent = 'Request failed — check server.';
-    document.getElementById('test-sms-btn').textContent = 'Send Test';
-    document.getElementById('test-sms-btn').disabled = false;
+    result.style.background = d.success ? '#00ff8822' : '#ff333322';
+    result.style.color = d.success ? '#00ff88' : '#ff3333';
+    result.textContent = d.success ? '✓ SMS sent via ' + d.provider : '✗ ' + d.error;
   });
-});
+}
 </script>
 {% endblock %}

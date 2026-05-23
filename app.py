@@ -282,10 +282,13 @@ def init_db():
         );
     ''')
     db.commit()
+    # Only insert default driver if NO drivers exist yet
     try:
-        db.execute("INSERT INTO drivers (name, phone, company, pin) VALUES (?,?,?,?)",
-                   ('Director X', '3135550000', 'SpeedX', '1234'))
-        db.commit()
+        count = db.execute("SELECT COUNT(*) FROM drivers").fetchone()[0]
+        if count == 0:
+            db.execute("INSERT INTO drivers (name, phone, company, pin, onboarded) VALUES (?,?,?,?,?)",
+                       ('Director X', '3135550000', 'SpeedX', '1234', 1))
+            db.commit()
     except: pass
     # Safe migrations — add columns if they don't exist yet
     for migration in [
@@ -1215,6 +1218,32 @@ def admin_bypass():
 def admin_logout():
     session.pop('admin', None)
     return redirect(url_for('index'))
+
+@app.route('/admin/cleanup-drivers', methods=['POST'])
+def admin_cleanup_drivers():
+    """Remove duplicate driver rows — keep the most recent unique PIN."""
+    if not session.get('admin'):
+        return redirect(url_for('admin_login'))
+    db = get_db()
+    # Keep only the latest row per PIN
+    db.execute("""
+        DELETE FROM drivers WHERE id NOT IN (
+            SELECT MAX(id) FROM drivers GROUP BY pin
+        )
+    """)
+    db.commit()
+    db.close()
+    return redirect(url_for('admin'))
+
+@app.route('/admin/delete-driver/<int:driver_id>', methods=['POST'])
+def admin_delete_driver(driver_id):
+    if not session.get('admin'):
+        return redirect(url_for('admin_login'))
+    db = get_db()
+    db.execute("DELETE FROM drivers WHERE id=?", (driver_id,))
+    db.commit()
+    db.close()
+    return redirect(url_for('admin'))
 
 @app.route('/admin/mark-onboarded/<int:driver_id>', methods=['POST'])
 def admin_mark_onboarded(driver_id):
