@@ -280,6 +280,10 @@ def init_db():
             sms_consent_at TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS driver_onboarding (
+            driver_id INTEGER PRIMARY KEY,
+            completed_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
     ''')
     db.commit()
     # Only insert default driver if NO drivers exist yet
@@ -470,19 +474,19 @@ def driver_login():
         pin = request.form.get('pin', '').strip()
         db = get_db()
         driver = db.execute("SELECT * FROM drivers WHERE pin=?", (pin,)).fetchone()
-        db.close()
         if driver:
             session['driver_id'] = driver['id']
             session['driver_name'] = driver['name']
-            # Check onboarded — DB flag + session backup
-            try:
-                db_onboarded = driver['onboarded'] == 1
-            except (KeyError, IndexError, TypeError):
-                db_onboarded = False
-            session_onboarded = session.get('onboarded', False)
-            if not db_onboarded and not session_onboarded:
+            # Check onboarding via dedicated table (reliable on PostgreSQL)
+            onboarded = db.execute(
+                "SELECT 1 FROM driver_onboarding WHERE driver_id=?",
+                (driver['id'],)
+            ).fetchone()
+            db.close()
+            if not onboarded:
                 return redirect(url_for('driver_walkthrough'))
             return redirect(url_for('driver_dashboard'))
+        db.close()
         error = 'Invalid PIN'
     return render_template('driver_login.html', error=error)
 
@@ -498,14 +502,16 @@ def driver_walkthrough_complete():
         return redirect(url_for('driver_login'))
     db = get_db()
     try:
-        db.execute("UPDATE drivers SET onboarded=1 WHERE id=?", (session['driver_id'],))
+        db.execute(
+            "INSERT INTO driver_onboarding (driver_id) VALUES (?)",
+            (session['driver_id'],)
+        )
         db.commit()
     except Exception as e:
         log.error(f'Walkthrough complete error: {e}')
         try: db._conn.rollback()
         except: pass
     db.close()
-    session['onboarded'] = True  # session backup in case DB update fails
     return redirect(url_for('driver_dashboard'))
 
 @app.route('/driver/logout')
@@ -1250,8 +1256,12 @@ def admin_mark_onboarded(driver_id):
     if not session.get('admin'):
         return redirect(url_for('admin_login'))
     db = get_db()
-    db.execute("UPDATE drivers SET onboarded=1 WHERE id=?", (driver_id,))
-    db.commit()
+    try:
+        db.execute("INSERT INTO driver_onboarding (driver_id) VALUES (?)", (driver_id,))
+        db.commit()
+    except:
+        try: db._conn.rollback()
+        except: pass
     db.close()
     return redirect(url_for('admin'))
 
