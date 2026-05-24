@@ -303,6 +303,8 @@ def init_db():
         "ALTER TABLE residents ADD COLUMN sms_consent_at TEXT",
         "ALTER TABLE drivers ADD COLUMN onboarded INTEGER DEFAULT 0",
         "CREATE TABLE IF NOT EXISTS pin_corrections (id INTEGER PRIMARY KEY AUTOINCREMENT, address TEXT UNIQUE NOT NULL, lat REAL NOT NULL, lng REAL NOT NULL, corrected_by TEXT, corrected_at TEXT DEFAULT CURRENT_TIMESTAMP)",
+        "CREATE TABLE IF NOT EXISTS login_attempts (id INTEGER PRIMARY KEY AUTOINCREMENT, ip TEXT NOT NULL, attempted_at TEXT NOT NULL)",
+        "CREATE INDEX IF NOT EXISTS idx_login_attempts_ip ON login_attempts (ip, attempted_at)",
     ]:
         try:
             db.execute(migration)
@@ -1213,20 +1215,43 @@ if not ADMIN_PIN:
     raise RuntimeError('ADMIN_PIN env var is required')
 
 # ─── BRUTE FORCE PROTECTION ────────────────────────────────────
-_login_attempts = {}  # ip -> [timestamp, ...]
-LOCKOUT_WINDOW  = 300   # 5 minutes
-MAX_ATTEMPTS    = 10    # per window
+LOCKOUT_WINDOW = 300  # seconds
+MAX_ATTEMPTS   = 5    # per window per worker
 
 def is_rate_limited(ip):
+    """DB-backed rate limiting — works across all Gunicorn workers."""
     import time
     now = time.time()
-    attempts = [t for t in _login_attempts.get(ip, []) if now - t < LOCKOUT_WINDOW]
-    _login_attempts[ip] = attempts
-    return len(attempts) >= MAX_ATTEMPTS
+    cutoff = datetime.fromtimestamp(now - LOCKOUT_WINDOW).isoformat()
+    try:
+        db = get_db()
+        row = db.execute(
+            "SELECT COUNT(*) FROM login_attempts WHERE ip=? AND attempted_at > ?",
+            (ip, cutoff)
+        ).fetchone()
+        db.close()
+        return (row[0] if row else 0) >= MAX_ATTEMPTS
+    except:
+        return False
 
 def record_attempt(ip):
-    import time
-    _login_attempts.setdefault(ip, []).append(time.time())
+    try:
+        db = get_db()
+        db.execute("INSERT INTO login_attempts (ip, attempted_at) VALUES (?, ?)",
+                   (ip, datetime.now().isoformat()))
+        db.commit()
+        db.close()
+    except:
+        pass
+
+def clear_attempts(ip):
+    try:
+        db = get_db()
+        db.execute("DELETE FROM login_attempts WHERE ip=?", (ip,))
+        db.commit()
+        db.close()
+    except:
+        pass
 
 @app.route('/admin/login', methods=['GET', 'POST'])
 def admin_login():
@@ -1237,7 +1262,7 @@ def admin_login():
             return render_template('admin_login.html', error='Too many attempts. Try again in 5 minutes.')
         if request.form.get('pin', '').strip() == ADMIN_PIN:
             session['admin'] = True
-            _login_attempts.pop(ip, None)
+            clear_attempts(ip)
             return redirect(url_for('admin'))
         record_attempt(ip)
         error = 'Wrong PIN'
