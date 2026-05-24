@@ -502,7 +502,7 @@ def index():
 @app.route('/driver/login', methods=['GET', 'POST'])
 def driver_login():
     error = None
-    ip = request.remote_addr
+    ip = get_real_ip()
     if request.method == 'POST':
         if is_rate_limited(ip):
             return render_template('driver_login.html', error='Too many attempts. Try again in 5 minutes.')
@@ -1243,6 +1243,12 @@ _login_attempts = {}  # ip -> [timestamp, ...]
 LOCKOUT_WINDOW = 300  # seconds
 MAX_ATTEMPTS   = 5
 
+def get_real_ip():
+    """Get real client IP — works behind Cloudflare + Render proxy."""
+    return (request.headers.get('CF-Connecting-IP') or
+            request.headers.get('X-Forwarded-For', '').split(',')[0].strip() or
+            request.remote_addr or 'unknown')
+
 def is_rate_limited(ip):
     now = _time.time()
     attempts = [t for t in _login_attempts.get(ip, []) if now - t < LOCKOUT_WINDOW]
@@ -1258,7 +1264,7 @@ def clear_attempts(ip):
 @app.route('/admin/login', methods=['GET', 'POST'])
 def admin_login():
     error = None
-    ip = request.remote_addr
+    ip = get_real_ip()
     if request.method == 'POST':
         if is_rate_limited(ip):
             return render_template('admin_login.html', error='Too many attempts. Try again in 5 minutes.')
