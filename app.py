@@ -9,11 +9,34 @@ import anthropic
 
 ANTHROPIC_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
 
+def compress_for_api(img_bytes, max_bytes=4 * 1024 * 1024):
+    """Resize + compress image to stay under Anthropic 5MB API limit."""
+    try:
+        img = Image.open(io.BytesIO(img_bytes)).convert('RGB')
+        if max(img.width, img.height) > 1568:
+            img.thumbnail((1568, 1568), Image.LANCZOS)
+        quality = 85
+        while quality >= 40:
+            buf = io.BytesIO()
+            img.save(buf, format='JPEG', quality=quality, optimize=True)
+            if buf.tell() <= max_bytes:
+                return buf.getvalue()
+            quality -= 10
+        img = img.resize((img.width // 2, img.height // 2), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format='JPEG', quality=60)
+        return buf.getvalue()
+    except Exception as e:
+        log.error(f'compress_for_api error: {e}')
+        return img_bytes
+
+
 def extract_stops_from_image(img_bytes):
     """Use Claude Vision to extract stops from a Speed X screenshot."""
     if not ANTHROPIC_KEY:
         return []
     try:
+        img_bytes = compress_for_api(img_bytes)
         client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
         b64    = base64.standard_b64encode(img_bytes).decode('utf-8')
         resp   = client.messages.create(
@@ -590,14 +613,9 @@ def route_new():
             fname = route_file.filename.lower()
 
             # ── IMAGE / SCREENSHOT — Claude Vision ──
-            if fname.endswith(('.png', '.jpg', '.jpeg')):
+            if fname.endswith(('.png', '.jpg', '.jpeg', '.heic', '.webp')):
                 try:
                     img_bytes = route_file.read()
-                    # Convert to JPEG for smaller payload to Claude
-                    img = Image.open(io.BytesIO(img_bytes)).convert('RGB')
-                    buf = io.BytesIO()
-                    img.save(buf, format='JPEG', quality=85)
-                    img_bytes = buf.getvalue()
                     stops_from_img = extract_stops_from_image(img_bytes)
                     for s in stops_from_img:
                         key = s.get('tracking') or s.get('address', '')
