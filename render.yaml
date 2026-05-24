@@ -1,7 +1,13 @@
+databases:
+  - name: unit-db
+    plan: free
+    region: oregon
+
 services:
   - type: web
     name: unit
     runtime: python
+    region: oregon
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn app:app --workers 2 --timeout 300 --bind 0.0.0.0:$PORT
     envVars:
@@ -9,8 +15,18 @@ services:
         value: production
       - key: SECRET_KEY
         generateValue: true
+      - key: DATABASE_URL
+        fromDatabase:
+          name: unit-db
+          property: connectionString
       - key: ADMIN_PIN
-        value: 8798
+        sync: false
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_PUBLISHABLE_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
       - key: TWILIO_SID
         sync: false
       - key: TWILIO_TOKEN
@@ -18,8 +34,6 @@ services:
       - key: TWILIO_PHONE
         sync: false
       - key: TEXTBELT_KEY
-        value: 1e75c135dcdcffe0d5d988a6f94a8c493f4c5e2fE4HPIiQ70HFrxcFHSXXy5RRgZ
-    disk:
-      name: unit-data
-      mountPath: /opt/render/project/src/data
-      sizeGB: 1
+        sync: false
+      - key: STRIPE_PRICE_ID
+        sync: false

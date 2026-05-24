@@ -17,7 +17,7 @@ def extract_stops_from_image(img_bytes):
         client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
         b64    = base64.standard_b64encode(img_bytes).decode('utf-8')
         resp   = client.messages.create(
-            model='claude-haiku-4-5',
+            model='claude-3-haiku-20240307',
             max_tokens=2048,
             messages=[{
                 'role': 'user',
@@ -290,9 +290,11 @@ def init_db():
     try:
         count = db.execute("SELECT COUNT(*) FROM drivers").fetchone()[0]
         if count == 0:
-            db.execute("INSERT INTO drivers (name, phone, company, pin, onboarded) VALUES (?,?,?,?,?)",
-                       ('Director X', '3135550000', 'SpeedX', '1234', 1))
+            init_pin = str(secrets.randbelow(9000) + 1000)
+            db.execute("INSERT INTO drivers (name, phone, company, pin) VALUES (?,?,?,?)",
+                       ('Director X', '3135550000', 'SpeedX', init_pin))
             db.commit()
+            log.info(f'Default driver created with PIN: {init_pin}')
     except: pass
     # Safe migrations — add columns if they don't exist yet
     for migration in [
@@ -470,14 +472,16 @@ def index():
 @app.route('/driver/login', methods=['GET', 'POST'])
 def driver_login():
     error = None
+    ip = request.remote_addr
     if request.method == 'POST':
+        if is_rate_limited(ip):
+            return render_template('driver_login.html', error='Too many attempts. Try again in 5 minutes.')
         pin = request.form.get('pin', '').strip()
         db = get_db()
         driver = db.execute("SELECT * FROM drivers WHERE pin=?", (pin,)).fetchone()
         if driver:
             session['driver_id'] = driver['id']
             session['driver_name'] = driver['name']
-            # Check onboarding via dedicated table (reliable on PostgreSQL)
             onboarded = db.execute(
                 "SELECT 1 FROM driver_onboarding WHERE driver_id=?",
                 (driver['id'],)
@@ -487,6 +491,7 @@ def driver_login():
                 return redirect(url_for('driver_walkthrough'))
             return redirect(url_for('driver_dashboard'))
         db.close()
+        record_attempt(ip)
         error = 'Invalid PIN'
     return render_template('driver_login.html', error=error)
 
@@ -1203,22 +1208,40 @@ def resident_portal():
 
 # ─── ADMIN ─────────────────────────────────────────────────────
 
-ADMIN_PIN = os.environ.get('ADMIN_PIN', '8798')
+ADMIN_PIN = os.environ.get('ADMIN_PIN', '')
+if not ADMIN_PIN:
+    raise RuntimeError('ADMIN_PIN env var is required')
+
+# ─── BRUTE FORCE PROTECTION ────────────────────────────────────
+_login_attempts = {}  # ip -> [timestamp, ...]
+LOCKOUT_WINDOW  = 300   # 5 minutes
+MAX_ATTEMPTS    = 10    # per window
+
+def is_rate_limited(ip):
+    import time
+    now = time.time()
+    attempts = [t for t in _login_attempts.get(ip, []) if now - t < LOCKOUT_WINDOW]
+    _login_attempts[ip] = attempts
+    return len(attempts) >= MAX_ATTEMPTS
+
+def record_attempt(ip):
+    import time
+    _login_attempts.setdefault(ip, []).append(time.time())
 
 @app.route('/admin/login', methods=['GET', 'POST'])
 def admin_login():
     error = None
+    ip = request.remote_addr
     if request.method == 'POST':
+        if is_rate_limited(ip):
+            return render_template('admin_login.html', error='Too many attempts. Try again in 5 minutes.')
         if request.form.get('pin', '').strip() == ADMIN_PIN:
             session['admin'] = True
+            _login_attempts.pop(ip, None)
             return redirect(url_for('admin'))
+        record_attempt(ip)
         error = 'Wrong PIN'
     return render_template('admin_login.html', error=error)
-
-@app.route('/admin/bypass/unit8798')
-def admin_bypass():
-    session['admin'] = True
-    return redirect(url_for('admin'))
 
 @app.route('/admin/logout')
 def admin_logout():
