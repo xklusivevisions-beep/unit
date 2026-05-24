@@ -608,21 +608,31 @@ def route_new():
         # Accumulate all stops from all files — keyed by tracking# to dedupe
         collected    = {}  # tracking_or_addr -> stop dict
 
+        import_errors = []
+
         for route_file in route_files:
             if not route_file or not route_file.filename: continue
             fname = route_file.filename.lower()
 
             # ── IMAGE / SCREENSHOT — Claude Vision ──
-            if fname.endswith(('.png', '.jpg', '.jpeg', '.heic', '.webp')):
+            if fname.endswith(('.png', '.jpg', '.jpeg', '.heic', '.webp', '.gif')):
                 try:
                     img_bytes = route_file.read()
+                    if len(img_bytes) == 0:
+                        import_errors.append(f'{fname}: file is empty')
+                        continue
+                    log.info(f'Processing image: {fname}, size: {len(img_bytes)} bytes')
                     stops_from_img = extract_stops_from_image(img_bytes)
+                    log.info(f'Claude returned {len(stops_from_img)} stops from {fname}')
+                    if not stops_from_img:
+                        import_errors.append(f'{fname}: no stops found — make sure it is a Speed X screenshot')
                     for s in stops_from_img:
                         key = s.get('tracking') or s.get('address', '')
                         if key and key not in collected:
                             collected[key] = s
                 except Exception as img_err:
                     log.error(f'Image processing error on {fname}: {img_err}')
+                    import_errors.append(f'{fname}: error — {str(img_err)[:80]}')
                     continue
 
             # ── PDF ──
@@ -727,12 +737,45 @@ def route_new():
         db.close()
 
         if stops_added == 0:
-            # Nothing parsed — go to manual stop entry
-            return redirect(url_for('route_manual'))
+            error_msg = 'No stops could be imported.'
+            if import_errors:
+                error_msg += ' Details: ' + ' | '.join(import_errors)
+            elif not route_files or all(not f.filename for f in route_files):
+                error_msg = 'No file was uploaded.'
+            db.execute('DELETE FROM routes WHERE id=?', (route_id,))
+            db.commit()
+            db.close()
+            return render_template('route_new.html', error=error_msg)
 
+        db.close()
         return redirect(url_for('route_detail', route_id=route_id))
 
     return render_template('route_new.html')
+
+@app.route('/driver/test-import', methods=['POST'])
+def test_import():
+    """Diagnostic endpoint — returns raw Claude output for an uploaded screenshot."""
+    if 'driver_id' not in session:
+        return jsonify({'error': 'not logged in'}), 401
+    f = request.files.get('image')
+    if not f:
+        return jsonify({'error': 'no file'}), 400
+    try:
+        img_bytes = f.read()
+        original_size = len(img_bytes)
+        compressed = compress_for_api(img_bytes)
+        compressed_size = len(compressed)
+        stops = extract_stops_from_image(img_bytes)
+        return jsonify({
+            'original_size_kb': round(original_size / 1024),
+            'compressed_size_kb': round(compressed_size / 1024),
+            'stops_found': len(stops),
+            'stops': stops,
+            'anthropic_key_set': bool(ANTHROPIC_KEY)
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 
 @app.route('/driver/route/manual', methods=['GET', 'POST'])
 def route_manual():

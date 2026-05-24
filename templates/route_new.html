@@ -11,7 +11,13 @@
   </div>
 
   <h5 class="fw-bold mb-1">Import Route</h5>
-  <p class="text-secondary small mb-4">Upload your Speed X CSV — houses, apartments, businesses, all of it loads automatically.</p>
+  <p class="text-secondary small mb-4">Upload your Speed X screenshots or CSV — all stops load automatically.</p>
+
+  {% if error %}
+  <div class="alert mb-3" style="background:#2a0000;border:1px solid #ff4444;color:#ff8888;border-radius:12px;padding:14px;font-size:0.85rem;">
+    <strong>Import failed:</strong> {{ error }}
+  </div>
+  {% endif %}
 
   <form method="POST" enctype="multipart/form-data">
     <div class="card p-4 mb-3">
