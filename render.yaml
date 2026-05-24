@@ -9,7 +9,7 @@ services:
     runtime: python
     region: oregon
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app --workers 2 --timeout 300 --bind 0.0.0.0:$PORT
+    startCommand: gunicorn app:app --workers 1 --timeout 300 --bind 0.0.0.0:$PORT
     envVars:
       - key: FLASK_ENV
         value: production

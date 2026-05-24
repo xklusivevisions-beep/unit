@@ -1220,43 +1220,22 @@ if not ADMIN_PIN:
     raise RuntimeError('ADMIN_PIN env var is required')
 
 # ─── BRUTE FORCE PROTECTION ────────────────────────────────────
+import time as _time
+_login_attempts = {}  # ip -> [timestamp, ...]
 LOCKOUT_WINDOW = 300  # seconds
-MAX_ATTEMPTS   = 5    # per window per worker
+MAX_ATTEMPTS   = 5
 
 def is_rate_limited(ip):
-    """DB-backed rate limiting — works across all Gunicorn workers."""
-    import time
-    now = time.time()
-    cutoff = datetime.fromtimestamp(now - LOCKOUT_WINDOW).isoformat()
-    try:
-        db = get_db()
-        row = db.execute(
-            "SELECT COUNT(*) FROM login_attempts WHERE ip=? AND attempted_at > ?",
-            (ip, cutoff)
-        ).fetchone()
-        db.close()
-        return (row[0] if row else 0) >= MAX_ATTEMPTS
-    except:
-        return False
+    now = _time.time()
+    attempts = [t for t in _login_attempts.get(ip, []) if now - t < LOCKOUT_WINDOW]
+    _login_attempts[ip] = attempts
+    return len(attempts) >= MAX_ATTEMPTS
 
 def record_attempt(ip):
-    try:
-        db = get_db()
-        db.execute("INSERT INTO login_attempts (ip, attempted_at) VALUES (?, ?)",
-                   (ip, datetime.now().isoformat()))
-        db.commit()
-        db.close()
-    except:
-        pass
+    _login_attempts.setdefault(ip, []).append(_time.time())
 
 def clear_attempts(ip):
-    try:
-        db = get_db()
-        db.execute("DELETE FROM login_attempts WHERE ip=?", (ip,))
-        db.commit()
-        db.close()
-    except:
-        pass
+    _login_attempts.pop(ip, None)
 
 @app.route('/admin/login', methods=['GET', 'POST'])
 def admin_login():
