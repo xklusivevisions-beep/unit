@@ -284,6 +284,11 @@ def init_db():
             driver_id INTEGER PRIMARY KEY,
             completed_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS login_attempts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ip TEXT NOT NULL,
+            attempted_at TEXT NOT NULL
+        );
     ''')
     db.commit()
     # Only insert default driver if NO drivers exist yet
