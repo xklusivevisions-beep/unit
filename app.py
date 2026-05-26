@@ -52,15 +52,39 @@ def extract_stops_from_image(img_bytes):
                     {
                         'type': 'text',
                         'text': '''This is a Speed X delivery app screenshot. Extract ALL delivery stops visible.
-Return ONLY a JSON array, no other text. Format:
-[{"stop_num": "88", "address": "18078 Joseph Campau, Detroit, MI 48201", "name": "John Smith", "tracking": "SPXDTW001234"}]
+Return ONLY a JSON array, no other text. No markdown, no code blocks, just the raw array.
+
+SPEED X ADDRESS FORMAT — addresses are split across TWO lines:
+  Line 1: street number + street name (may end with "Apt", "St", "Blvd," or just the street)
+  Line 2: unit/apt number, City, STATE, ZIP, USA — all comma-separated, no spaces
+Example:
+  Line 1: "3439 Woodward Ave Apt"
+  Line 2: "550,Detroit,MI,48201,USA"
+  → Reconstruct as: "3439 Woodward Ave Apt 550, Detroit, MI 48201"
+
+Another example:
+  Line 1: "690 Brainard ST"
+  Line 2: "405,DETROIT,MI,48201-2283,..."
+  → Reconstruct as: "690 Brainard ST Apt 405, Detroit, MI 48201"
+
+Another example:
+  Line 1: "676 Martin Luther King Jr Blvd,"
+  Line 2: "Apt 2c, MI,Detroit,MI,48201,USA"
+  → Reconstruct as: "676 Martin Luther King Jr Blvd Apt 2C, Detroit, MI 48201"
+
+Output format:
+[{"stop_num": "51", "address": "690 Brainard ST Apt 405, Detroit, MI 48201", "name": "Ianita Manning", "tracking": "SPXDTW119702831650", "unit": "405"}]
+
 Rules:
-- address must be full street address with city, state, zip
-- Remove ",USA" from end of addresses
-- stop_num is the number after "Stop:" label
-- tracking starts with SPXDTW
-- name is the customer name
-- Include every stop visible on screen'''
+- Reconstruct the full address by combining both lines as shown above
+- Remove ",USA" and trailing ",..." from addresses
+- Normalize city to title case (Detroit not DETROIT)
+- stop_num is the number after "Stop:" label (bottom-right of each card)
+- tracking is the full SPXDTW code (blue text) — copy it exactly, it can be 18-24 chars
+- name is the customer name (blue text next to phone icon) — expand truncated names if you can read enough, otherwise use what is visible
+- unit is the apartment/unit number extracted from the address
+- Include EVERY stop card visible on screen
+- If address is truncated with "..." reconstruct as much as possible from visible text'''
                     }
                 ]
             }]
@@ -74,7 +98,8 @@ Rules:
                 'address':  s.get('address','').strip(),
                 'name':     s.get('name','').strip(),
                 'tracking': s.get('tracking','').strip(),
-                'stop_num': str(s.get('stop_num','')).strip()
+                'stop_num': str(s.get('stop_num','')).strip(),
+                'unit':     s.get('unit','').strip()
             } for s in stops if s.get('address')]
     except Exception as e:
         log.error(f'Claude Vision error: {e}')
