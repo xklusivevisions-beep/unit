@@ -8,12 +8,34 @@
   #map {
     height: 340px;
     border-radius: 14px;
-    overflow: hidden;
+    /* no overflow:hidden — LRM panel renders inside map div and gets clipped */
     border: 2px solid #222;
-    margin-bottom: 12px;
+    margin-bottom: 0;
   }
   /* Dark map tiles */
   .leaflet-tile { filter: brightness(0.7) saturate(0.6); }
+
+  /* Dark theme for LRM directions panel */
+  .leaflet-routing-container {
+    background: #111 !important;
+    border: 1px solid #333 !important;
+    border-radius: 0 0 14px 14px !important;
+    color: #eee !important;
+    font-size: 0.82rem !important;
+    max-height: 180px;
+    overflow-y: auto;
+    margin-bottom: 12px;
+  }
+  .leaflet-routing-container h2,
+  .leaflet-routing-container h3 { color: #00ff88 !important; font-size: 0.85rem !important; }
+  .leaflet-routing-container table { color: #ccc !important; }
+  .leaflet-routing-container .leaflet-routing-alt { background: #111 !important; }
+  .leaflet-routing-container .leaflet-routing-collapse-btn {
+    background: #1a1a1a !important;
+    color: #aaa !important;
+    border: 1px solid #333 !important;
+  }
+  .leaflet-routing-icon { filter: invert(1) brightness(0.7); }
 
   .geofence-bar {
     height: 10px;
@@ -230,41 +252,59 @@ const driverIcon = L.divIcon({
 // ── ROUTING ──
 let routingControl = null;
 let routeInitialized = false;
+let lastRouteUpdate = 0;
+const ROUTE_UPDATE_INTERVAL = 30000; // only recalculate every 30s — avoid spamming OSRM
 
 function initRoute(driverLat, driverLng) {
   if (!DEST_LAT || !DEST_LNG || routeInitialized) return;
   routeInitialized = true;
-  routingControl = L.Routing.control({
-    waypoints: [
-      L.latLng(driverLat, driverLng),
-      L.latLng(DEST_LAT, DEST_LNG)
-    ],
-    routeWhileDragging: false,
-    addWaypoints: false,
-    draggableWaypoints: false,
-    fitSelectedRoutes: false,   // let our zoom logic stay in charge
-    show: true,                  // show turn-by-turn panel
-    collapsible: true,
-    collapsed: false,
-    lineOptions: {
-      styles: [{ color: '#0088ff', weight: 5, opacity: 0.8 }],
-      extendToWaypoints: false,
-      missingRouteTolerance: 0
-    },
-    createMarker: function() { return null; }, // don't replace our custom markers
-    router: L.Routing.osrmv1({
-      serviceUrl: 'https://router.project-osrm.org/route/v1',
-      profile: 'driving'
-    })
-  }).addTo(map);
+  try {
+    routingControl = L.Routing.control({
+      waypoints: [
+        L.latLng(driverLat, driverLng),
+        L.latLng(DEST_LAT, DEST_LNG)
+      ],
+      routeWhileDragging: false,
+      addWaypoints: false,
+      draggableWaypoints: false,
+      fitSelectedRoutes: false,   // keep our zoom logic in charge
+      show: true,
+      collapsible: true,
+      collapsed: false,
+      lineOptions: {
+        styles: [{ color: '#0088ff', weight: 5, opacity: 0.8 }],
+        extendToWaypoints: false,
+        missingRouteTolerance: 0
+      },
+      createMarker: function() { return null; }, // preserve our custom pins
+      router: L.Routing.osrmv1({
+        serviceUrl: 'https://router.project-osrm.org/route/v1',
+        profile: 'driving'
+      })
+    }).addTo(map);
+
+    routingControl.on('routingerror', function(e) {
+      console.warn('Routing error:', e);
+      // Fail silently — map + geofence still work without route
+    });
+  } catch(e) {
+    console.warn('Routing init failed:', e);
+  }
 }
 
 function updateRoute(driverLat, driverLng) {
   if (!routingControl || !DEST_LAT || !DEST_LNG) return;
-  routingControl.setWaypoints([
-    L.latLng(driverLat, driverLng),
-    L.latLng(DEST_LAT, DEST_LNG)
-  ]);
+  const now = Date.now();
+  if (now - lastRouteUpdate < ROUTE_UPDATE_INTERVAL) return; // throttle
+  lastRouteUpdate = now;
+  try {
+    routingControl.setWaypoints([
+      L.latLng(driverLat, driverLng),
+      L.latLng(DEST_LAT, DEST_LNG)
+    ]);
+  } catch(e) {
+    console.warn('Route update failed:', e);
+  }
 }
 
 // ── GPS + API ──
