@@ -1042,8 +1042,17 @@ def stop_active(stop_id):
         return redirect(url_for('driver_login'))
     db = get_db()
     stop = db.execute("SELECT * FROM stops WHERE id=?", (stop_id,)).fetchone()
+    if not stop:
+        db.close()
+        return redirect(url_for('driver_dashboard'))
+    # Lazy geocode — if no pin yet, geocode now so map loads correctly
+    if not stop['dest_lat']:
+        lat, lng = geocode_address(stop['address'])
+        if lat and lng:
+            db.execute("UPDATE stops SET dest_lat=?, dest_lng=? WHERE id=?", (lat, lng, stop_id))
+            db.commit()
+            stop = db.execute("SELECT * FROM stops WHERE id=?", (stop_id,)).fetchone()
     db.close()
-    if not stop: return redirect(url_for('driver_dashboard'))
     return render_template('stop_active.html', stop=stop)
 
 @app.route('/driver/stop/<int:stop_id>/pin', methods=['POST'])
