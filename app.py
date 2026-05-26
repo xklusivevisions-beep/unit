@@ -371,7 +371,9 @@ def geocode_address(address):
     if address in _geocache: return _geocache[address]
     try:
         geo = Nominatim(user_agent='unit-delivery-app', timeout=8)
-        loc = geo.geocode(address)
+        # Nominatim fails on apartment numbers — strip Apt/Unit/Suite before lookup
+        clean = re.sub(r'\s+(Apt|Unit|Suite|Ste|#)\s*[\w-]+', '', address, flags=re.IGNORECASE).strip()
+        loc = geo.geocode(clean) or geo.geocode(address)
         if loc:
             _geocache[address] = (loc.latitude, loc.longitude)
             return loc.latitude, loc.longitude
@@ -1609,7 +1611,7 @@ def health():
         db = get_db()
         db.execute('SELECT 1').fetchone()
         db.close()
-        return jsonify({'status': 'ok', 'time': datetime.now().isoformat(), 'version': '2cdc22b', 'model': 'claude-haiku-4-5-20251001'})
+        return jsonify({'status': 'ok', 'time': datetime.now().isoformat(), 'version': 'geocode-fix', 'model': 'claude-haiku-4-5-20251001'})
     except Exception as e:
         return jsonify({'status': 'error', 'msg': str(e)}), 500
 
