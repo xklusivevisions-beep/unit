@@ -3,9 +3,10 @@
 
 {% block extra_css %}
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.css"/>
 <style>
   #map {
-    height: 260px;
+    height: 340px;
     border-radius: 14px;
     overflow: hidden;
     border: 2px solid #222;
@@ -173,6 +174,7 @@
 
 {% block scripts %}
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.min.js"></script>
 <script>
 const STOP_ID   = {{ stop.id }};
 const DEST_LAT  = {{ stop.dest_lat or 'null' }};
@@ -225,6 +227,46 @@ const driverIcon = L.divIcon({
   className: '', iconAnchor: [7,7]
 });
 
+// ── ROUTING ──
+let routingControl = null;
+let routeInitialized = false;
+
+function initRoute(driverLat, driverLng) {
+  if (!DEST_LAT || !DEST_LNG || routeInitialized) return;
+  routeInitialized = true;
+  routingControl = L.Routing.control({
+    waypoints: [
+      L.latLng(driverLat, driverLng),
+      L.latLng(DEST_LAT, DEST_LNG)
+    ],
+    routeWhileDragging: false,
+    addWaypoints: false,
+    draggableWaypoints: false,
+    fitSelectedRoutes: false,   // let our zoom logic stay in charge
+    show: true,                  // show turn-by-turn panel
+    collapsible: true,
+    collapsed: false,
+    lineOptions: {
+      styles: [{ color: '#0088ff', weight: 5, opacity: 0.8 }],
+      extendToWaypoints: false,
+      missingRouteTolerance: 0
+    },
+    createMarker: function() { return null; }, // don't replace our custom markers
+    router: L.Routing.osrmv1({
+      serviceUrl: 'https://router.project-osrm.org/route/v1',
+      profile: 'driving'
+    })
+  }).addTo(map);
+}
+
+function updateRoute(driverLat, driverLng) {
+  if (!routingControl || !DEST_LAT || !DEST_LNG) return;
+  routingControl.setWaypoints([
+    L.latLng(driverLat, driverLng),
+    L.latLng(DEST_LAT, DEST_LNG)
+  ]);
+}
+
 // ── GPS + API ──
 function sendLocation(lat, lng) {
   // Update driver marker on map
@@ -233,8 +275,12 @@ function sendLocation(lat, lng) {
     if (DEST_LAT && DEST_LNG) {
       map.fitBounds([[lat, lng],[DEST_LAT, DEST_LNG]], {padding:[40,40]});
     }
+    // Init route on first GPS fix
+    initRoute(lat, lng);
   } else {
     driverMarker.setLatLng([lat, lng]);
+    // Update route waypoint as driver moves
+    updateRoute(lat, lng);
   }
 
   fetch('/api/location', {
