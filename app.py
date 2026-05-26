@@ -40,7 +40,7 @@ def extract_stops_from_image(img_bytes):
         client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
         b64    = base64.standard_b64encode(img_bytes).decode('utf-8')
         resp   = client.messages.create(
-            model='claude-3-haiku-20240307',
+            model='claude-haiku-4-5-20251001',
             max_tokens=2048,
             messages=[{
                 'role': 'user',
