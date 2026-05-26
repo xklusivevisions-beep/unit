@@ -734,7 +734,6 @@ def route_new():
             stops_added += 1
 
         db.commit()
-        db.close()
 
         if stops_added == 0:
             error_msg = 'No stops could be imported.'
