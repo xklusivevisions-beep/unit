@@ -1600,7 +1600,7 @@ def health():
         db = get_db()
         db.execute('SELECT 1').fetchone()
         db.close()
-        return jsonify({'status': 'ok', 'time': datetime.now().isoformat()})
+        return jsonify({'status': 'ok', 'time': datetime.now().isoformat(), 'version': 'cf1e43e', 'model': 'claude-haiku-4-5-20251001'})
     except Exception as e:
         return jsonify({'status': 'error', 'msg': str(e)}), 500
 
