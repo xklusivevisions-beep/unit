@@ -355,6 +355,7 @@ def init_db():
         "ALTER TABLE residents ADD COLUMN sms_consent INTEGER DEFAULT 0",
         "ALTER TABLE residents ADD COLUMN sms_consent_at TEXT",
         "ALTER TABLE drivers ADD COLUMN onboarded INTEGER DEFAULT 0",
+        "ALTER TABLE drivers ADD COLUMN is_beta INTEGER DEFAULT 0",
         "CREATE TABLE IF NOT EXISTS pin_corrections (id INTEGER PRIMARY KEY AUTOINCREMENT, address TEXT UNIQUE NOT NULL, lat REAL NOT NULL, lng REAL NOT NULL, corrected_by TEXT, corrected_at TEXT DEFAULT CURRENT_TIMESTAMP)",
         "CREATE TABLE IF NOT EXISTS login_attempts (id INTEGER PRIMARY KEY AUTOINCREMENT, ip TEXT NOT NULL, attempted_at TEXT NOT NULL)",
         "CREATE INDEX IF NOT EXISTS idx_login_attempts_ip ON login_attempts (ip, attempted_at)",
@@ -1358,6 +1359,29 @@ def admin_login():
 def admin_logout():
     session.pop('admin', None)
     return redirect(url_for('index'))
+
+@app.route('/admin/create-driver', methods=['POST'])
+def admin_create_driver():
+    """Create a driver directly from admin — no Stripe required (beta/test accounts)."""
+    if not session.get('admin'):
+        return redirect(url_for('admin_login'))
+    name    = request.form.get('name', '').strip()
+    phone   = format_phone(request.form.get('phone', '').strip())
+    company = request.form.get('company', '').strip()
+    is_beta = 1  # all admin-created drivers are beta/free
+    if not name:
+        return redirect(url_for('admin'))
+    pin = str(secrets.randbelow(9000) + 1000)
+    db = get_db()
+    db.execute(
+        "INSERT INTO drivers (name, phone, company, pin, is_beta) VALUES (?,?,?,?,?)",
+        (name, phone, company, pin, is_beta)
+    )
+    db.commit()
+    db.close()
+    if phone:
+        send_sms(phone, f"Your UNIT driver PIN is: {pin}\nLogin at: {get_base_url()}/driver/login")
+    return redirect(url_for('admin'))
 
 @app.route('/admin/cleanup-drivers', methods=['POST'])
 def admin_cleanup_drivers():
