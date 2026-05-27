@@ -1475,6 +1475,19 @@ def admin():
 
 # ─── TEST SMS ─────────────────────────────────────────────────
 
+@app.route('/admin/regeocode', methods=['POST'])
+def admin_regeocode():
+    """Clear bad (null) geocode results so stops re-geocode on next load."""
+    if not session.get('admin'):
+        return redirect(url_for('admin_login'))
+    _geocache.clear()
+    db = get_db()
+    result = db.execute("UPDATE stops SET dest_lat=NULL, dest_lng=NULL WHERE dest_lat IS NULL OR dest_lat=0").fetchone()
+    db.commit()
+    db.close()
+    flash('Geocache cleared — stops will re-geocode on next load.', 'beta_pin')
+    return redirect(url_for('admin'))
+
 @app.route('/admin/building', methods=['POST'])
 def admin_add_building():
     if 'driver_id' not in session:

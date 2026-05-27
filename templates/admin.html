@@ -118,6 +118,13 @@
       </form>
     </div>
 
+    <!-- Re-geocode bad stops -->
+    <form method="POST" action="/admin/regeocode" class="mb-2" onsubmit="return confirm('Clear geocache and reset null stop pins?')">
+      <button type="submit" style="background:#ff330011;color:#ff6666;border:1px solid #ff333333;border-radius:10px;padding:8px 16px;font-size:0.8rem;font-weight:700;width:100%;cursor:pointer;">
+        📍 Fix Stop Pins (re-geocode)
+      </button>
+    </form>
+
     <!-- Cleanup button if dupes exist -->
     {% if drivers_list|length > 1 %}
     <form method="POST" action="/admin/cleanup-drivers" class="mb-3">

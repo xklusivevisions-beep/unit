@@ -365,6 +365,10 @@ function sendLocation(lat, lng) {
         gpsText.style.color = '#aaa';
         atBanner.style.display = 'none';
       }
+    } else {
+      // GPS is active but stop pin not yet geocoded — show live instead of stuck "Acquiring"
+      gpsText.textContent = 'GPS active — locating stop pin...';
+      gpsText.style.color = '#00ff88';
     }
 
     if (data.sms_triggered && !smsTriggered) {
