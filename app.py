@@ -1636,7 +1636,12 @@ def health():
         db = get_db()
         db.execute('SELECT 1').fetchone()
         db.close()
-        return jsonify({'status': 'ok', 'time': datetime.now().isoformat(), 'version': 'geocode-fix', 'model': 'claude-haiku-4-5-20251001'})
+        import subprocess
+        try:
+            git_hash = subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD'], cwd=os.path.dirname(__file__) or '.', stderr=subprocess.DEVNULL).decode().strip()
+        except Exception:
+            git_hash = 'unknown'
+        return jsonify({'status': 'ok', 'time': datetime.now().isoformat(), 'version': git_hash, 'model': 'claude-haiku-4-5-20251001'})
     except Exception as e:
         return jsonify({'status': 'error', 'msg': str(e)}), 500
 
