@@ -382,20 +382,47 @@ def _normalize_street_numbers(addr):
     """Convert spelled-out numbers to digits (Eight Mile -> 8 Mile). Nominatim fails on word numbers."""
     return _WORD_NUM_RE.sub(lambda m: _WORD_TO_NUM[m.group(1).lower()], addr)
 
+def _census_geocode(address):
+    """US Census Bureau geocoder — free, no API key, highest accuracy for US addresses."""
+    try:
+        r = requests.get(
+            'https://geocoding.geo.census.gov/geocoder/locations/onelineaddress',
+            params={'address': address, 'benchmark': 'Public_AR_Current', 'format': 'json'},
+            timeout=10
+        )
+        matches = r.json().get('result', {}).get('addressMatches', [])
+        if matches:
+            c = matches[0]['coordinates']
+            return float(c['y']), float(c['x'])  # lat, lng
+    except Exception as e:
+        log.warning(f'Census geocode failed for {address}: {e}')
+    return None, None
+
 def geocode_address(address):
     if address in _geocache: return _geocache[address]
+    # Normalize spelled-out numbers (Eight Mile -> 8 Mile)
+    normalized = _normalize_street_numbers(address)
+    # Strip apt/unit suffixes before geocoding
+    clean = re.sub(r'\s+(Apt|Unit|Suite|Ste|#)\s*[\w-]+', '', normalized, flags=re.IGNORECASE).strip()
+
+    # 1. Try US Census Bureau (most accurate for US addresses, free, no key)
+    lat, lng = _census_geocode(clean)
+    if lat and lng:
+        log.info(f'Census geocode hit: {address} -> {lat:.5f}, {lng:.5f}')
+        _geocache[address] = (lat, lng)
+        return lat, lng
+
+    # 2. Fall back to Nominatim
     try:
         geo = Nominatim(user_agent='unit-delivery-app', timeout=8)
-        # Normalize spelled-out numbers first (Eight Mile -> 8 Mile)
-        normalized = _normalize_street_numbers(address)
-        # Strip apt/unit suffixes — Nominatim returns null for addresses with apartment numbers
-        clean = re.sub(r'\s+(Apt|Unit|Suite|Ste|#)\s*[\w-]+', '', normalized, flags=re.IGNORECASE).strip()
         loc = geo.geocode(clean) or geo.geocode(normalized) or geo.geocode(address)
         if loc:
+            log.info(f'Nominatim fallback hit: {address} -> {loc.latitude:.5f}, {loc.longitude:.5f}')
             _geocache[address] = (loc.latitude, loc.longitude)
             return loc.latitude, loc.longitude
     except Exception as e:
-        log.warning(f'Geocode failed for {address}: {e}')
+        log.warning(f'Nominatim geocode failed for {address}: {e}')
+
     _geocache[address] = (None, None)
     return None, None
 
