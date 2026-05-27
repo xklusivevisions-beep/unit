@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, redirect, url_for, session, jsonify
+from flask import Flask, render_template, request, redirect, url_for, session, jsonify, flash, get_flashed_messages
 from datetime import datetime
 from geopy.distance import geodesic
 from geopy.geocoders import Nominatim
@@ -1381,7 +1381,6 @@ def admin_create_driver():
     db.close()
     if phone:
         send_sms(phone, f"Your UNIT driver PIN is: {pin}\nLogin at: {get_base_url()}/driver/login")
-    from flask import flash
     flash(f'Driver created — {name} | PIN: {pin} | Login: {get_base_url()}/driver/login', 'beta_pin')
     return redirect(url_for('admin'))
 
