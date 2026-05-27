@@ -363,7 +363,9 @@ def init_db():
         try:
             db.execute(migration)
             db.commit()
-        except: pass
+        except:
+            try: db._conn.rollback()
+            except: pass
     db.close()
 
 # ─── HELPERS ───────────────────────────────────────────────────
@@ -1372,13 +1374,20 @@ def admin_create_driver():
     if not name:
         return redirect(url_for('admin'))
     pin = str(secrets.randbelow(9000) + 1000)
-    db = get_db()
-    db.execute(
-        "INSERT INTO drivers (name, phone, company, pin, is_beta) VALUES (?,?,?,?,?)",
-        (name, phone, company, pin, is_beta)
-    )
-    db.commit()
-    db.close()
+    try:
+        db = get_db()
+        db.execute(
+            "INSERT INTO drivers (name, phone, company, pin, is_beta) VALUES (?,?,?,?,?)",
+            (name, phone, company, pin, is_beta)
+        )
+        db.commit()
+        db.close()
+    except Exception as e:
+        log.error(f'admin_create_driver DB error: {e}')
+        try: db._conn.rollback()
+        except: pass
+        flash(f'Error creating driver: {e}', 'beta_pin')
+        return redirect(url_for('admin'))
     if phone:
         send_sms(phone, f"Your UNIT driver PIN is: {pin}\nLogin at: {get_base_url()}/driver/login")
     flash(f'Driver created — {name} | PIN: {pin} | Login: {get_base_url()}/driver/login', 'beta_pin')
