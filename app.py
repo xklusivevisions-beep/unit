@@ -1509,7 +1509,7 @@ def admin_regeocode():
         return redirect(url_for('admin_login'))
     _geocache.clear()
     db = get_db()
-    result = db.execute("UPDATE stops SET dest_lat=NULL, dest_lng=NULL WHERE dest_lat IS NULL OR dest_lat=0").fetchone()
+    db.execute("UPDATE stops SET dest_lat=NULL, dest_lng=NULL WHERE dest_lat IS NULL OR (dest_lat > -0.001 AND dest_lat < 0.001)")
     db.commit()
     db.close()
     flash('Geocache cleared — stops will re-geocode on next load.', 'beta_pin')
