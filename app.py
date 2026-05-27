@@ -1708,8 +1708,18 @@ def health():
     except Exception as e:
         return jsonify({'status': 'error', 'msg': str(e)}), 500
 
-with app.app_context():
-    init_db()
+# Run init_db in a background thread so gunicorn binds to the port immediately.
+# On free-tier Render, cold PostgreSQL wakes slowly and blocks gunicorn startup
+# causing Render's port scan to time out and roll back the deploy.
+import threading
+def _startup_init():
+    with app.app_context():
+        try:
+            init_db()
+        except Exception as e:
+            log.error(f'init_db failed: {e}')
+
+threading.Thread(target=_startup_init, daemon=True).start()
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5050))
