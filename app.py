@@ -1381,6 +1381,8 @@ def admin_create_driver():
     db.close()
     if phone:
         send_sms(phone, f"Your UNIT driver PIN is: {pin}\nLogin at: {get_base_url()}/driver/login")
+    from flask import flash
+    flash(f'Driver created — {name} | PIN: {pin} | Login: {get_base_url()}/driver/login', 'beta_pin')
     return redirect(url_for('admin'))
 
 @app.route('/admin/cleanup-drivers', methods=['POST'])

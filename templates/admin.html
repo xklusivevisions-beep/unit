@@ -88,6 +88,17 @@
   <!-- TAB: DRIVERS -->
   <div class="tab-pane active" id="tab-drivers">
 
+    <!-- Beta PIN flash -->
+    {% with messages = get_flashed_messages(category_filter=['beta_pin']) %}
+    {% for msg in messages %}
+    <div id="beta-pin-banner" style="background:#001a00;border:1px solid #00ff8866;border-radius:12px;padding:14px 16px;margin-bottom:14px;">
+      <div style="color:#00ff88;font-size:0.8rem;font-weight:700;letter-spacing:0.05em;margin-bottom:4px;">✅ BETA DRIVER CREATED</div>
+      <div style="color:#fff;font-size:0.9rem;font-family:monospace;">{{ msg }}</div>
+      <div style="color:#555;font-size:0.75rem;margin-top:6px;">Send PIN to driver — they log in at <strong style="color:#aaa;">/driver/login</strong> (not here)</div>
+    </div>
+    {% endfor %}
+    {% endwith %}
+
     <!-- Create Beta Driver -->
     <div class="mb-3" style="background:#0a0a1a;border:1px solid #00aaff44;border-radius:12px;padding:16px;">
       <div class="fw-bold mb-2" style="color:#00aaff;font-size:0.85rem;letter-spacing:0.05em;">➕ CREATE BETA DRIVER <span style="font-size:0.7rem;color:#555;font-weight:400;">(no payment required)</span></div>
