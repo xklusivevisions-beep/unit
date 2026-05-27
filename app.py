@@ -370,13 +370,27 @@ def init_db():
 
 # ─── HELPERS ───────────────────────────────────────────────────
 
+_WORD_TO_NUM = {
+    'zero':'0','one':'1','two':'2','three':'3','four':'4','five':'5',
+    'six':'6','seven':'7','eight':'8','nine':'9','ten':'10','eleven':'11',
+    'twelve':'12','thirteen':'13','fourteen':'14','fifteen':'15',
+    'sixteen':'16','seventeen':'17','eighteen':'18','nineteen':'19','twenty':'20',
+}
+_WORD_NUM_RE = re.compile(r'\b(' + '|'.join(_WORD_TO_NUM.keys()) + r')\b', re.IGNORECASE)
+
+def _normalize_street_numbers(addr):
+    """Convert spelled-out numbers to digits (Eight Mile -> 8 Mile). Nominatim fails on word numbers."""
+    return _WORD_NUM_RE.sub(lambda m: _WORD_TO_NUM[m.group(1).lower()], addr)
+
 def geocode_address(address):
     if address in _geocache: return _geocache[address]
     try:
         geo = Nominatim(user_agent='unit-delivery-app', timeout=8)
-        # Nominatim fails on apartment numbers — strip Apt/Unit/Suite before lookup
-        clean = re.sub(r'\s+(Apt|Unit|Suite|Ste|#)\s*[\w-]+', '', address, flags=re.IGNORECASE).strip()
-        loc = geo.geocode(clean) or geo.geocode(address)
+        # Normalize spelled-out numbers first (Eight Mile -> 8 Mile)
+        normalized = _normalize_street_numbers(address)
+        # Strip apt/unit suffixes — Nominatim returns null for addresses with apartment numbers
+        clean = re.sub(r'\s+(Apt|Unit|Suite|Ste|#)\s*[\w-]+', '', normalized, flags=re.IGNORECASE).strip()
+        loc = geo.geocode(clean) or geo.geocode(normalized) or geo.geocode(address)
         if loc:
             _geocache[address] = (loc.latitude, loc.longitude)
             return loc.latitude, loc.longitude
