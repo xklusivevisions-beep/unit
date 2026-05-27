@@ -73,7 +73,7 @@ Another example:
   → Reconstruct as: "676 Martin Luther King Jr Blvd Apt 2C, Detroit, MI 48201"
 
 Output format:
-[{"stop_num": "51", "address": "690 Brainard ST Apt 405, Detroit, MI 48201", "name": "Ianita Manning", "tracking": "SPXDTW119702831650", "unit": "405"}]
+[{"stop_num": "51", "address": "690 Brainard ST Apt 405, Detroit, MI 48201", "name": "Ianita Manning", "tracking": "SPXDTW119702831650", "unit": "405", "phone": "3135550123"}]
 
 Rules:
 - Reconstruct the full address by combining both lines as shown above
@@ -83,6 +83,7 @@ Rules:
 - tracking is the full SPXDTW code (blue text) — copy it exactly, it can be 18-24 chars
 - name is the customer name (blue text next to phone icon) — expand truncated names if you can read enough, otherwise use what is visible
 - unit is the apartment/unit number extracted from the address
+- phone is the customer phone number if visible anywhere on the card (digits only, no dashes or spaces). If not visible, use empty string ""
 - Include EVERY stop card visible on screen
 - If address is truncated with "..." reconstruct as much as possible from visible text'''
                     }
@@ -99,7 +100,8 @@ Rules:
                 'name':     s.get('name','').strip(),
                 'tracking': s.get('tracking','').strip(),
                 'stop_num': str(s.get('stop_num','')).strip(),
-                'unit':     s.get('unit','').strip()
+                'unit':     s.get('unit','').strip(),
+                'phone':    re.sub(r'\D', '', s.get('phone',''))
             } for s in stops if s.get('address')]
     except Exception as e:
         log.error(f'Claude Vision error: {e}')
@@ -766,11 +768,13 @@ def route_new():
             if not full_addr: continue
             street    = full_addr.split(',')[0].strip()
             resident  = db.execute("SELECT * FROM residents WHERE LOWER(address) LIKE LOWER(?)", (f'%{street}%',)).fetchone()
-            phone      = resident['phone']      if resident else ''
             drop_spot  = resident['drop_spot']  if resident else ''
             door_notes = resident['door_notes'] if resident else ''
             unit       = s.get('unit', '') or (resident['unit'] if resident and resident.get('unit') else '')
-            # If no resident profile, pull phone from stop history
+            # Phone priority: 1) parsed from SpeedX screenshot, 2) resident profile, 3) stop history
+            phone = format_phone(s.get('phone','')) if s.get('phone') else ''
+            if not phone:
+                phone = resident['phone'] if resident else ''
             if not phone:
                 hist = db.execute(
                     """SELECT phone, customer_name FROM stops
@@ -780,7 +784,6 @@ def route_new():
                 ).fetchone()
                 if hist:
                     phone = hist['phone'] or ''
-                    # Also fill name from history if not parsed from import
                     if not s.get('name') and hist['customer_name']:
                         s['name'] = hist['customer_name']
             # Building access
