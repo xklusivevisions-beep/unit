@@ -93,11 +93,35 @@
       <div style="font-size:4rem;margin-bottom:16px;">📦</div>
       <h5 class="fw-bold mb-2">No Route Yet</h5>
       <p class="text-secondary mb-4">Import your Speed X route to get started</p>
-      <a href="/driver/route/new" class="btn btn-primary w-100 py-3 fs-6">
+      <a href="/driver/route/new" class="btn btn-primary w-100 py-3 fs-6 mb-3">
         <i class="fas fa-upload me-2"></i>Import Today's Route
       </a>
     </div>
   {% endif %}
+
+  <!-- Quick Live Share -->
+  <div class="card p-3 mb-4" style="border-color:#0088ff44;background:#0088ff08;">
+    <div class="fw-bold mb-1" style="font-size:0.85rem;color:#0088ff;"><i class="fas fa-broadcast-tower me-2"></i>Quick Live Share</div>
+    <small class="text-secondary d-block mb-3">Share your live location for any stop — no address needed. Customer sees you moving. You tap Delivered. They lose the view.</small>
+    <button id="live-share-btn" onclick="startLiveShare()" class="btn w-100 py-3 fw-bold" style="background:#0088ff;color:#fff;border-radius:12px;">
+      <i class="fas fa-location-arrow me-2"></i>Start Live Share
+    </button>
+    <div id="live-share-active" style="display:none;margin-top:12px;">
+      <div class="d-flex align-items-center gap-2 mb-2">
+        <div style="width:10px;height:10px;border-radius:50%;background:#0088ff;animation:gpsPulse 1.5s infinite;flex-shrink:0;"></div>
+        <span style="color:#0088ff;font-size:0.85rem;font-weight:700;">Sharing live — customer can see you</span>
+      </div>
+      <button id="copy-live-btn" onclick="copyLiveLink()" class="btn w-100 py-2 mb-2 fw-bold" style="background:#ff8c0022;color:#ff8c00;border:1px solid #ff8c0044;border-radius:10px;font-size:0.85rem;">
+        <i class="fas fa-copy me-2"></i>Copy Link to Send Customer
+      </button>
+      <div id="live-copy-confirm" style="display:none;text-align:center;color:#00ff88;font-size:0.8rem;margin-bottom:8px;">
+        <i class="fas fa-check-circle me-1"></i>Copied! Paste into Speed X
+      </div>
+      <button onclick="endLiveShare()" class="btn w-100 py-3 fw-bold" style="background:#00ff88;color:#000;border-radius:12px;">
+        <i class="fas fa-check me-2"></i>Delivered — End Tracking
+      </button>
+    </div>
+  </div>
 
 </div>
 
@@ -116,11 +140,83 @@ function openMaps(address) {
   const encoded = encodeURIComponent(address);
   const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
   if (isIOS) {
-    // Apple Maps with driving directions
     window.location.href = 'maps://?daddr=' + encoded + '&dirflg=d';
   } else {
     window.open('https://www.google.com/maps/dir/?api=1&destination=' + encoded + '&travelmode=driving', '_blank');
   }
+}
+
+// ── QUICK LIVE SHARE ──
+let liveToken = null;
+let liveUrl   = null;
+let liveGpsInterval = null;
+
+function startLiveShare() {
+  fetch('/driver/live/start', { method: 'POST' })
+    .then(r => r.json())
+    .then(data => {
+      if (!data.ok) { alert('Could not start live share. Please log in.'); return; }
+      liveToken = data.token;
+      liveUrl   = data.url;
+      document.getElementById('live-share-btn').style.display    = 'none';
+      document.getElementById('live-share-active').style.display = 'block';
+      // Start sending GPS
+      startGpsPing();
+    })
+    .catch(() => alert('Could not start live share.'));
+}
+
+function startGpsPing() {
+  if (!navigator.geolocation) return;
+  function ping() {
+    if (!liveToken) return;
+    navigator.geolocation.getCurrentPosition(pos => {
+      fetch('/api/live/' + liveToken + '/location', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({lat: pos.coords.latitude, lng: pos.coords.longitude})
+      }).then(r => r.json()).then(d => {
+        if (d.status === 'ended') { clearInterval(liveGpsInterval); liveToken = null; }
+      }).catch(() => {});
+    }, () => {}, {enableHighAccuracy: true, timeout: 10000, maximumAge: 0});
+  }
+  ping();
+  liveGpsInterval = setInterval(ping, 5000);
+}
+
+function copyLiveLink() {
+  if (!liveUrl) return;
+  const msg = 'Your driver is on the way! Track live 📍 ' + liveUrl;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(msg).then(() => showCopyConfirm());
+  } else {
+    const ta = document.createElement('textarea');
+    ta.value = msg; ta.style.position='fixed'; ta.style.opacity='0';
+    document.body.appendChild(ta); ta.focus(); ta.select();
+    try { document.execCommand('copy'); } catch(e) {}
+    document.body.removeChild(ta);
+    showCopyConfirm();
+  }
+}
+
+function showCopyConfirm() {
+  const el = document.getElementById('live-copy-confirm');
+  el.style.display = 'block';
+  setTimeout(() => { el.style.display = 'none'; }, 3000);
+}
+
+function endLiveShare() {
+  if (!liveToken) return;
+  fetch('/driver/live/' + liveToken + '/end', { method: 'POST' })
+    .then(() => {
+      clearInterval(liveGpsInterval);
+      liveToken = null; liveUrl = null;
+      document.getElementById('live-share-active').style.display = 'none';
+      document.getElementById('live-share-btn').style.display    = 'block';
+      document.getElementById('live-share-btn').innerHTML = '<i class="fas fa-check me-2"></i>Delivered — Start New Share';
+      document.getElementById('live-share-btn').style.background = '#00ff88';
+      document.getElementById('live-share-btn').style.color = '#000';
+    }).catch(() => {});
 }
 </script>
 {% endblock %}

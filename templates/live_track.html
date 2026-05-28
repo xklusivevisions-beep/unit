@@ -1,0 +1,191 @@
+{% extends 'base.html' %}
+{% block title %}UNIT — Live Driver Tracking{% endblock %}
+
+{% block extra_css %}
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<style>
+  #live-map {
+    height: 320px;
+    border-radius: 14px;
+    border: 2px solid #222;
+    margin-bottom: 16px;
+  }
+  .leaflet-tile { filter: brightness(0.7) saturate(0.6); }
+  @keyframes gpsPulse {
+    0%   { box-shadow: 0 0 0 0 rgba(0,136,255,.7); }
+    70%  { box-shadow: 0 0 0 10px rgba(0,136,255,0); }
+    100% { box-shadow: 0 0 0 0 rgba(0,136,255,0); }
+  }
+  @keyframes deliveredPulse {
+    0%,100% { box-shadow: 0 0 0 0 rgba(0,255,136,.4); }
+    50%      { box-shadow: 0 0 0 14px rgba(0,255,136,0); }
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid p-4">
+
+  <div class="text-center mb-4 pt-2">
+    <div class="unit-logo mb-1">UNIT<span>.</span></div>
+    <small class="text-secondary">Live Driver Tracking</small>
+  </div>
+
+  <!-- Status Card -->
+  <div class="card p-3 mb-3 text-center" id="status-card">
+    {% if sess.status == 'delivered' %}
+      <i class="fas fa-check-circle fa-2x mb-2" style="color:#00ff88;"></i>
+      <div class="fw-bold" style="color:#00ff88;">Delivered!</div>
+      <small class="text-secondary">Your driver has completed this delivery</small>
+    {% else %}
+      <div class="d-flex align-items-center justify-content-center gap-2 mb-1">
+        <div id="gps-dot" style="width:12px;height:12px;border-radius:50%;background:#0088ff;flex-shrink:0;animation:gpsPulse 1.5s infinite;"></div>
+        <div class="fw-bold" style="color:#0088ff;">Driver On The Way</div>
+      </div>
+      <div id="status-text" class="text-secondary" style="font-size:0.9rem;">Getting location...</div>
+    {% endif %}
+  </div>
+
+  <!-- Live Map -->
+  {% if sess.status != 'delivered' %}
+  <div id="live-map"></div>
+  {% endif %}
+
+  <!-- Post-delivery signup -->
+  {% if sess.status == 'delivered' %}
+  <div class="card p-4 mb-3" style="border-color:#00ff8844;background:#00ff8808;" id="signup-card">
+    <div class="text-center mb-3">
+      <div style="font-size:2rem;margin-bottom:8px;">📍</div>
+      <div class="fw-bold" style="color:#00ff88;font-size:1rem;">Get Real-Time Tracking on Future Deliveries</div>
+      <small class="text-secondary">Sign up and your next driver will automatically notify you.</small>
+    </div>
+    <form id="signup-form" onsubmit="submitSignup(event)">
+      <input type="text" id="signup-name" placeholder="Your name" required
+        class="form-control mb-2" style="background:#111;border:1px solid #333;color:#fff;border-radius:10px;"/>
+      <input type="tel" id="signup-phone" placeholder="Phone number" required
+        class="form-control mb-3" style="background:#111;border:1px solid #333;color:#fff;border-radius:10px;"/>
+      <button type="submit" class="btn w-100 py-3 fw-bold" style="background:#00ff88;color:#000;border-radius:12px;">
+        <i class="fas fa-bell me-2"></i>Sign Me Up — Free
+      </button>
+    </form>
+    <div id="signup-success" style="display:none;text-align:center;padding:12px 0;">
+      <i class="fas fa-check-circle fa-2x mb-2" style="color:#00ff88;"></i>
+      <div class="fw-bold" style="color:#00ff88;">You're all set!</div>
+      <small class="text-secondary">Your next driver will notify you automatically.</small>
+    </div>
+    <small class="text-muted d-block text-center mt-2">No spam · Takes 10 seconds</small>
+  </div>
+  {% endif %}
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+{% if sess.status != 'delivered' %}
+<script>
+const TOKEN = {{ sess.token | tojson }};
+let map, driverMarker;
+let pollActive = true;
+
+// Init map centered on Detroit until GPS arrives
+map = L.map('live-map', { zoomControl: true, attributionControl: false });
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+map.setView([42.33, -83.05], 13);
+
+const driverIcon = L.divIcon({
+  html: '<div style="background:#0088ff;width:20px;height:20px;border-radius:50%;border:3px solid #fff;box-shadow:0 0 12px rgba(0,136,255,0.9);text-align:center;line-height:14px;">🚗</div>',
+  className: '', iconAnchor: [10,10]
+});
+
+function poll() {
+  if (!pollActive) return;
+  fetch('/api/live/' + TOKEN)
+    .then(r => r.json())
+    .then(data => {
+      if (data.status === 'delivered') {
+        pollActive = false;
+        document.getElementById('status-card').innerHTML = `
+          <i class="fas fa-check-circle fa-2x mb-2" style="color:#00ff88;animation:deliveredPulse 1.5s infinite;"></i>
+          <div class="fw-bold" style="color:#00ff88;">Delivered!</div>
+          <small class="text-secondary">Your driver has completed this delivery</small>`;
+        document.getElementById('live-map').style.display = 'none';
+        // Show signup form dynamically
+        const signupHtml = `
+          <div class="card p-4 mb-3 mt-3" style="border-color:#00ff8844;background:#00ff8808;">
+            <div class="text-center mb-3">
+              <div style="font-size:2rem;margin-bottom:8px;">📍</div>
+              <div class="fw-bold" style="color:#00ff88;font-size:1rem;">Get Real-Time Tracking on Future Deliveries</div>
+              <small class="text-secondary">Sign up and your next driver will automatically notify you.</small>
+            </div>
+            <form id="signup-form" onsubmit="submitSignup(event)">
+              <input type="text" id="signup-name" placeholder="Your name" required class="form-control mb-2" style="background:#111;border:1px solid #333;color:#fff;border-radius:10px;"/>
+              <input type="tel" id="signup-phone" placeholder="Phone number" required class="form-control mb-3" style="background:#111;border:1px solid #333;color:#fff;border-radius:10px;"/>
+              <button type="submit" class="btn w-100 py-3 fw-bold" style="background:#00ff88;color:#000;border-radius:12px;">
+                <i class="fas fa-bell me-2"></i>Sign Me Up — Free
+              </button>
+            </form>
+            <div id="signup-success" style="display:none;text-align:center;padding:12px 0;">
+              <i class="fas fa-check-circle fa-2x mb-2" style="color:#00ff88;"></i>
+              <div class="fw-bold" style="color:#00ff88;">You're all set!</div>
+            </div>
+            <small class="text-muted d-block text-center mt-2">No spam · Takes 10 seconds</small>
+          </div>`;
+        document.querySelector('.container-fluid').insertAdjacentHTML('beforeend', signupHtml);
+        return;
+      }
+      if (data.driver_lat && data.driver_lng) {
+        document.getElementById('status-text').textContent = 'Your driver is on the way';
+        if (!driverMarker) {
+          driverMarker = L.marker([data.driver_lat, data.driver_lng], {icon: driverIcon}).addTo(map);
+          map.setView([data.driver_lat, data.driver_lng], 15);
+        } else {
+          driverMarker.setLatLng([data.driver_lat, data.driver_lng]);
+          map.panTo([data.driver_lat, data.driver_lng], {animate: true});
+        }
+      } else {
+        document.getElementById('status-text').textContent = 'Driver is heading your way...';
+      }
+      setTimeout(poll, 6000);
+    })
+    .catch(() => setTimeout(poll, 12000));
+}
+
+function submitSignup(e) {
+  e.preventDefault();
+  const name  = document.getElementById('signup-name').value.trim();
+  const phone = document.getElementById('signup-phone').value.trim();
+  const fd = new FormData();
+  fd.append('name', name); fd.append('phone', phone);
+  fetch('/live/' + TOKEN + '/signup', { method: 'POST', body: fd })
+    .then(r => r.json())
+    .then(d => {
+      if (d.ok) {
+        document.getElementById('signup-form').style.display = 'none';
+        document.getElementById('signup-success').style.display = 'block';
+      }
+    }).catch(() => {});
+}
+
+poll();
+</script>
+{% else %}
+<script>
+function submitSignup(e) {
+  e.preventDefault();
+  const name  = document.getElementById('signup-name').value.trim();
+  const phone = document.getElementById('signup-phone').value.trim();
+  const fd = new FormData();
+  fd.append('name', name); fd.append('phone', phone);
+  fetch('/live/{{ sess.token }}/signup', { method: 'POST', body: fd })
+    .then(r => r.json())
+    .then(d => {
+      if (d.ok) {
+        document.getElementById('signup-form').style.display = 'none';
+        document.getElementById('signup-success').style.display = 'block';
+      }
+    }).catch(() => {});
+}
+</script>
+{% endif %}
+{% endblock %}

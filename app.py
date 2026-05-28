@@ -362,6 +362,17 @@ def init_db():
         "CREATE TABLE IF NOT EXISTS pin_corrections (id INTEGER PRIMARY KEY AUTOINCREMENT, address TEXT UNIQUE NOT NULL, lat REAL NOT NULL, lng REAL NOT NULL, corrected_by TEXT, corrected_at TEXT DEFAULT CURRENT_TIMESTAMP)",
         "CREATE TABLE IF NOT EXISTS login_attempts (id INTEGER PRIMARY KEY AUTOINCREMENT, ip TEXT NOT NULL, attempted_at TEXT NOT NULL)",
         "CREATE INDEX IF NOT EXISTS idx_login_attempts_ip ON login_attempts (ip, attempted_at)",
+        """CREATE TABLE IF NOT EXISTS live_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            token TEXT UNIQUE NOT NULL,
+            driver_id INTEGER,
+            driver_name TEXT,
+            driver_lat REAL,
+            driver_lng REAL,
+            last_seen TEXT,
+            status TEXT DEFAULT 'active',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )""",
     ]:
         try:
             db.execute(migration)
@@ -1305,6 +1316,114 @@ def update_location():
     db.commit()
     db.close()
     return jsonify(result)
+
+
+# ─── QUICK LIVE SHARE (no stop/address required) ─────────────────────────────
+
+@app.route('/driver/live/start', methods=['POST'])
+def live_start():
+    """Create a new quick-share live session for the logged-in driver."""
+    driver_id = session.get('driver_id')
+    if not driver_id:
+        return jsonify({'ok': False, 'error': 'Not logged in'}), 401
+    db = get_db()
+    driver = db.execute("SELECT name FROM drivers WHERE id=?", (driver_id,)).fetchone()
+    token = secrets.token_urlsafe(12)
+    db.execute(
+        "INSERT INTO live_sessions (token, driver_id, driver_name, status) VALUES (?,?,?,?)",
+        (token, driver_id, driver['name'] if driver else 'Driver', 'active')
+    )
+    db.commit()
+    db.close()
+    base = get_base_url()
+    return jsonify({'ok': True, 'token': token, 'url': f'{base}/live/{token}'})
+
+@app.route('/api/live/<token>/location', methods=['POST'])
+def live_update_location(token):
+    """Driver pings their GPS to the live session."""
+    data = request.get_json() or {}
+    lat, lng = data.get('lat'), data.get('lng')
+    if not lat or not lng:
+        return jsonify({'ok': False}), 400
+    db = get_db()
+    sess = db.execute("SELECT * FROM live_sessions WHERE token=?", (token,)).fetchone()
+    if not sess or sess['status'] != 'active':
+        db.close()
+        return jsonify({'ok': False, 'status': 'ended'}), 200
+    db.execute(
+        "UPDATE live_sessions SET driver_lat=?, driver_lng=?, last_seen=? WHERE token=?",
+        (lat, lng, datetime.now().isoformat(), token)
+    )
+    db.commit()
+    db.close()
+    return jsonify({'ok': True, 'status': 'active'})
+
+@app.route('/api/live/<token>')
+def live_poll(token):
+    """Customer polls for driver location."""
+    db = get_db()
+    sess = db.execute("SELECT * FROM live_sessions WHERE token=?", (token,)).fetchone()
+    db.close()
+    if not sess:
+        return jsonify({'error': 'not found'}), 404
+    return jsonify({
+        'status':     sess['status'],
+        'driver_lat': sess['driver_lat'],
+        'driver_lng': sess['driver_lng'],
+        'last_seen':  sess['last_seen'],
+    })
+
+@app.route('/driver/live/<token>/end', methods=['POST'])
+def live_end(token):
+    """Driver marks the live session as delivered/ended."""
+    db = get_db()
+    sess = db.execute("SELECT * FROM live_sessions WHERE token=?", (token,)).fetchone()
+    if not sess:
+        db.close()
+        return jsonify({'ok': False, 'error': 'not found'}), 404
+    db.execute("UPDATE live_sessions SET status=\'delivered\' WHERE token=?", (token,))
+    db.commit()
+    db.close()
+    return jsonify({'ok': True})
+
+@app.route('/live/<token>')
+def live_track(token):
+    """Customer-facing live tracking page."""
+    db = get_db()
+    sess = db.execute("SELECT * FROM live_sessions WHERE token=?", (token,)).fetchone()
+    db.close()
+    if not sess:
+        return "Tracking session not found", 404
+    return render_template('live_track.html', sess=sess)
+
+@app.route('/live/<token>/signup', methods=['POST'])
+def live_signup(token):
+    """Customer signup from live tracking page."""
+    db = get_db()
+    sess = db.execute("SELECT * FROM live_sessions WHERE token=?", (token,)).fetchone()
+    if not sess:
+        db.close()
+        return jsonify({'ok': False}), 404
+    name  = request.form.get('name', '').strip()
+    phone = format_phone(request.form.get('phone', '').strip()) if request.form.get('phone', '').strip() else ''
+    if not name or not phone:
+        db.close()
+        return jsonify({'ok': False, 'error': 'Name and phone required'}), 400
+    try:
+        existing = db.execute("SELECT id FROM residents WHERE phone=?", (phone,)).fetchone()
+        if not existing:
+            db.execute(
+                "INSERT INTO residents (address, unit, phone, customer_name, sms_consent, sms_consent_at) VALUES (?,?,?,?,1,?)",
+                ('', '', phone, name, datetime.now().isoformat())
+            )
+            db.commit()
+            log.info(f'Customer signup from live track: {name} {phone}')
+    except Exception as e:
+        log.error(f'live_signup error: {e}')
+        try: db._conn.rollback()
+        except: pass
+    db.close()
+    return jsonify({'ok': True})
 
 # ─── CUSTOMER SIGNUP FROM TRACKING PAGE ──────────────────────────────
 
