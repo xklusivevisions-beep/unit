@@ -356,6 +356,7 @@ def init_db():
         "ALTER TABLE stops ADD COLUMN drop_spot TEXT",
         "ALTER TABLE residents ADD COLUMN sms_consent INTEGER DEFAULT 0",
         "ALTER TABLE residents ADD COLUMN sms_consent_at TEXT",
+        "ALTER TABLE residents ADD COLUMN customer_name TEXT",
         "ALTER TABLE drivers ADD COLUMN onboarded INTEGER DEFAULT 0",
         "ALTER TABLE drivers ADD COLUMN is_beta INTEGER DEFAULT 0",
         "CREATE TABLE IF NOT EXISTS pin_corrections (id INTEGER PRIMARY KEY AUTOINCREMENT, address TEXT UNIQUE NOT NULL, lat REAL NOT NULL, lng REAL NOT NULL, corrected_by TEXT, corrected_at TEXT DEFAULT CURRENT_TIMESTAMP)",
@@ -1319,7 +1320,7 @@ def track_signup(token):
     if not name or not phone:
         return jsonify({'ok': False, 'error': 'Name and phone required'}), 400
     address = stop['address']
-    unit    = stop['unit'] or ''
+    unit    = stop['unit'] or ''  # empty string satisfies NOT NULL constraint
     try:
         # Check if already registered at this address+phone
         existing = db.execute(
@@ -1328,8 +1329,8 @@ def track_signup(token):
         ).fetchone()
         if not existing:
             db.execute(
-                "INSERT INTO residents (address, unit, phone, sms_consent, sms_consent_at) VALUES (?,?,?,1,?)",
-                (address, unit, phone, datetime.now().isoformat())
+                "INSERT INTO residents (address, unit, phone, customer_name, sms_consent, sms_consent_at) VALUES (?,?,?,?,1,?)",
+                (address, unit, phone, name, datetime.now().isoformat())
             )
             db.commit()
             log.info(f'Customer signup from track page: {name} {phone} @ {address}')
