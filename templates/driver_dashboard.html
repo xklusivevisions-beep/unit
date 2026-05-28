@@ -51,7 +51,31 @@
       </div>
     </div>
 
-    <!-- Stop List -->
+    <!-- Quick Live Share -->
+  <div class="card p-3 mb-4" style="border-color:#0088ff44;background:#0088ff08;">
+    <div class="fw-bold mb-1" style="font-size:0.85rem;color:#0088ff;"><i class="fas fa-broadcast-tower me-2"></i>Quick Live Share</div>
+    <small class="text-secondary d-block mb-3">Share your live location for any stop — no address needed. Customer sees you moving. You tap Delivered. They lose the view.</small>
+    <button id="live-share-btn" onclick="startLiveShare()" class="btn w-100 py-3 fw-bold" style="background:#0088ff;color:#fff;border-radius:12px;">
+      <i class="fas fa-location-arrow me-2"></i>Start Live Share
+    </button>
+    <div id="live-share-active" style="display:none;margin-top:12px;">
+      <div class="d-flex align-items-center gap-2 mb-2">
+        <div style="width:10px;height:10px;border-radius:50%;background:#0088ff;animation:gpsPulse 1.5s infinite;flex-shrink:0;"></div>
+        <span style="color:#0088ff;font-size:0.85rem;font-weight:700;">Sharing live — customer can see you</span>
+      </div>
+      <button id="copy-live-btn" onclick="copyLiveLink()" class="btn w-100 py-2 mb-2 fw-bold" style="background:#ff8c0022;color:#ff8c00;border:1px solid #ff8c0044;border-radius:10px;font-size:0.85rem;">
+        <i class="fas fa-copy me-2"></i>Copy Link to Send Customer
+      </button>
+      <div id="live-copy-confirm" style="display:none;text-align:center;color:#00ff88;font-size:0.8rem;margin-bottom:8px;">
+        <i class="fas fa-check-circle me-1"></i>Copied! Paste into Speed X
+      </div>
+      <button onclick="endLiveShare()" class="btn w-100 py-3 fw-bold" style="background:#00ff88;color:#000;border-radius:12px;">
+        <i class="fas fa-check me-2"></i>Delivered — End Tracking
+      </button>
+    </div>
+  </div>
+
+  <!-- Stop List -->
     <h6 class="text-secondary mb-3" style="letter-spacing:0.1em;font-size:0.75rem;">YOUR STOPS</h6>
     {% for stop in stops %}
     <div class="card p-3 mb-2" style="border-color:{% if stop.status=='delivered' %}#00ff8844{% elif stop.status=='failed' %}#ff333344{% elif stop.status=='en_route' %}#0088ff44{% else %}#222{% endif %};">
@@ -98,30 +122,6 @@
       </a>
     </div>
   {% endif %}
-
-  <!-- Quick Live Share -->
-  <div class="card p-3 mb-4" style="border-color:#0088ff44;background:#0088ff08;">
-    <div class="fw-bold mb-1" style="font-size:0.85rem;color:#0088ff;"><i class="fas fa-broadcast-tower me-2"></i>Quick Live Share</div>
-    <small class="text-secondary d-block mb-3">Share your live location for any stop — no address needed. Customer sees you moving. You tap Delivered. They lose the view.</small>
-    <button id="live-share-btn" onclick="startLiveShare()" class="btn w-100 py-3 fw-bold" style="background:#0088ff;color:#fff;border-radius:12px;">
-      <i class="fas fa-location-arrow me-2"></i>Start Live Share
-    </button>
-    <div id="live-share-active" style="display:none;margin-top:12px;">
-      <div class="d-flex align-items-center gap-2 mb-2">
-        <div style="width:10px;height:10px;border-radius:50%;background:#0088ff;animation:gpsPulse 1.5s infinite;flex-shrink:0;"></div>
-        <span style="color:#0088ff;font-size:0.85rem;font-weight:700;">Sharing live — customer can see you</span>
-      </div>
-      <button id="copy-live-btn" onclick="copyLiveLink()" class="btn w-100 py-2 mb-2 fw-bold" style="background:#ff8c0022;color:#ff8c00;border:1px solid #ff8c0044;border-radius:10px;font-size:0.85rem;">
-        <i class="fas fa-copy me-2"></i>Copy Link to Send Customer
-      </button>
-      <div id="live-copy-confirm" style="display:none;text-align:center;color:#00ff88;font-size:0.8rem;margin-bottom:8px;">
-        <i class="fas fa-check-circle me-1"></i>Copied! Paste into Speed X
-      </div>
-      <button onclick="endLiveShare()" class="btn w-100 py-3 fw-bold" style="background:#00ff88;color:#000;border-radius:12px;">
-        <i class="fas fa-check me-2"></i>Delivered — End Tracking
-      </button>
-    </div>
-  </div>
 
 </div>
 
