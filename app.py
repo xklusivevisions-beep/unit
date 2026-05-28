@@ -371,8 +371,12 @@ def init_db():
             driver_lng REAL,
             last_seen TEXT,
             status TEXT DEFAULT 'active',
+            viewed_at TEXT,
+            view_count INTEGER DEFAULT 0,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )""",
+        "ALTER TABLE live_sessions ADD COLUMN viewed_at TEXT",
+        "ALTER TABLE live_sessions ADD COLUMN view_count INTEGER DEFAULT 0",
     ]:
         try:
             db.execute(migration)
@@ -1360,7 +1364,33 @@ def live_update_location(token):
 
 @app.route('/api/live/<token>')
 def live_poll(token):
-    """Customer polls for driver location."""
+    """Customer polls for driver location. Logs view on first open."""
+    db = get_db()
+    sess = db.execute("SELECT * FROM live_sessions WHERE token=?", (token,)).fetchone()
+    if not sess:
+        db.close()
+        return jsonify({'error': 'not found'}), 404
+    # Log view — first time sets viewed_at, always increments view_count
+    now = datetime.now().isoformat()
+    if not sess['viewed_at']:
+        db.execute("UPDATE live_sessions SET viewed_at=?, view_count=1 WHERE token=?", (now, token))
+    else:
+        db.execute("UPDATE live_sessions SET view_count=view_count+1 WHERE token=?", (token,))
+    db.commit()
+    db.close()
+    return jsonify({
+        'status':     sess['status'],
+        'driver_lat': sess['driver_lat'],
+        'driver_lng': sess['driver_lng'],
+        'last_seen':  sess['last_seen'],
+    })
+
+@app.route('/api/live/<token>/status')
+def live_session_status(token):
+    """Driver checks if customer has opened the tracking link."""
+    driver_id = session.get('driver_id')
+    if not driver_id:
+        return jsonify({'error': 'not logged in'}), 401
     db = get_db()
     sess = db.execute("SELECT * FROM live_sessions WHERE token=?", (token,)).fetchone()
     db.close()
@@ -1368,9 +1398,10 @@ def live_poll(token):
         return jsonify({'error': 'not found'}), 404
     return jsonify({
         'status':     sess['status'],
+        'viewed_at':  sess['viewed_at'],
+        'view_count': sess['view_count'] or 0,
         'driver_lat': sess['driver_lat'],
         'driver_lng': sess['driver_lng'],
-        'last_seen':  sess['last_seen'],
     })
 
 @app.route('/driver/live/<token>/end', methods=['POST'])

@@ -1,5 +1,16 @@
 {% extends 'base.html' %}
 {% block title %}UNIT — Dashboard{% endblock %}
+{% block extra_css %}
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<style>
+@keyframes gpsPulse {
+  0%   { box-shadow: 0 0 0 0 rgba(0,136,255,.7); }
+  70%  { box-shadow: 0 0 0 8px rgba(0,136,255,0); }
+  100% { box-shadow: 0 0 0 0 rgba(0,136,255,0); }
+}
+.leaflet-tile { filter: brightness(0.7) saturate(0.6); }
+</style>
+{% endblock %}
 {% block content %}
 <div class="container-fluid p-4 pb-nav">
 
@@ -59,10 +70,22 @@
       <i class="fas fa-location-arrow me-2"></i>Start Live Share
     </button>
     <div id="live-share-active" style="display:none;margin-top:12px;">
-      <div class="d-flex align-items-center gap-2 mb-2">
-        <div style="width:10px;height:10px;border-radius:50%;background:#0088ff;animation:gpsPulse 1.5s infinite;flex-shrink:0;"></div>
-        <span style="color:#0088ff;font-size:0.85rem;font-weight:700;">Sharing live — customer can see you</span>
+
+      <!-- Live mini-map -->
+      <div id="driver-mini-map" style="height:180px;border-radius:12px;overflow:hidden;border:2px solid #0088ff44;margin-bottom:10px;"></div>
+
+      <!-- Status row -->
+      <div class="d-flex align-items-center justify-content-between mb-2">
+        <div class="d-flex align-items-center gap-2">
+          <div id="gps-live-dot" style="width:10px;height:10px;border-radius:50%;background:#0088ff;flex-shrink:0;"></div>
+          <span id="gps-live-text" style="color:#0088ff;font-size:0.82rem;font-weight:700;">Getting GPS...</span>
+        </div>
+        <!-- View receipt -->
+        <div id="view-receipt" style="font-size:0.78rem;color:#555;">
+          <i class="fas fa-eye me-1"></i>Not opened yet
+        </div>
       </div>
+
       <button id="copy-live-btn" onclick="copyLiveLink()" class="btn w-100 py-2 mb-2 fw-bold" style="background:#ff8c0022;color:#ff8c00;border:1px solid #ff8c0044;border-radius:10px;font-size:0.85rem;">
         <i class="fas fa-copy me-2"></i>Copy Link to Send Customer
       </button>
@@ -135,6 +158,7 @@
 </div>
 
 {% block scripts %}
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 function openMaps(address) {
   const encoded = encodeURIComponent(address);
@@ -149,7 +173,10 @@ function openMaps(address) {
 // ── QUICK LIVE SHARE ──
 let liveToken = null;
 let liveUrl   = null;
-let liveGpsInterval = null;
+let liveGpsInterval  = null;
+let liveStatusInterval = null;
+let miniMap = null;
+let miniMarker = null;
 
 function startLiveShare() {
   fetch('/driver/live/start', { method: 'POST' })
@@ -160,28 +187,82 @@ function startLiveShare() {
       liveUrl   = data.url;
       document.getElementById('live-share-btn').style.display    = 'none';
       document.getElementById('live-share-active').style.display = 'block';
-      // Start sending GPS
+      initMiniMap();
       startGpsPing();
+      startViewReceipt();
     })
     .catch(() => alert('Could not start live share.'));
 }
 
+function initMiniMap() {
+  if (miniMap) return;
+  miniMap = L.map('driver-mini-map', { zoomControl: false, attributionControl: false });
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(miniMap);
+  miniMap.setView([42.33, -83.05], 14);
+}
+
 function startGpsPing() {
-  if (!navigator.geolocation) return;
+  if (!navigator.geolocation) {
+    document.getElementById('gps-live-text').textContent = 'GPS unavailable';
+    return;
+  }
   function ping() {
     if (!liveToken) return;
     navigator.geolocation.getCurrentPosition(pos => {
+      const lat = pos.coords.latitude, lng = pos.coords.longitude;
+      // Update mini-map
+      if (miniMap) {
+        if (!miniMarker) {
+          const icon = L.divIcon({
+            html: '<div style="background:#0088ff;width:16px;height:16px;border-radius:50%;border:3px solid #fff;box-shadow:0 0 10px rgba(0,136,255,0.9);"></div>',
+            className: '', iconAnchor: [8,8]
+          });
+          miniMarker = L.marker([lat, lng], {icon}).addTo(miniMap);
+        } else {
+          miniMarker.setLatLng([lat, lng]);
+        }
+        miniMap.setView([lat, lng], 16, {animate: true});
+      }
+      // GPS dot pulse
+      const dot = document.getElementById('gps-live-dot');
+      dot.style.background = '#00ff88';
+      dot.style.boxShadow  = '0 0 0 0 rgba(0,255,136,.7)';
+      dot.style.animation  = 'gpsPulse 1.5s infinite';
+      document.getElementById('gps-live-text').textContent = 'Live — broadcasting your location';
+      document.getElementById('gps-live-text').style.color = '#00ff88';
+      // Send to server
       fetch('/api/live/' + liveToken + '/location', {
         method: 'POST',
         headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({lat: pos.coords.latitude, lng: pos.coords.longitude})
+        body: JSON.stringify({lat, lng})
       }).then(r => r.json()).then(d => {
         if (d.status === 'ended') { clearInterval(liveGpsInterval); liveToken = null; }
       }).catch(() => {});
-    }, () => {}, {enableHighAccuracy: true, timeout: 10000, maximumAge: 0});
+    }, () => {
+      document.getElementById('gps-live-text').textContent = 'Weak GPS — move outside';
+    }, {enableHighAccuracy: true, timeout: 10000, maximumAge: 0});
   }
   ping();
   liveGpsInterval = setInterval(ping, 5000);
+}
+
+function startViewReceipt() {
+  liveStatusInterval = setInterval(() => {
+    if (!liveToken) { clearInterval(liveStatusInterval); return; }
+    fetch('/api/live/' + liveToken + '/status')
+      .then(r => r.json())
+      .then(data => {
+        const el = document.getElementById('view-receipt');
+        if (data.viewed_at) {
+          const mins = Math.round((Date.now() - new Date(data.viewed_at).getTime()) / 60000);
+          const timeStr = mins < 1 ? 'just now' : mins + ' min ago';
+          el.innerHTML = '<i class="fas fa-eye me-1" style="color:#00ff88;"></i><span style="color:#00ff88;font-weight:700;">Opened ' + timeStr + '</span>';
+        } else {
+          el.innerHTML = '<i class="fas fa-eye me-1"></i>Not opened yet';
+          el.style.color = '#ff6666';
+        }
+      }).catch(() => {});
+  }, 5000);
 }
 
 function copyLiveLink() {
@@ -210,12 +291,14 @@ function endLiveShare() {
   fetch('/driver/live/' + liveToken + '/end', { method: 'POST' })
     .then(() => {
       clearInterval(liveGpsInterval);
+      clearInterval(liveStatusInterval);
       liveToken = null; liveUrl = null;
       document.getElementById('live-share-active').style.display = 'none';
       document.getElementById('live-share-btn').style.display    = 'block';
       document.getElementById('live-share-btn').innerHTML = '<i class="fas fa-check me-2"></i>Delivered — Start New Share';
       document.getElementById('live-share-btn').style.background = '#00ff88';
       document.getElementById('live-share-btn').style.color = '#000';
+      if (miniMap) { miniMap.remove(); miniMap = null; miniMarker = null; }
     }).catch(() => {});
 }
 </script>
