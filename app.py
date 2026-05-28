@@ -1417,6 +1417,19 @@ def live_end(token):
     db.close()
     return jsonify({'ok': True})
 
+@app.route('/driver/live/<token>/failed', methods=['POST'])
+def live_fail(token):
+    """Driver marks the live session as failed — customer gets never-miss link."""
+    db = get_db()
+    sess = db.execute("SELECT * FROM live_sessions WHERE token=?", (token,)).fetchone()
+    if not sess:
+        db.close()
+        return jsonify({'ok': False, 'error': 'not found'}), 404
+    db.execute("UPDATE live_sessions SET status='failed' WHERE token=?", (token,))
+    db.commit()
+    db.close()
+    return jsonify({'ok': True})
+
 @app.route('/live/<token>')
 def live_track(token):
     """Customer-facing live tracking page."""
@@ -1429,14 +1442,15 @@ def live_track(token):
 
 @app.route('/live/<token>/signup', methods=['POST'])
 def live_signup(token):
-    """Customer signup from live tracking page."""
+    """Customer signup from live tracking page (delivered or failed)."""
     db = get_db()
     sess = db.execute("SELECT * FROM live_sessions WHERE token=?", (token,)).fetchone()
     if not sess:
         db.close()
         return jsonify({'ok': False}), 404
-    name  = request.form.get('name', '').strip()
-    phone = format_phone(request.form.get('phone', '').strip()) if request.form.get('phone', '').strip() else ''
+    name      = request.form.get('name', '').strip()
+    phone     = format_phone(request.form.get('phone', '').strip()) if request.form.get('phone', '').strip() else ''
+    drop_spot = request.form.get('drop_spot', '').strip()
     if not name or not phone:
         db.close()
         return jsonify({'ok': False, 'error': 'Name and phone required'}), 400
@@ -1444,11 +1458,14 @@ def live_signup(token):
         existing = db.execute("SELECT id FROM residents WHERE phone=?", (phone,)).fetchone()
         if not existing:
             db.execute(
-                "INSERT INTO residents (address, unit, phone, customer_name, sms_consent, sms_consent_at) VALUES (?,?,?,?,1,?)",
-                ('', '', phone, name, datetime.now().isoformat())
+                "INSERT INTO residents (address, unit, phone, customer_name, drop_spot, sms_consent, sms_consent_at) VALUES (?,?,?,?,?,1,?)",
+                ('', '', phone, name, drop_spot, datetime.now().isoformat())
             )
             db.commit()
-            log.info(f'Customer signup from live track: {name} {phone}')
+            log.info(f'Customer signup from live track ({sess["status"]}): {name} {phone} drop_spot={drop_spot}')
+        elif drop_spot:
+            db.execute("UPDATE residents SET drop_spot=?, customer_name=? WHERE phone=?", (drop_spot, name, phone))
+            db.commit()
     except Exception as e:
         log.error(f'live_signup error: {e}')
         try: db._conn.rollback()

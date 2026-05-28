@@ -37,6 +37,10 @@
       <i class="fas fa-check-circle fa-2x mb-2" style="color:#00ff88;"></i>
       <div class="fw-bold" style="color:#00ff88;">Delivered!</div>
       <small class="text-secondary">Your driver has completed this delivery</small>
+    {% elif sess.status == 'failed' %}
+      <i class="fas fa-box-open fa-2x mb-2" style="color:#ff8c00;"></i>
+      <div class="fw-bold" style="color:#ff8c00;">Delivery Attempted</div>
+      <small class="text-secondary">Your driver couldn't complete this delivery</small>
     {% else %}
       <div class="d-flex align-items-center justify-content-center gap-2 mb-1">
         <div id="gps-dot" style="width:12px;height:12px;border-radius:50%;background:#0088ff;flex-shrink:0;animation:gpsPulse 1.5s infinite;"></div>
@@ -47,8 +51,37 @@
   </div>
 
   <!-- Live Map -->
-  {% if sess.status != 'delivered' %}
+  {% if sess.status == 'active' %}
   <div id="live-map"></div>
+  {% endif %}
+
+  <!-- Failed — Never Miss CTA -->
+  {% if sess.status == 'failed' %}
+  <div class="card p-4 mb-3" style="border-color:#ff8c0044;background:#ff8c0008;">
+    <div class="text-center mb-3">
+      <div style="font-size:2.5rem;margin-bottom:8px;">📦</div>
+      <div class="fw-bold" style="color:#ff8c00;font-size:1.05rem;">Never Miss a Package Again</div>
+      <p class="text-secondary mb-0" style="font-size:0.85rem;line-height:1.55;">
+        Save your drop spot and door notes once — every future driver will know exactly where to leave your package, even when you're not home.
+      </p>
+    </div>
+    <form id="signup-form" onsubmit="submitSignup(event)">
+      <input type="text" id="signup-name" placeholder="Your name" required
+        class="form-control mb-2" style="background:#111;border:1px solid #333;color:#fff;border-radius:10px;"/>
+      <input type="tel" id="signup-phone" placeholder="Phone number" required
+        class="form-control mb-2" style="background:#111;border:1px solid #333;color:#fff;border-radius:10px;"/>
+      <input type="text" id="signup-dropspot" placeholder="Where to leave packages (e.g. Front door, mailroom, side gate)"
+        class="form-control mb-3" style="background:#111;border:1px solid #333;color:#fff;border-radius:10px;"/>
+      <button type="submit" class="btn w-100 py-3 fw-bold" style="background:#ff8c00;color:#000;border-radius:12px;">
+        <i class="fas fa-box me-2"></i>Save My Drop Spot — Free
+      </button>
+    </form>
+    <div id="signup-success" style="display:none;text-align:center;padding:16px 0;">
+      <i class="fas fa-check-circle fa-2x mb-2" style="color:#00ff88;"></i>
+      <div class="fw-bold" style="color:#00ff88;">Saved! Your next driver will know exactly where to go.</div>
+    </div>
+    <small class="text-muted d-block text-center mt-2">Free · Takes 20 seconds · Works for all future deliveries</small>
+  </div>
   {% endif %}
 
   <!-- Post-delivery signup -->
@@ -103,6 +136,40 @@ function poll() {
   fetch('/api/live/' + TOKEN)
     .then(r => r.json())
     .then(data => {
+      if (data.status === 'failed') {
+        pollActive = false;
+        document.getElementById('status-card').innerHTML = `
+          <i class="fas fa-box-open fa-2x mb-2" style="color:#ff8c00;"></i>
+          <div class="fw-bold" style="color:#ff8c00;">Delivery Attempted</div>
+          <small class="text-secondary">Your driver couldn't complete this delivery</small>`;
+        document.getElementById('live-map').style.display = 'none';
+        // Show never-miss form
+        const failHtml = `
+          <div class="card p-4 mb-3 mt-3" style="border-color:#ff8c0044;background:#ff8c0008;">
+            <div class="text-center mb-3">
+              <div style="font-size:2.5rem;margin-bottom:8px;">\u{1F4E6}</div>
+              <div class="fw-bold" style="color:#ff8c00;font-size:1.05rem;">Never Miss a Package Again</div>
+              <p class="text-secondary mb-0" style="font-size:0.85rem;line-height:1.55;">
+                Save your drop spot once — every future driver will know exactly where to leave your package.
+              </p>
+            </div>
+            <form id="signup-form" onsubmit="submitSignup(event)">
+              <input type="text" id="signup-name" placeholder="Your name" required class="form-control mb-2" style="background:#111;border:1px solid #333;color:#fff;border-radius:10px;"/>
+              <input type="tel" id="signup-phone" placeholder="Phone number" required class="form-control mb-2" style="background:#111;border:1px solid #333;color:#fff;border-radius:10px;"/>
+              <input type="text" id="signup-dropspot" placeholder="Where to leave packages (front door, mailroom...)" class="form-control mb-3" style="background:#111;border:1px solid #333;color:#fff;border-radius:10px;"/>
+              <button type="submit" class="btn w-100 py-3 fw-bold" style="background:#ff8c00;color:#000;border-radius:12px;">
+                <i class="fas fa-box me-2"></i>Save My Drop Spot — Free
+              </button>
+            </form>
+            <div id="signup-success" style="display:none;text-align:center;padding:16px 0;">
+              <i class="fas fa-check-circle fa-2x mb-2" style="color:#00ff88;"></i>
+              <div class="fw-bold" style="color:#00ff88;">Saved! Your next driver will know exactly where to go.</div>
+            </div>
+            <small class="text-muted d-block text-center mt-2">Free · Takes 20 seconds</small>
+          </div>`;
+        document.querySelector('.container-fluid').insertAdjacentHTML('beforeend', failHtml);
+        return;
+      }
       if (data.status === 'delivered') {
         pollActive = false;
         document.getElementById('status-card').innerHTML = `
@@ -153,10 +220,12 @@ function poll() {
 
 function submitSignup(e) {
   e.preventDefault();
-  const name  = document.getElementById('signup-name').value.trim();
-  const phone = document.getElementById('signup-phone').value.trim();
+  const name      = document.getElementById('signup-name').value.trim();
+  const phone     = document.getElementById('signup-phone').value.trim();
+  const dropEl    = document.getElementById('signup-dropspot');
+  const drop_spot = dropEl ? dropEl.value.trim() : '';
   const fd = new FormData();
-  fd.append('name', name); fd.append('phone', phone);
+  fd.append('name', name); fd.append('phone', phone); fd.append('drop_spot', drop_spot);
   fetch('/live/' + TOKEN + '/signup', { method: 'POST', body: fd })
     .then(r => r.json())
     .then(d => {

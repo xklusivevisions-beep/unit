@@ -92,9 +92,18 @@
       <div id="live-copy-confirm" style="display:none;text-align:center;color:#00ff88;font-size:0.8rem;margin-bottom:8px;">
         <i class="fas fa-check-circle me-1"></i>Copied! Paste into Speed X
       </div>
-      <button onclick="endLiveShare()" class="btn w-100 py-3 fw-bold" style="background:#00ff88;color:#000;border-radius:12px;">
-        <i class="fas fa-check me-2"></i>Delivered — End Tracking
-      </button>
+      <div class="row g-2">
+        <div class="col-7">
+          <button onclick="endLiveShare('delivered')" class="btn w-100 py-3 fw-bold" style="background:#00ff88;color:#000;border-radius:12px;">
+            <i class="fas fa-check me-2"></i>Delivered
+          </button>
+        </div>
+        <div class="col-5">
+          <button onclick="endLiveShare('failed')" class="btn w-100 py-3 fw-bold" style="background:#ff333322;color:#ff4444;border:1px solid #ff333344;border-radius:12px;">
+            <i class="fas fa-times me-2"></i>Failed
+          </button>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -286,18 +295,27 @@ function showCopyConfirm() {
   setTimeout(() => { el.style.display = 'none'; }, 3000);
 }
 
-function endLiveShare() {
+function endLiveShare(outcome) {
   if (!liveToken) return;
-  fetch('/driver/live/' + liveToken + '/end', { method: 'POST' })
+  const endpoint = outcome === 'failed' ? '/driver/live/' + liveToken + '/failed' : '/driver/live/' + liveToken + '/end';
+  fetch(endpoint, { method: 'POST' })
     .then(() => {
       clearInterval(liveGpsInterval);
       clearInterval(liveStatusInterval);
       liveToken = null; liveUrl = null;
       document.getElementById('live-share-active').style.display = 'none';
       document.getElementById('live-share-btn').style.display    = 'block';
-      document.getElementById('live-share-btn').innerHTML = '<i class="fas fa-check me-2"></i>Delivered — Start New Share';
-      document.getElementById('live-share-btn').style.background = '#00ff88';
-      document.getElementById('live-share-btn').style.color = '#000';
+      if (outcome === 'failed') {
+        document.getElementById('live-share-btn').innerHTML = '<i class="fas fa-times me-2"></i>Failed — Start New Share';
+        document.getElementById('live-share-btn').style.background = '#ff333322';
+        document.getElementById('live-share-btn').style.color = '#ff4444';
+        document.getElementById('live-share-btn').style.border = '1px solid #ff333344';
+      } else {
+        document.getElementById('live-share-btn').innerHTML = '<i class="fas fa-check me-2"></i>Delivered — Start New Share';
+        document.getElementById('live-share-btn').style.background = '#00ff88';
+        document.getElementById('live-share-btn').style.color = '#000';
+        document.getElementById('live-share-btn').style.border = 'none';
+      }
       if (miniMap) { miniMap.remove(); miniMap = null; miniMarker = null; }
     }).catch(() => {});
 }
