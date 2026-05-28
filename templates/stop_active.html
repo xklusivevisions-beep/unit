@@ -155,15 +155,60 @@
     </div>
   </div>
 
-  <!-- Manual Send Link -->
+  <!-- Speed X Copy Message -->
   {% set track_url = 'https://unit-6gxn.onrender.com/track/' + stop.token %}
+  {% set speedx_msg = 'Your driver is on the way! Track your delivery live 📍 ' + track_url %}
   {% set sms_body = "Hi " + (stop.customer_name or 'there') + "! Your driver is nearby. Track your delivery live here: " + track_url %}
   {% set sms_recipient = stop.phone if stop.phone else '' %}
+
+  <button id="copy-speedx-btn" onclick="copySpeedXMsg()"
+     class="btn w-100 py-3 fs-6 mb-2 fw-bold"
+     style="background:#ff6a0022;color:#ff8c00;border:1px solid #ff6a0044;border-radius:14px;">
+    <i class="fas fa-copy me-2"></i>Copy Message for Speed X
+  </button>
+  <div id="copy-confirm" style="display:none;text-align:center;color:#00ff88;font-size:0.82rem;margin-bottom:10px;">
+    <i class="fas fa-check-circle me-1"></i>Copied! Paste into Speed X custom message
+  </div>
+
   <a href="sms:{{ sms_recipient }}&body={{ sms_body | urlencode }}"
-     class="btn w-100 py-3 fs-6 mb-3 fw-bold"
-     style="background:#0088ff22;color:#0088ff;border:1px solid #0088ff44;border-radius:14px;">
-    <i class="fas fa-share me-2"></i>Send Tracking Link (Your Phone)
+     class="btn w-100 py-2 mb-3"
+     style="background:transparent;color:#555;border:1px solid #333;border-radius:14px;font-size:0.82rem;">
+    <i class="fas fa-sms me-2"></i>Send from My Phone Instead
   </a>
+
+  <script>
+  const SPEEDX_MSG = {{ speedx_msg | tojson }};
+  function copySpeedXMsg() {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(SPEEDX_MSG).then(() => {
+        document.getElementById('copy-confirm').style.display = 'block';
+        const btn = document.getElementById('copy-speedx-btn');
+        btn.style.background = '#00ff8822';
+        btn.style.color = '#00ff88';
+        btn.style.borderColor = '#00ff8844';
+        btn.innerHTML = '<i class="fas fa-check me-2"></i>Copied!';
+        setTimeout(() => {
+          document.getElementById('copy-confirm').style.display = 'none';
+          btn.style.background = '#ff6a0022';
+          btn.style.color = '#ff8c00';
+          btn.style.borderColor = '#ff6a0044';
+          btn.innerHTML = '<i class="fas fa-copy me-2"></i>Copy Message for Speed X';
+        }, 4000);
+      }).catch(() => fallbackCopy());
+    } else { fallbackCopy(); }
+  }
+  function fallbackCopy() {
+    const ta = document.createElement('textarea');
+    ta.value = SPEEDX_MSG;
+    ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.focus(); ta.select();
+    try { document.execCommand('copy'); } catch(e) {}
+    document.body.removeChild(ta);
+    document.getElementById('copy-confirm').style.display = 'block';
+    setTimeout(() => { document.getElementById('copy-confirm').style.display = 'none'; }, 4000);
+  }
+  </script>
 
   <!-- Delivery Actions -->
   <div class="row g-3 mb-3">

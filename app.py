@@ -1305,6 +1305,41 @@ def update_location():
     db.close()
     return jsonify(result)
 
+# ─── CUSTOMER SIGNUP FROM TRACKING PAGE ──────────────────────────────
+
+@app.route('/track/<token>/signup', methods=['POST'])
+def track_signup(token):
+    db = get_db()
+    stop = db.execute("SELECT * FROM stops WHERE token=?", (token,)).fetchone()
+    if not stop:
+        db.close()
+        return jsonify({'ok': False, 'error': 'Stop not found'}), 404
+    name  = request.form.get('name', '').strip()
+    phone = format_phone(request.form.get('phone', '').strip()) if request.form.get('phone', '').strip() else ''
+    if not name or not phone:
+        return jsonify({'ok': False, 'error': 'Name and phone required'}), 400
+    address = stop['address']
+    unit    = stop['unit'] or ''
+    try:
+        # Check if already registered at this address+phone
+        existing = db.execute(
+            "SELECT id FROM residents WHERE phone=? AND LOWER(address) LIKE LOWER(?)",
+            (phone, f'%{address.split(",")[0].strip()}%')
+        ).fetchone()
+        if not existing:
+            db.execute(
+                "INSERT INTO residents (address, unit, phone, sms_consent, sms_consent_at) VALUES (?,?,?,1,?)",
+                (address, unit, phone, datetime.now().isoformat())
+            )
+            db.commit()
+            log.info(f'Customer signup from track page: {name} {phone} @ {address}')
+    except Exception as e:
+        log.error(f'track_signup error: {e}')
+        try: db._conn.rollback()
+        except: pass
+    db.close()
+    return jsonify({'ok': True})
+
 # ─── TRACKING PAGE (for customers) ─────────────────────────────
 
 @app.route('/track/<token>')

@@ -67,18 +67,49 @@
   </div>
 
   {% if stop.status == 'delivered' %}
-  <!-- Registration CTA -->
-  <div class="card p-4 mb-3 text-center" style="border-color:#00ff8844;background:#00ff8808;">
-    <div style="font-size:2rem;margin-bottom:10px;">📦</div>
-    <div class="fw-bold mb-2" style="color:#00ff88;font-size:1rem;">Make Future Deliveries Smoother</div>
-    <p class="text-secondary mb-3" style="font-size:0.85rem;line-height:1.55;">
-      Tell your driver exactly where to drop your packages, add door notes, and save your preferences — once and done.
-    </p>
-    <a href="/resident" class="btn w-100 py-3 fw-bold" style="background:#00ff88;color:#000;border-radius:12px;font-size:0.95rem;">
-      <i class="fas fa-user-check me-2"></i>Set My Delivery Preferences
-    </a>
-    <small class="text-muted d-block mt-2">Free · Takes 30 seconds</small>
+  <!-- Post-Delivery Signup CTA -->
+  <div class="card p-4 mb-3" style="border-color:#00ff8844;background:#00ff8808;" id="signup-card">
+    <div class="text-center mb-3">
+      <div style="font-size:2rem;margin-bottom:8px;">📍</div>
+      <div class="fw-bold" style="color:#00ff88;font-size:1rem;">Get Real-Time Tracking on Future Deliveries</div>
+      <small class="text-secondary">Your driver will automatically notify you when heading your way.</small>
+    </div>
+    <form id="signup-form" onsubmit="submitSignup(event)">
+      <input type="text" id="signup-name" placeholder="Your name" required
+        class="form-control mb-2" style="background:#111;border:1px solid #333;color:#fff;border-radius:10px;"/>
+      <input type="tel" id="signup-phone" placeholder="Phone number" required
+        class="form-control mb-3" style="background:#111;border:1px solid #333;color:#fff;border-radius:10px;"/>
+      <button type="submit" class="btn w-100 py-3 fw-bold" style="background:#00ff88;color:#000;border-radius:12px;">
+        <i class="fas fa-bell me-2"></i>Sign Me Up — Free
+      </button>
+    </form>
+    <div id="signup-success" style="display:none;text-align:center;padding:12px 0;">
+      <i class="fas fa-check-circle fa-2x mb-2" style="color:#00ff88;"></i>
+      <div class="fw-bold" style="color:#00ff88;">You're all set!</div>
+      <small class="text-secondary">Your next driver will know exactly where you are.</small>
+    </div>
+    <small class="text-muted d-block text-center mt-2">No spam · Takes 10 seconds</small>
   </div>
+  <script>
+  const TRACK_TOKEN = {{ stop.token | tojson }};
+  function submitSignup(e) {
+    e.preventDefault();
+    const name  = document.getElementById('signup-name').value.trim();
+    const phone = document.getElementById('signup-phone').value.trim();
+    const fd = new FormData();
+    fd.append('name', name);
+    fd.append('phone', phone);
+    fetch('/track/' + TRACK_TOKEN + '/signup', { method: 'POST', body: fd })
+      .then(r => r.json())
+      .then(data => {
+        if (data.ok) {
+          document.getElementById('signup-form').style.display = 'none';
+          document.getElementById('signup-success').style.display = 'block';
+        }
+      })
+      .catch(() => {});
+  }
+  </script>
   {% endif %}
 
 </div>
