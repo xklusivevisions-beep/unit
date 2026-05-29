@@ -1,15 +1,47 @@
 {% extends 'base.html' %}
 {% block title %}UNIT — Route{% endblock %}
+{% block extra_css %}
+<link href='https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.css' rel='stylesheet' />
+<style>
+  #route-map { height: calc(100vh - 180px); width: 100%; }
+  .view-toggle { display:flex; background:#111; border-radius:12px; padding:4px; gap:4px; }
+  .view-toggle button { flex:1; padding:8px; border:none; border-radius:9px; font-size:0.82rem;
+    font-weight:700; cursor:pointer; transition:all .2s; background:transparent; color:#555; }
+  .view-toggle button.active { background:#1f2937; color:#fff; }
+  /* Bottom sheet */
+  #stop-sheet { position:fixed; bottom:60px; left:0; right:0; background:#0f172a;
+    border-top:1px solid #1e293b; border-radius:20px 20px 0 0;
+    padding:20px 16px 16px; transform:translateY(100%); transition:transform .3s ease;
+    z-index:999; max-height:50vh; overflow-y:auto; }
+  #stop-sheet.open { transform:translateY(0); }
+  .sheet-drag { width:40px; height:4px; background:#374151; border-radius:2px;
+    margin:0 auto 14px; }
+  .stop-pin { width:28px; height:28px; border-radius:50%; background:#3b82f6;
+    border:2px solid #fff; color:#fff; font-weight:700; font-size:0.68rem;
+    display:flex; align-items:center; justify-content:center;
+    cursor:pointer; box-shadow:0 2px 6px rgba(0,0,0,.5);
+    white-space:nowrap; transition:transform .15s; }
+  .stop-pin:hover { transform:scale(1.15); }
+  .stop-pin.delivered { background:#10b981; }
+  .stop-pin.failed    { background:#ef4444; }
+  .stop-pin.en_route  { background:#f59e0b; }
+</style>
+{% endblock %}
 {% block content %}
-<div class="container-fluid p-4 pb-nav">
+<div class="container-fluid p-4 pb-nav" id="list-view">
 
-  <div class="d-flex align-items-center mb-4">
+  <div class="d-flex align-items-center mb-3">
     <a href="/driver" class="text-decoration-none me-3" style="color:#555;">
       <i class="fas fa-chevron-left"></i>
     </a>
-    <div>
+    <div style="flex:1;">
       <div class="unit-logo" style="font-size:1.2rem;">UNIT<span>.</span></div>
       <small class="text-secondary">{{ route.name }}</small>
+    </div>
+    <!-- Map / List Toggle -->
+    <div class="view-toggle">
+      <button id="btn-list" class="active" onclick="showView('list')"><i class="fas fa-list me-1"></i>List</button>
+      <button id="btn-map"  onclick="showView('map')"><i class="fas fa-map me-1"></i>Map</button>
     </div>
   </div>
 
@@ -183,6 +215,17 @@
 
 </div>
 
+<!-- MAP VIEW -->
+<div id="map-view" style="display:none;">
+  <div id="route-map"></div>
+</div>
+
+<!-- STOP BOTTOM SHEET -->
+<div id="stop-sheet">
+  <div class="sheet-drag" onclick="closeSheet()"></div>
+  <div id="sheet-content"></div>
+</div>
+
 <div class="nav-bottom">
   <div class="d-flex justify-content-around">
     <a href="/driver"><i class="fas fa-home"></i>Home</a>
@@ -310,5 +353,139 @@ function optimizeRoute() {
     doOptimize(null, null);
   }
 }
+
+// ── MAP VIEW ──────────────────────────────────────
+const STOPS_GEO = [
+  {% for stop in stops %}
+  {% if stop.dest_lat and stop.dest_lng %}{
+    id: {{ stop.id }},
+    num: {{ stop.stop_number }},
+    name: {{ (stop.customer_name or 'Unknown') | tojson }},
+    address: {{ stop.address | tojson }},
+    unit: {{ (stop.unit or '') | tojson }},
+    phone: {{ (stop.phone or '') | tojson }},
+    status: {{ stop.status | tojson }},
+    lat: {{ stop.dest_lat }},
+    lng: {{ stop.dest_lng }}
+  },{% endif %}
+  {% endfor %}
+];
+
+const MAPBOX_TOKEN = {{ mapbox_token | tojson }};
+let routeMap = null;
+let mapInitialized = false;
+
+function showView(view) {
+  document.getElementById('list-view').style.display = view === 'list' ? '' : 'none';
+  document.getElementById('map-view').style.display  = view === 'map'  ? '' : 'none';
+  document.getElementById('btn-list').classList.toggle('active', view === 'list');
+  document.getElementById('btn-map').classList.toggle('active', view === 'map');
+  if (view === 'map' && !mapInitialized) initRouteMap();
+  if (view === 'map' && routeMap) setTimeout(() => routeMap.resize(), 50);
+}
+
+function initRouteMap() {
+  mapInitialized = true;
+  mapboxgl.accessToken = MAPBOX_TOKEN;
+
+  // Center on first geocoded stop
+  const first = STOPS_GEO[0] || {lng: -83.05, lat: 42.33};
+  routeMap = new mapboxgl.Map({
+    container: 'route-map',
+    style: 'mapbox://styles/mapbox/dark-v11',
+    center: [first.lng, first.lat],
+    zoom: 12,
+  });
+  routeMap.addControl(new mapboxgl.NavigationControl(), 'top-right');
+
+  routeMap.on('load', () => {
+    // Route line connecting stops in order
+    if (STOPS_GEO.length > 1) {
+      const coords = STOPS_GEO.map(s => [s.lng, s.lat]);
+      routeMap.addSource('route-line', {
+        type: 'geojson',
+        data: { type:'Feature', geometry:{ type:'LineString', coordinates:coords } }
+      });
+      routeMap.addLayer({
+        id: 'route-line', type: 'line', source: 'route-line',
+        layout: {'line-join':'round','line-cap':'round'},
+        paint: {'line-color':'#3b82f6','line-width':2,'line-opacity':0.6,'line-dasharray':[2,2]}
+      });
+    }
+
+    // Numbered stop pins
+    STOPS_GEO.forEach(stop => {
+      const el = document.createElement('div');
+      el.className = 'stop-pin ' + stop.status;
+      el.textContent = stop.num;
+      el.title = stop.address;
+      el.addEventListener('click', () => openSheet(stop));
+      new mapboxgl.Marker({element: el, anchor:'center'})
+        .setLngLat([stop.lng, stop.lat])
+        .addTo(routeMap);
+    });
+
+    // Fit map to all stops
+    if (STOPS_GEO.length > 0) {
+      const bounds = STOPS_GEO.reduce(
+        (b, s) => b.extend([s.lng, s.lat]),
+        new mapboxgl.LngLatBounds([STOPS_GEO[0].lng, STOPS_GEO[0].lat], [STOPS_GEO[0].lng, STOPS_GEO[0].lat])
+      );
+      routeMap.fitBounds(bounds, {padding:50});
+    }
+
+    // Driver location dot
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(pos => {
+        const {latitude:lat, longitude:lng} = pos.coords;
+        const dot = document.createElement('div');
+        dot.style.cssText = 'width:14px;height:14px;border-radius:50%;background:#f59e0b;border:2px solid #fff;box-shadow:0 0 8px #f59e0b;';
+        new mapboxgl.Marker({element:dot}).setLngLat([lng,lat]).addTo(routeMap);
+      }, ()=>{}, {enableHighAccuracy:true});
+    }
+  });
+}
+
+function openSheet(stop) {
+  const trackUrl = 'https://unit-6gxn.onrender.com/track/' + (stop.token || '');
+  const statusColor = stop.status==='delivered'?'#10b981':stop.status==='failed'?'#ef4444':'#3b82f6';
+  document.getElementById('sheet-content').innerHTML = `
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:12px;">
+      <div>
+        <div style="font-size:0.72rem;color:#6b7280;margin-bottom:2px;">STOP #${stop.num}</div>
+        <div style="font-weight:700;font-size:1rem;color:#fff;">${stop.name}</div>
+        <div style="font-size:0.82rem;color:#9ca3af;margin-top:2px;">${stop.address}${stop.unit?' · Unit '+stop.unit:''}</div>
+      </div>
+      <span style="background:${statusColor}22;color:${statusColor};font-size:0.72rem;font-weight:700;
+        padding:3px 10px;border-radius:999px;white-space:nowrap;margin-left:10px;">${stop.status.toUpperCase()}</span>
+    </div>
+    ${stop.phone ? `<div style="font-size:0.82rem;color:#6b7280;margin-bottom:14px;"><i class="fas fa-phone me-1"></i>${stop.phone}</div>` : ''}
+    <div style="display:flex;gap:10px;">
+      ${ stop.status === 'delivered' || stop.status === 'failed'
+        ? `<button disabled style="flex:1;padding:14px;background:#1f2937;color:#555;border:none;border-radius:12px;font-weight:700;font-size:0.95rem;">Done</button>`
+        : `<form method="POST" action="/driver/stop/${stop.id}/start" style="flex:1;">
+             <button type="submit" style="width:100%;padding:14px;background:#3b82f6;color:#fff;border:none;border-radius:12px;font-weight:700;font-size:0.95rem;cursor:pointer;">
+               ⚓️ Navigate to Stop #${stop.num}
+             </button>
+           </form>`
+      }
+      <button onclick="closeSheet()" style="padding:14px 16px;background:#1f2937;color:#9ca3af;border:none;border-radius:12px;cursor:pointer;">&#10005;</button>
+    </div>
+  `;
+  document.getElementById('stop-sheet').classList.add('open');
+}
+
+function closeSheet() {
+  document.getElementById('stop-sheet').classList.remove('open');
+}
+
+// Close sheet on map tap
+document.addEventListener('click', e => {
+  const sheet = document.getElementById('stop-sheet');
+  if (sheet.classList.contains('open') && !sheet.contains(e.target) && !e.target.classList.contains('stop-pin')) {
+    closeSheet();
+  }
+});
 </script>
+<script src='https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.js'></script>
 {% endblock %}

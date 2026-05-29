@@ -1287,7 +1287,7 @@ def route_detail(route_id):
     db.close()
     total    = len(stops)
     with_phone = sum(1 for s in stops if s['phone'])
-    return render_template('route_detail.html', route=route, stops=stops, total=total, with_phone=with_phone)
+    return render_template('route_detail.html', route=route, stops=stops, total=total, with_phone=with_phone, mapbox_token=MAPBOX_TOKEN)
 
 @app.route('/driver/route/<int:route_id>/add-stop', methods=['POST'])
 def route_add_stop(route_id):
