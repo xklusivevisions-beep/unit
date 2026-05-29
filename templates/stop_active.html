@@ -352,12 +352,55 @@ mbMap.on('load', () => {
       paint:{'fill-color':'#00ff88','fill-opacity':0.06}});
     mbMap.addLayer({ id:'geofence-line', type:'line', source:'geofence',
       paint:{'line-color':'#00ff88','line-width':2,'line-dasharray':[3,2]}});
+
+    // Show banner immediately — try to get GPS for route, fall back to geolocation prompt
+    document.getElementById('turn-banner').style.display = 'flex';
+    document.getElementById('turn-instruction').textContent = 'Waiting for GPS to draw route…';
+    document.getElementById('turn-distance').textContent = '{{ stop.address }}'.split(',')[0];
+
+    // Try immediate geolocation to kick off route ASAP (don't wait for watchPosition)
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(pos => {
+        const {latitude: lat, longitude: lng} = pos.coords;
+        if (lastRouteFetch === 0) fetchRoute(lng, lat);
+      }, () => {}, {enableHighAccuracy: true, timeout: 8000});
+    }
+  } else {
+    // No server-side coords — geocode address via Mapbox then draw route
+    const addr = encodeURIComponent('{{ stop.address }}');
+    document.getElementById('turn-banner').style.display = 'flex';
+    document.getElementById('turn-instruction').textContent = 'Locating address…';
+    fetch('https://api.mapbox.com/geocoding/v5/mapbox.places/' + addr +
+      '.json?country=US&limit=1&access_token=' + mapboxgl.accessToken)
+    .then(r=>r.json()).then(d=>{
+      if (d.features && d.features[0]) {
+        const [lng, lat] = d.features[0].center;
+        // Place green pin
+        const el = document.createElement('div');
+        el.style.cssText = 'width:20px;height:20px;border-radius:50%;background:#00ff88;border:3px solid #fff;box-shadow:0 0 12px #00ff8888;';
+        new mapboxgl.Marker({element:el}).setLngLat([lng,lat]).addTo(mbMap);
+        mbMap.setCenter([lng,lat]);
+        // Fetch route once we have GPS
+        const waitForGPS = setInterval(() => {
+          if (lastDriverLat !== null) {
+            clearInterval(waitForGPS);
+            fetchRoute(lastDriverLng, lastDriverLat);
+          }
+        }, 1000);
+      } else {
+        document.getElementById('turn-instruction').textContent = 'Could not locate address';
+      }
+    }).catch(()=>{
+      document.getElementById('turn-instruction').textContent = 'Geocoding failed — tap NAV';
+    });
   }
 });
 
 // ── ROUTE + TURN-BY-TURN ────────────────────────────────────
 function fetchRoute(fromLng, fromLat) {
   if (!DEST_LAT || !DEST_LNG) return;
+  document.getElementById('turn-instruction').textContent = 'Loading route…';
+  document.getElementById('turn-distance').textContent = '';
   fetch('https://api.mapbox.com/directions/v5/mapbox/driving/' +
     fromLng+','+fromLat+';'+DEST_LNG+','+DEST_LAT+
     '?geometries=geojson&overview=full&steps=true&banner_instructions=true&access_token=' + mapboxgl.accessToken)
@@ -391,7 +434,11 @@ function fetchRoute(fromLng, fromLat) {
     document.getElementById('turn-eta').textContent = totalMins + ' min · ' + totalMiles + ' mi';
     updateTurnBanner(fromLat, fromLng);
     document.getElementById('turn-banner').style.display = 'flex';
-  }).catch(() => {});
+  }).catch(err => {
+    document.getElementById('turn-instruction').textContent = 'Route unavailable — tap NAV ↗';
+    document.getElementById('turn-distance').textContent = '';
+    console.error('fetchRoute error:', err);
+  });
 }
 
 function updateTurnBanner(lat, lng) {
