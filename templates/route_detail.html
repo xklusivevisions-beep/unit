@@ -94,6 +94,28 @@
     </div>
   </div>
 
+  <!-- Route Actions -->
+  <div class="row g-2 mb-3">
+    <div class="col-6">
+      <button id="optimize-btn" onclick="optimizeRoute()" class="btn w-100 py-3 fw-bold" style="background:#ffaa0022;color:#ffaa00;border:1px solid #ffaa0044;border-radius:12px;font-size:0.85rem;">
+        <i class="fas fa-route me-2"></i>Optimize Route
+      </button>
+    </div>
+    <div class="col-6">
+      {% set next_pending = stops | selectattr('status','equalto','pending') | list | first %}
+      {% if next_pending %}
+      <a href="/driver/stop/{{ next_pending.id }}" class="btn w-100 py-3 fw-bold" style="background:#00ff88;color:#000;border-radius:12px;font-size:0.85rem;">
+        <i class="fas fa-play me-2"></i>Start Delivery
+      </a>
+      {% else %}
+      <button class="btn w-100 py-3 fw-bold" style="background:#1a1a1a;color:#555;border-radius:12px;font-size:0.85rem;" disabled>
+        <i class="fas fa-check me-2"></i>All Done
+      </button>
+      {% endif %}
+    </div>
+  </div>
+  <div id="optimize-status" style="display:none;text-align:center;font-size:0.8rem;color:#ffaa00;margin-bottom:12px;"></div>
+
   <!-- Stop List -->
   <h6 class="text-secondary mb-3" style="letter-spacing:0.1em;font-size:0.75rem;">ALL STOPS</h6>
   {% for stop in stops %}
@@ -240,6 +262,53 @@ function savePhone(stopId, routeId) {
       setTimeout(() => location.reload(), 800);
     }
   });
+}
+
+// ── ROUTE OPTIMIZER ──────────────────────────────────────────────────
+function optimizeRoute() {
+  const btn = document.getElementById('optimize-btn');
+  const status = document.getElementById('optimize-status');
+  btn.disabled = true;
+  btn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Optimizing...';
+  status.style.display = 'block';
+  status.textContent = 'Calculating best route...';
+
+  function doOptimize(lat, lng) {
+    fetch('/driver/route/{{ route.id }}/optimize', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({lat, lng})
+    })
+    .then(r => r.json())
+    .then(d => {
+      if (d.ok) {
+        status.textContent = '✓ Route optimized — ' + d.reordered + ' stops reordered';
+        status.style.color = '#00ff88';
+        setTimeout(() => location.reload(), 1200);
+      } else {
+        status.textContent = 'Could not optimize: ' + (d.error || 'unknown error');
+        status.style.color = '#ff6666';
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-route me-2"></i>Optimize Route';
+      }
+    })
+    .catch(() => {
+      status.textContent = 'Optimization failed — try again';
+      status.style.color = '#ff6666';
+      btn.disabled = false;
+      btn.innerHTML = '<i class="fas fa-route me-2"></i>Optimize Route';
+    });
+  }
+
+  if (navigator.geolocation) {
+    navigator.geolocation.getCurrentPosition(
+      pos => doOptimize(pos.coords.latitude, pos.coords.longitude),
+      ()  => doOptimize(null, null),
+      {enableHighAccuracy: true, timeout: 8000, maximumAge: 0}
+    );
+  } else {
+    doOptimize(null, null);
+  }
 }
 </script>
 {% endblock %}

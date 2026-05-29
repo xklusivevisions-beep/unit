@@ -484,6 +484,29 @@ def miles_away(lat1, lng1, lat2, lng2):
         return geodesic((lat1, lng1), (lat2, lng2)).miles
     except: return 999
 
+def send_imessage_to_driver(phone, message):
+    """Send iMessage to driver via Mac mini AppleScript — no Twilio needed."""
+    import subprocess
+    try:
+        clean = phone.replace(' ','').replace('-','').replace('(','').replace(')','')
+        if not clean.startswith('+'): clean = '+1' + clean.lstrip('1')
+        script = f"""tell application "Messages"
+    set targetService to 1st service whose service type = iMessage
+    set targetBuddy to buddy "{clean}" of targetService
+    send "{message}" to targetBuddy
+end tell"""
+        result = subprocess.run(['osascript', '-e', script],
+                                capture_output=True, text=True, timeout=8)
+        if result.returncode == 0:
+            log.info(f'iMessage sent to driver {clean}')
+            return True
+        else:
+            log.warning(f'iMessage failed: {result.stderr.strip()}')
+            return False
+    except Exception as e:
+        log.error(f'send_imessage_to_driver error: {e}')
+        return False
+
 def get_base_url():
     return request.host_url.rstrip('/')
 
@@ -1153,9 +1176,19 @@ def stop_delivered(stop_id):
     stop = db.execute("SELECT * FROM stops WHERE id=?", (stop_id,)).fetchone()
     db.execute("UPDATE stops SET status='delivered' WHERE id=?", (stop_id,))
     db.commit()
-    # Redirect back to route
     route_id = stop['route_id'] if stop else None
+    # Auto-advance: find next pending stop in route
+    next_stop = None
+    if route_id:
+        next_stop = db.execute(
+            """SELECT id FROM stops
+               WHERE route_id=? AND status='pending'
+               ORDER BY stop_number ASC LIMIT 1""",
+            (route_id,)
+        ).fetchone()
     db.close()
+    if next_stop:
+        return redirect(url_for('stop_active', stop_id=next_stop['id']))
     return redirect(url_for('route_detail', route_id=route_id) if route_id else url_for('driver_dashboard'))
 
 @app.route('/driver/stop/<int:stop_id>/failed', methods=['POST'])
@@ -1167,7 +1200,17 @@ def stop_failed(stop_id):
     db.execute("UPDATE stops SET status='failed' WHERE id=?", (stop_id,))
     db.commit()
     route_id = stop['route_id'] if stop else None
+    next_stop = None
+    if route_id:
+        next_stop = db.execute(
+            """SELECT id FROM stops
+               WHERE route_id=? AND status='pending'
+               ORDER BY stop_number ASC LIMIT 1""",
+            (route_id,)
+        ).fetchone()
     db.close()
+    if next_stop:
+        return redirect(url_for('stop_active', stop_id=next_stop['id']))
     return redirect(url_for('route_detail', route_id=route_id) if route_id else url_for('driver_dashboard'))
 
 @app.route('/driver/route/<int:route_id>/clear', methods=['POST'])
@@ -1321,6 +1364,69 @@ def update_location():
     db.close()
     return jsonify(result)
 
+
+
+@app.route('/driver/route/<int:route_id>/optimize', methods=['POST'])
+def optimize_route(route_id):
+    """Reorder stops using nearest-neighbor from driver's current GPS, or OSRM trip."""
+    if 'driver_id' not in session:
+        return jsonify({'ok': False, 'error': 'not logged in'}), 401
+    db = get_db()
+    data = request.get_json() or {}
+    driver_lat = data.get('lat')
+    driver_lng = data.get('lng')
+
+    stops = db.execute(
+        """SELECT id, dest_lat, dest_lng, stop_number FROM stops
+           WHERE route_id=? AND status='pending' AND dest_lat IS NOT NULL
+           ORDER BY stop_number ASC""",
+        (route_id,)
+    ).fetchall()
+
+    if not stops:
+        db.close()
+        return jsonify({'ok': False, 'error': 'No geocoded stops to optimize'})
+
+    # Try OSRM trip optimization
+    optimized_ids = []
+    try:
+        coords = ';'.join(f"{s['dest_lng']},{s['dest_lat']}" for s in stops)
+        osrm_url = (f"http://router.project-osrm.org/trip/v1/driving/{coords}"
+                    f"?roundtrip=false&source=first&destination=last&overview=false")
+        resp = requests.get(osrm_url, timeout=8)
+        if resp.status_code == 200:
+            trip = resp.json()
+            if trip.get('code') == 'Ok' and trip.get('waypoints'):
+                order = sorted(trip['waypoints'], key=lambda w: w['waypoint_index'])
+                optimized_ids = [stops[w['trips_index'] if 'trips_index' in w else stops.index(
+                    min(stops, key=lambda s: abs(s['dest_lat'] - w['location'][1]) + abs(s['dest_lng'] - w['location'][0]))
+                )]['id'] for w in order]
+    except Exception as e:
+        log.warning(f'OSRM optimize failed: {e}')
+
+    # Fallback: nearest-neighbor from driver location
+    if not optimized_ids:
+        remaining = list(stops)
+        cur_lat = driver_lat or (stops[0]['dest_lat'] if stops else 0)
+        cur_lng = driver_lng or (stops[0]['dest_lng'] if stops else 0)
+        while remaining:
+            closest = min(remaining, key=lambda s: miles_away(cur_lat, cur_lng, s['dest_lat'], s['dest_lng']))
+            optimized_ids.append(closest['id'])
+            cur_lat, cur_lng = closest['dest_lat'], closest['dest_lng']
+            remaining.remove(closest)
+
+    # Renumber pending stops in optimized order (keep delivered/failed stops in place)
+    delivered_count = db.execute(
+        "SELECT COUNT(*) FROM stops WHERE route_id=? AND status!='pending'", (route_id,)
+    ).fetchone()[0]
+
+    for i, stop_id in enumerate(optimized_ids):
+        new_num = delivered_count + i + 1
+        db.execute("UPDATE stops SET stop_number=? WHERE id=?", (new_num, stop_id))
+    db.commit()
+    db.close()
+    log.info(f'Route {route_id} optimized: {len(optimized_ids)} stops reordered')
+    return jsonify({'ok': True, 'reordered': len(optimized_ids)})
 
 # ─── QUICK LIVE SHARE (no stop/address required) ─────────────────────────────
 

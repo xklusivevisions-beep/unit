@@ -76,15 +76,29 @@
 {% block content %}
 <div class="container-fluid p-4 pb-nav">
 
-  <div class="d-flex align-items-center mb-3">
-    <a href="/driver/route/{{ stop.route_id }}" class="text-decoration-none me-3" style="color:#555;">
-      <i class="fas fa-chevron-left"></i>
+  <div class="d-flex align-items-center justify-content-between mb-3">
+    <a href="/driver/route/{{ stop.route_id }}" class="text-decoration-none" style="color:#555;padding:8px;margin:-8px;">
+      <i class="fas fa-list"></i>
     </a>
-    <div>
-      <div class="unit-logo" style="font-size:1.2rem;">UNIT<span>.</span></div>
+    <div class="text-center">
+      <div class="unit-logo" style="font-size:1.1rem;">UNIT<span>.</span></div>
       <small class="text-secondary">Stop #{{ stop.stop_number }}</small>
     </div>
+    <!-- Open in Apple Maps -->
+    <a id="nav-btn" href="#" onclick="openNav(event)" style="color:#0088ff;font-size:0.8rem;font-weight:700;text-decoration:none;">
+      <i class="fas fa-diamond-turn-right"></i> NAV
+    </a>
   </div>
+  <script>
+  function openNav(e) {
+    e.preventDefault();
+    const addr = encodeURIComponent('{{ stop.address | replace("'", "\\'") }}');
+    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+    window.location.href = isIOS
+      ? 'maps://?daddr=' + addr + '&dirflg=d'
+      : 'https://www.google.com/maps/dir/?api=1&destination=' + addr + '&travelmode=driving';
+  }
+  </script>
 
   <!-- Stop Info -->
   <div class="card p-3 mb-3">
