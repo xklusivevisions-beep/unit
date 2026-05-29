@@ -744,6 +744,20 @@ def driver_logout():
 def driver_dashboard():
     if 'driver_id' not in session:
         return redirect(url_for('driver_login'))
+    db = get_db()
+    today = datetime.now().strftime('%Y-%m-%d')
+    route = db.execute(
+        "SELECT * FROM routes WHERE driver_id=? AND date=? ORDER BY id DESC LIMIT 1",
+        (session['driver_id'], today)
+    ).fetchone()
+    stops = []
+    if route:
+        stops = db.execute(
+            "SELECT * FROM stops WHERE route_id=? ORDER BY stop_number",
+            (route['id'],)
+        ).fetchall()
+    db.close()
+    return render_template('driver_dashboard.html', route=route, stops=stops, driver=session['driver_name'], gmaps_key=GOOGLE_MAPS_KEY, mapbox_token=MAPBOX_TOKEN)
 
 
 # ─── PACKAGE SCAN ──────────────────────────────────────────────
@@ -958,20 +972,6 @@ def scan_build_route():
 
 
 # ─── END PACKAGE SCAN ──────────────────────────────────────────
-    db = get_db()
-    today = datetime.now().strftime('%Y-%m-%d')
-    route = db.execute(
-        "SELECT * FROM routes WHERE driver_id=? AND date=? ORDER BY id DESC LIMIT 1",
-        (session['driver_id'], today)
-    ).fetchone()
-    stops = []
-    if route:
-        stops = db.execute(
-            "SELECT * FROM stops WHERE route_id=? ORDER BY stop_number",
-            (route['id'],)
-        ).fetchall()
-    db.close()
-    return render_template('driver_dashboard.html', route=route, stops=stops, driver=session['driver_name'], gmaps_key=GOOGLE_MAPS_KEY, mapbox_token=MAPBOX_TOKEN)
 
 # ─── ROUTE IMPORT ──────────────────────────────────────────────
 
