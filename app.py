@@ -1730,6 +1730,25 @@ def optimize_route(route_id):
     return jsonify({'ok': True, 'reordered': len(optimized_ids)})
 
 
+@app.route('/driver/stop/<int:stop_id>/send-message', methods=['POST'])
+def stop_send_message(stop_id):
+    """Send a custom SMS to the customer from the stop active screen."""
+    if 'driver_id' not in session:
+        return jsonify({'ok': False}), 401
+    data = request.get_json() or {}
+    msg = data.get('message', '').strip()
+    if not msg:
+        return jsonify({'ok': False, 'error': 'No message'})
+    db = get_db()
+    stop = db.execute("SELECT * FROM stops WHERE id=?", (stop_id,)).fetchone()
+    if not stop or not stop['phone']:
+        db.close()
+        return jsonify({'ok': False, 'error': 'No phone number for this stop'})
+    ok, err = send_sms(format_phone(stop['phone']), msg)
+    db.close()
+    return jsonify({'ok': ok, 'error': err if not ok else None})
+
+
 @app.route('/driver/test/proximity', methods=['POST'])
 def test_proximity_alert():
     """Test the iMessage proximity alert — fires immediately to driver phone."""
@@ -1758,9 +1777,13 @@ def test_proximity_alert():
             test_msg = "\U0001F4E6 UNIT TEST — proximity alert is working! \U00002705"
     else:
         test_msg = "\U0001F4E6 UNIT TEST — proximity alert is working! \U00002705\n\nWhen you are within 0.5 miles of a stop, this message will auto-fire with the Speed X copy text."
-    ok = send_imessage_to_driver(driver['phone'], test_msg)
+    # Try Twilio SMS first, fall back to iMessage
+    ok, err = send_sms(format_phone(driver['phone']), test_msg)
+    if not ok:
+        ok = send_imessage_to_driver(driver['phone'], test_msg)
+        err = None if ok else 'SMS unavailable — check Twilio/Textbelt balance'
     db.close()
-    return jsonify({'ok': ok, 'sent_to': driver['phone'], 'message': test_msg if ok else 'iMessage failed — check Mac mini Messages.app'})
+    return jsonify({'ok': ok, 'sent_to': driver['phone'], 'message': test_msg if ok else (err or 'Send failed')})
 
 # ─── QUICK LIVE SHARE (no stop/address required) ─────────────────────────────
 

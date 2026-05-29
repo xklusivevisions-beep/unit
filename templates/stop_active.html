@@ -110,8 +110,19 @@
     <small class="text-secondary">Geofence confirmed — deliver here</small>
   </div>
 
+  <!-- Turn-by-Turn Banner -->
+  <div id="turn-banner" style="display:none;background:#0f172a;border:1px solid #1e3a5f;border-radius:12px 12px 0 0;
+       padding:10px 14px;display:flex;align-items:center;gap:12px;margin-bottom:0;">
+    <div id="turn-icon" style="font-size:1.5rem;flex-shrink:0;">⬆️</div>
+    <div style="flex:1;min-width:0;">
+      <div id="turn-instruction" style="font-weight:700;font-size:0.92rem;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Getting route…</div>
+      <div id="turn-distance" style="font-size:0.78rem;color:#60a5fa;margin-top:1px;"></div>
+    </div>
+    <div id="turn-eta" style="font-size:0.78rem;color:#9ca3af;text-align:right;flex-shrink:0;"></div>
+  </div>
+
   <!-- Live Map -->
-  <div id="map"></div>
+  <div id="map" style="border-radius:0 0 14px 14px;"></div>
 
   <!-- Proximity Bar -->
   <div class="card p-3 mb-3">
@@ -154,7 +165,7 @@
     <div class="d-flex justify-content-between align-items-center">
       <div>
         <div class="fw-bold" style="font-size:0.82rem;">📲 Proximity Alert</div>
-        <small id="prox-status" class="text-secondary">Fires iMessage when within 0.5mi</small>
+        <small id="prox-status" class="text-secondary">Auto-SMS customer within 0.5mi</small>
       </div>
       <button onclick="testProximity()" class="btn btn-sm" style="border:1px solid #0088ff44;color:#0088ff;border-radius:10px;padding:6px 14px;font-size:0.78rem;">
         <i class="fas fa-bell me-1"></i>Test Now
@@ -162,6 +173,24 @@
     </div>
     <div id="prox-result" style="display:none;margin-top:8px;padding:8px 10px;border-radius:8px;font-size:0.8rem;"></div>
   </div>
+
+  <!-- Custom Message to Customer -->
+  {% if stop.phone %}
+  <div class="card p-3 mb-3" style="border-color:#7c3aed33;">
+    <div class="fw-bold mb-2" style="font-size:0.82rem;">💬 Message Customer</div>
+    <div style="display:flex;gap:8px;">
+      <input type="text" id="custom-msg-input" placeholder="Type a message..."
+        style="flex:1;background:#111827;border:1px solid #374151;color:#fff;border-radius:8px;
+               padding:8px 10px;font-size:0.85rem;min-width:0;">
+      <button onclick="sendCustomMessage()" id="custom-msg-btn"
+        style="background:#7c3aed;color:#fff;border:none;border-radius:8px;
+               padding:8px 14px;font-weight:700;font-size:0.82rem;white-space:nowrap;cursor:pointer;">
+        Send
+      </button>
+    </div>
+    <div id="custom-msg-status" style="display:none;margin-top:6px;font-size:0.78rem;"></div>
+  </div>
+  {% endif %}
 
   <!-- Speed X Copy Message -->
   {% set track_url = 'https://unit-6gxn.onrender.com/track/' + stop.token %}
@@ -264,6 +293,10 @@ const atBanner  = document.getElementById('at-stop-banner');
 const gfFill    = document.getElementById('geofence-fill');
 let smsTriggered = false;
 let atStopShown  = false;
+let routeSteps   = [];
+let currentStep  = 0;
+let lastRouteFetch = 0;
+let lastDriverLat = null, lastDriverLng = null;
 
 // ── MAPBOX MAP SETUP ──────────────────────────────────────────
 const mbMap = new mapboxgl.Map({
@@ -322,6 +355,76 @@ mbMap.on('load', () => {
   }
 });
 
+// ── ROUTE + TURN-BY-TURN ────────────────────────────────────
+function fetchRoute(fromLng, fromLat) {
+  if (!DEST_LAT || !DEST_LNG) return;
+  fetch('https://api.mapbox.com/directions/v5/mapbox/driving/' +
+    fromLng+','+fromLat+';'+DEST_LNG+','+DEST_LAT+
+    '?geometries=geojson&overview=full&steps=true&banner_instructions=true&access_token=' + mapboxgl.accessToken)
+  .then(r=>r.json()).then(d => {
+    if (!d.routes || !d.routes[0]) return;
+    const route = d.routes[0];
+    const geo   = route.geometry;
+
+    // Draw or update route line
+    if (mbMap.getSource('route')) {
+      mbMap.getSource('route').setData({type:'Feature', geometry:geo});
+    } else {
+      mbMap.addSource('route', {type:'geojson', data:{type:'Feature',geometry:geo}});
+      mbMap.addLayer({
+        id:'route-line', type:'line', source:'route',
+        layout:{'line-join':'round','line-cap':'round'},
+        paint:{'line-color':'#3b82f6','line-width':5,'line-opacity':0.9}
+      }, 'geofence-fill'); // insert below geofence layer
+      // Fit map to route on first draw
+      const coords = geo.coordinates;
+      const bounds = coords.reduce((b,c)=>b.extend(c), new mapboxgl.LngLatBounds(coords[0],coords[0]));
+      mbMap.fitBounds(bounds, {padding:60, maxZoom:17});
+    }
+
+    // Extract steps
+    const steps = route.legs[0]?.steps || [];
+    routeSteps = steps;
+    currentStep = 0;
+    const totalMins = Math.round(route.duration / 60);
+    const totalMiles = (route.distance * 0.000621371).toFixed(1);
+    document.getElementById('turn-eta').textContent = totalMins + ' min · ' + totalMiles + ' mi';
+    updateTurnBanner(fromLat, fromLng);
+    document.getElementById('turn-banner').style.display = 'flex';
+  }).catch(() => {});
+}
+
+function updateTurnBanner(lat, lng) {
+  if (!routeSteps.length) return;
+  // Find the next step we haven't passed yet
+  let bestIdx = currentStep;
+  for (let i = currentStep; i < routeSteps.length; i++) {
+    const loc = routeSteps[i].maneuver.location; // [lng, lat]
+    const d = Math.abs(lat - loc[1]) * 111000 + Math.abs(lng - loc[0]) * 111000 * Math.cos(lat * Math.PI/180);
+    if (d < 80 && i < routeSteps.length - 1) { // within 80m of this maneuver → advance
+      currentStep = i + 1;
+      bestIdx = currentStep;
+    }
+  }
+  const step = routeSteps[Math.min(bestIdx, routeSteps.length-1)];
+  if (!step) return;
+  const instruction = step.maneuver.instruction || step.maneuver.type || '';
+  const distM = step.distance || 0;
+  const distStr = distM < 160 ? Math.round(distM * 3.281) + ' ft' : (distM * 0.000621371).toFixed(1) + ' mi';
+  const ICONS = {
+    'turn left': '↰', 'turn right': '↱', 'turn sharp left': '↰↰', 'turn sharp right': '↱↱',
+    'turn slight left': '↖️', 'turn slight right': '↗️',
+    'straight': '⬆️', 'continue': '⬆️', 'depart': '📍', 'arrive': '📍',
+    'merge': '↗️', 'roundabout': '🔄', 'exit roundabout': '↗️', 'fork': '↗️',
+    'on ramp': '↗️', 'off ramp': '↘️',
+  };
+  const mType = (step.maneuver.modifier ? step.maneuver.type + ' ' + step.maneuver.modifier : step.maneuver.type || '').toLowerCase();
+  const icon = ICONS[mType] || ICONS[step.maneuver.type] || '⬆️';
+  document.getElementById('turn-icon').textContent = icon;
+  document.getElementById('turn-instruction').textContent = instruction;
+  document.getElementById('turn-distance').textContent = 'In ' + distStr;
+}
+
 function turf_circle(lng, lat, radiusMeters) {
   const R = 6371000, steps = 64;
   const coords = [];
@@ -352,29 +455,24 @@ function sendLocation(lat, lng) {
     el.style.cssText = 'width:14px;height:14px;border-radius:50%;background:#0088ff;border:3px solid #fff;box-shadow:0 0 10px #0088ff;';
     driverMarker = new mapboxgl.Marker({element:el}).setLngLat([lng,lat]).addTo(mbMap);
 
-    // Draw route from driver to destination
-    if (DEST_LAT && DEST_LNG && !routeDrawn) {
-      routeDrawn = true;
-      fetch('https://api.mapbox.com/directions/v5/mapbox/driving/' +
-        lng+','+lat+';'+DEST_LNG+','+DEST_LAT+
-        '?geometries=geojson&overview=full&access_token=' + mapboxgl.accessToken)
-      .then(r=>r.json()).then(d => {
-        if (d.routes && d.routes[0]) {
-          const geo = d.routes[0].geometry;
-          mbMap.addSource('route', {type:'geojson', data:{type:'Feature',geometry:geo}});
-          mbMap.addLayer({id:'route-line', type:'line', source:'route',
-            layout:{'line-join':'round','line-cap':'round'},
-            paint:{'line-color':'#0088ff','line-width':4,'line-opacity':0.8}});
-          // Fit map to route
-          const coords = geo.coordinates;
-          const bounds = coords.reduce((b,c)=>b.extend(c), new mapboxgl.LngLatBounds(coords[0],coords[0]));
-          mbMap.fitBounds(bounds, {padding:60});
-        }
-      }).catch(()=>{});
+    // Draw / refresh route from driver to destination
+    const now = Date.now();
+    if (DEST_LAT && DEST_LNG && (now - lastRouteFetch > 30000)) {
+      lastRouteFetch = now;
+      fetchRoute(lng, lat);
     }
   } else {
-    driverMarker.setLngLat([lng,lat]);
+    driverMarker.setLngLat([lng, lat]);
+    // Update route line when driver moves significantly (>50m)
+    if (DEST_LAT && DEST_LNG && lastDriverLat !== null) {
+      const d = Math.abs(lat - lastDriverLat) + Math.abs(lng - lastDriverLng);
+      if (d > 0.0005 && Date.now() - lastRouteFetch > 15000) {
+        lastRouteFetch = Date.now();
+        fetchRoute(lng, lat);
+      }
+    }
   }
+  lastDriverLat = lat; lastDriverLng = lng;
 
   // Send to server
   fetch('/api/location', {
@@ -412,6 +510,7 @@ function sendLocation(lat, lng) {
       gpsText.style.color = '#00ff88';
     }
     if (data.sms_triggered && !smsTriggered) { smsTriggered=true; smsAlert.style.display='block'; }
+    if (routeSteps.length) updateTurnBanner(lat, lng);
   }).catch(()=>{
     gpsText.textContent = 'GPS sync error — retrying...';
     gpsText.style.color = '#ff6666';
@@ -528,14 +627,14 @@ function testProximity() {
       el.style.background = '#00ff8815';
       el.style.color = '#00ff88';
       el.style.border = '1px solid #00ff8833';
-      el.innerHTML = '<i class="fas fa-check-circle me-2"></i>iMessage sent to ' + d.sent_to + ' — check your Messages app';
+      el.innerHTML = '<i class="fas fa-check-circle me-2"></i>SMS sent to ' + d.sent_to;
       document.getElementById('prox-status').textContent = 'Working ✔';
       document.getElementById('prox-status').style.color = '#00ff88';
     } else {
       el.style.background = '#ff333315';
       el.style.color = '#ff4444';
       el.style.border = '1px solid #ff333333';
-      el.innerHTML = '<i class="fas fa-times-circle me-2"></i>' + (d.error || d.message || 'Failed — check Mac mini is on and Messages.app is open');
+      el.innerHTML = '<i class="fas fa-times-circle me-2"></i>' + (d.error || d.message || 'Send failed — check Twilio balance');
     }
     btn.disabled = false;
     btn.innerHTML = '<i class="fas fa-bell me-1"></i>Test Now';
@@ -545,6 +644,43 @@ function testProximity() {
     document.getElementById('prox-result').innerHTML = 'Network error — try again';
     btn.disabled = false;
     btn.innerHTML = '<i class="fas fa-bell me-1"></i>Test Now';
+  });
+}
+
+function sendCustomMessage() {
+  const input = document.getElementById('custom-msg-input');
+  const btn   = document.getElementById('custom-msg-btn');
+  const status = document.getElementById('custom-msg-status');
+  const msg = input.value.trim();
+  if (!msg) return;
+  btn.disabled = true;
+  btn.textContent = '...';
+  fetch('/driver/stop/' + STOP_ID + '/send-message', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({message: msg})
+  })
+  .then(r => r.json())
+  .then(d => {
+    status.style.display = 'block';
+    if (d.ok) {
+      status.style.color = '#10b981';
+      status.textContent = '✓ Sent';
+      input.value = '';
+    } else {
+      status.style.color = '#ef4444';
+      status.textContent = d.error || 'Failed to send';
+    }
+    btn.disabled = false;
+    btn.textContent = 'Send';
+    setTimeout(() => { status.style.display = 'none'; }, 4000);
+  })
+  .catch(() => {
+    status.style.color = '#ef4444';
+    status.textContent = 'Network error';
+    status.style.display = 'block';
+    btn.disabled = false;
+    btn.textContent = 'Send';
   });
 }
 </script>
