@@ -1,6 +1,7 @@
 {% extends 'base.html' %}
 {% block title %}UNIT — Dashboard{% endblock %}
 {% block extra_css %}
+<link href='https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.css' rel='stylesheet' />
 <style>
 @keyframes gpsPulse {
   0%   { box-shadow: 0 0 0 0 rgba(0,136,255,.7); }
@@ -171,11 +172,7 @@
 </div>
 
 {% block scripts %}
-{% if gmaps_key %}
-<script src="https://maps.googleapis.com/maps/api/js?key={{ gmaps_key }}&callback=initDashboardMap&libraries=marker" async defer></script>
-{% else %}
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-{% endif %}
+<script src='https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.js'></script>
 <script>
 function openMaps(address) {
   const encoded = encodeURIComponent(address);
@@ -211,8 +208,8 @@ function startLiveShare() {
     .catch(() => alert('Could not start live share.'));
 }
 
-// ── GOOGLE MAPS DASHBOARD ──
-const GMAPS_KEY = {{ gmaps_key | tojson }};
+// ── MAPBOX GL DASHBOARD ──
+mapboxgl.accessToken = {{ mapbox_token | tojson }};
 let routeMap    = null;
 let driverMapMarker = null;
 
@@ -223,124 +220,79 @@ const STOP_DATA = [
   {% endfor %}
 ];
 
-function initDashboardMap() {
+// Init route map with Mapbox GL
+document.addEventListener('DOMContentLoaded', () => {
   const mapEl = document.getElementById('route-map');
   if (!mapEl || !STOP_DATA.length) return;
-  const center = { lat: STOP_DATA[0].lat, lng: STOP_DATA[0].lng };
-  routeMap = new google.maps.Map(mapEl, {
-    center,
+
+  routeMap = new mapboxgl.Map({
+    container: 'route-map',
+    style: 'mapbox://styles/mapbox/dark-v11',
+    center: [STOP_DATA[0].lng, STOP_DATA[0].lat],
     zoom: 13,
-    tilt: 45,
-    mapTypeId: 'roadmap',
-    styles: [
-      {elementType:'geometry', stylers:[{color:'#0a0a0a'}]},
-      {elementType:'labels.text.fill', stylers:[{color:'#757575'}]},
-      {elementType:'labels.text.stroke', stylers:[{color:'#0a0a0a'}]},
-      {featureType:'road', elementType:'geometry', stylers:[{color:'#1a1a1a'}]},
-      {featureType:'road.arterial', elementType:'geometry', stylers:[{color:'#222222'}]},
-      {featureType:'road.highway', elementType:'geometry', stylers:[{color:'#2a2a2a'}]},
-      {featureType:'road.highway', elementType:'geometry.stroke', stylers:[{color:'#00ff8833'}]},
-      {featureType:'water', elementType:'geometry', stylers:[{color:'#000000'}]},
-      {featureType:'poi', stylers:[{visibility:'off'}]},
-      {featureType:'transit', stylers:[{visibility:'off'}]},
-    ],
-    disableDefaultUI: true,
-    zoomControl: true,
-    gestureHandling: 'greedy',
+    pitch: 45,
+    bearing: -10,
+    antialias: true,
   });
 
-  // Plot all stops
-  STOP_DATA.forEach(s => {
-    const color = s.status === 'delivered' ? '#00ff88' : s.status === 'failed' ? '#ff3333' : '#ffaa00';
-    const marker = new google.maps.Marker({
-      position: { lat: s.lat, lng: s.lng },
-      map: routeMap,
-      label: { text: String(s.num), color: '#000', fontSize: '10px', fontWeight: 'bold' },
-      icon: {
-        path: google.maps.SymbolPath.CIRCLE,
-        scale: 10,
-        fillColor: color,
-        fillOpacity: 1,
-        strokeColor: '#000',
-        strokeWeight: 1,
-      },
-    });
-    marker.addListener('click', () => {
-      window.location.href = '/driver/stop/' + s.id;
-    });
-  });
+  routeMap.addControl(new mapboxgl.NavigationControl({showCompass:false}), 'top-right');
 
-  // Fit map to all stops
-  if (STOP_DATA.length > 1) {
-    const bounds = new google.maps.LatLngBounds();
-    STOP_DATA.forEach(s => bounds.extend({lat: s.lat, lng: s.lng}));
-    routeMap.fitBounds(bounds, { top: 30, right: 20, bottom: 30, left: 20 });
-  }
+  routeMap.on('load', () => {
+    // 3D buildings layer
+    routeMap.addLayer({
+      id: '3d-buildings',
+      source: 'composite',
+      'source-layer': 'building',
+      filter: ['==', 'extrude', 'true'],
+      type: 'fill-extrusion',
+      minzoom: 14,
+      paint: {
+        'fill-extrusion-color': '#111',
+        'fill-extrusion-height': ['get','height'],
+        'fill-extrusion-base': ['get','min_height'],
+        'fill-extrusion-opacity': 0.8
+      }
+    });
+
+    // Plot all stops
+    STOP_DATA.forEach(s => {
+      const color = s.status === 'delivered' ? '#00ff88' : s.status === 'failed' ? '#ff3333' : '#ffaa00';
+      const el = document.createElement('div');
+      el.style.cssText = `width:28px;height:28px;border-radius:50%;background:${color};color:#000;font-size:10px;font-weight:900;display:flex;align-items:center;justify-content:center;border:2px solid #000;cursor:pointer;box-shadow:0 0 8px ${color}88;`;
+      el.textContent = s.num;
+      el.addEventListener('click', () => { window.location.href = '/driver/stop/' + s.id; });
+      new mapboxgl.Marker({element:el}).setLngLat([s.lng,s.lat]).addTo(routeMap);
+    });
+
+    // Fit to all stops
+    if (STOP_DATA.length > 1) {
+      const bounds = STOP_DATA.reduce((b,s) => b.extend([s.lng,s.lat]), new mapboxgl.LngLatBounds([STOP_DATA[0].lng,STOP_DATA[0].lat],[STOP_DATA[0].lng,STOP_DATA[0].lat]));
+      routeMap.fitBounds(bounds, {padding:40, maxZoom:14});
+    }
+  });
 
   // Driver live dot
   if (navigator.geolocation) {
+    const driverEl = document.createElement('div');
+    driverEl.style.cssText = 'width:16px;height:16px;border-radius:50%;background:#0088ff;border:3px solid #fff;box-shadow:0 0 12px #0088ff;';
+    const driverMark = new mapboxgl.Marker({element:driverEl});
     navigator.geolocation.watchPosition(pos => {
-      const dp = { lat: pos.coords.latitude, lng: pos.coords.longitude };
-      if (!driverMapMarker) {
-        driverMapMarker = new google.maps.Marker({
-          position: dp, map: routeMap,
-          icon: {
-            path: google.maps.SymbolPath.FORWARD_CLOSED_ARROW,
-            scale: 5, fillColor: '#0088ff', fillOpacity: 1,
-            strokeColor: '#fff', strokeWeight: 2, rotation: 0,
-          },
-          zIndex: 999,
-        });
-      } else {
-        driverMapMarker.setPosition(dp);
-      }
-    }, null, { enableHighAccuracy: true, maximumAge: 5000 });
+      const ll = [pos.coords.longitude, pos.coords.latitude];
+      driverMark.setLngLat(ll).addTo(routeMap);
+    }, null, {enableHighAccuracy:true, maximumAge:5000});
   }
-}
+});
 
 function initMiniMap() {
   if (miniMap) return;
-  if (GMAPS_KEY && window.google) {
-    const mapEl = document.getElementById('driver-mini-map');
-    if (!mapEl) return;
-    miniMap = new google.maps.Map(mapEl, {
-      center: { lat: 42.33, lng: -83.05 },
-      zoom: 15, tilt: 45,
-      mapTypeId: 'roadmap',
-      styles: [
-        {elementType:'geometry', stylers:[{color:'#0a0a0a'}]},
-        {elementType:'labels.text.fill', stylers:[{color:'#555'}]},
-        {featureType:'road', elementType:'geometry', stylers:[{color:'#1a1a1a'}]},
-        {featureType:'road.highway', elementType:'geometry', stylers:[{color:'#2a2a2a'}]},
-        {featureType:'poi', stylers:[{visibility:'off'}]},
-      ],
-      disableDefaultUI: true, gestureHandling: 'none',
-    });
-  } else {
-    // Fallback: Leaflet
-    if (typeof L !== 'undefined') {
-      miniMap = L.map('driver-mini-map', { zoomControl: false, attributionControl: false });
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(miniMap);
-      miniMap.setView([42.33, -83.05], 14);
-    }
-  }
-}
-
-// If no Google Maps key, init route map with Leaflet fallback
-if (!GMAPS_KEY && typeof L !== 'undefined') {
-  document.addEventListener('DOMContentLoaded', () => {
-    const mapEl = document.getElementById('route-map');
-    if (!mapEl || !STOP_DATA.length) return;
-    const m = L.map('route-map', {attributionControl:false});
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(m);
-    const bounds = [];
-    STOP_DATA.forEach(s => {
-      const color = s.status === 'delivered' ? '#00ff88' : s.status === 'failed' ? '#ff3333' : '#ffaa00';
-      L.circleMarker([s.lat, s.lng], {radius:8, color:'#000', fillColor:color, fillOpacity:1, weight:1}).addTo(m);
-      bounds.push([s.lat, s.lng]);
-    });
-    if (bounds.length > 1) m.fitBounds(bounds, {padding:[20,20]});
-    else m.setView(bounds[0], 14);
+  const mapEl = document.getElementById('driver-mini-map');
+  if (!mapEl) return;
+  miniMap = new mapboxgl.Map({
+    container: 'driver-mini-map',
+    style: 'mapbox://styles/mapbox/dark-v11',
+    center: [-83.05, 42.33],
+    zoom: 15, pitch: 45,
+    interactive: false,
   });
 }
 
@@ -353,28 +305,16 @@ function startGpsPing() {
     if (!liveToken) return;
     navigator.geolocation.getCurrentPosition(pos => {
       const lat = pos.coords.latitude, lng = pos.coords.longitude;
-      // Update mini-map
+      // Update mini-map (Mapbox GL)
       if (miniMap) {
-        if (GMAPS_KEY && window.google) {
-          // Google Maps mini-map
-          const dp = {lat, lng};
-          if (!miniMarker) {
-            miniMarker = new google.maps.Marker({
-              position: dp, map: miniMap,
-              icon: { path: google.maps.SymbolPath.CIRCLE, scale: 8,
-                fillColor:'#0088ff', fillOpacity:1, strokeColor:'#fff', strokeWeight:2 }
-            });
-          } else { miniMarker.setPosition(dp); }
-          miniMap.panTo(dp);
-          miniMap.setZoom(16);
-        } else if (typeof L !== 'undefined') {
-          // Leaflet fallback
-          if (!miniMarker) {
-            const icon = L.divIcon({ html: '<div style="background:#0088ff;width:16px;height:16px;border-radius:50%;border:3px solid #fff;"></div>', className:'', iconAnchor:[8,8] });
-            miniMarker = L.marker([lat, lng], {icon}).addTo(miniMap);
-          } else { miniMarker.setLatLng([lat, lng]); }
-          miniMap.setView([lat, lng], 16, {animate:true});
+        if (!miniMarker) {
+          const el = document.createElement('div');
+          el.style.cssText = 'width:14px;height:14px;border-radius:50%;background:#0088ff;border:3px solid #fff;box-shadow:0 0 10px #0088ff;';
+          miniMarker = new mapboxgl.Marker({element:el}).setLngLat([lng,lat]).addTo(miniMap);
+        } else {
+          miniMarker.setLngLat([lng,lat]);
         }
+        miniMap.flyTo({center:[lng,lat], zoom:16, speed:0.8});
       }
       // GPS dot pulse
       const dot = document.getElementById('gps-live-dot');

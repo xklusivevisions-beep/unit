@@ -2,8 +2,8 @@
 {% block title %}UNIT — Stop #{{ stop.stop_number }}{% endblock %}
 
 {% block extra_css %}
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
-<link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.css"/>
+<link href='https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.css' rel='stylesheet' />
+
 <style>
   #map {
     height: 340px;
@@ -13,29 +13,9 @@
     margin-bottom: 0;
   }
   /* Dark map tiles */
-  .leaflet-tile { filter: brightness(0.7) saturate(0.6); }
 
-  /* Dark theme for LRM directions panel */
-  .leaflet-routing-container {
-    background: #111 !important;
-    border: 1px solid #333 !important;
-    border-radius: 0 0 14px 14px !important;
-    color: #eee !important;
-    font-size: 0.82rem !important;
-    max-height: 180px;
-    overflow-y: auto;
-    margin-bottom: 12px;
-  }
-  .leaflet-routing-container h2,
-  .leaflet-routing-container h3 { color: #00ff88 !important; font-size: 0.85rem !important; }
-  .leaflet-routing-container table { color: #ccc !important; }
-  .leaflet-routing-container .leaflet-routing-alt { background: #111 !important; }
-  .leaflet-routing-container .leaflet-routing-collapse-btn {
-    background: #1a1a1a !important;
-    color: #aaa !important;
-    border: 1px solid #333 !important;
-  }
-  .leaflet-routing-icon { filter: invert(1) brightness(0.7); }
+
+
 
   .geofence-bar {
     height: 10px;
@@ -268,262 +248,185 @@
 {% endblock %}
 
 {% block scripts %}
-{% if gmaps_key %}
-<script src="https://maps.googleapis.com/maps/api/js?key={{ gmaps_key }}&callback=initStopMap&libraries=geometry" async defer></script>
-{% else %}
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script src="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.min.js"></script>
-{% endif %}
+<script src='https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.js'></script>
 <script>
-const STOP_ID   = {{ stop.id }};
-const DEST_LAT  = {{ stop.dest_lat or 'null' }};
-const DEST_LNG  = {{ stop.dest_lng or 'null' }};
+const STOP_ID  = {{ stop.id }};
+const DEST_LAT = {{ stop.dest_lat or 'null' }};
+const DEST_LNG = {{ stop.dest_lng or 'null' }};
 const GEOFENCE_FEET = 150;
+mapboxgl.accessToken = {{ mapbox_token | tojson }};
 
-const gpsDot       = document.getElementById('gps-dot');
-const gpsText      = document.getElementById('gps-text');
-const distBadge    = document.getElementById('dist-badge');
-const smsAlert     = document.getElementById('sms-alert');
-const atBanner     = document.getElementById('at-stop-banner');
-const gfFill       = document.getElementById('geofence-fill');
-let smsTriggered   = false;
-let atStopShown    = false;
+const gpsDot  = document.getElementById('gps-dot');
+const gpsText = document.getElementById('gps-text');
+const distBadge = document.getElementById('dist-badge');
+const smsAlert  = document.getElementById('sms-alert');
+const atBanner  = document.getElementById('at-stop-banner');
+const gfFill    = document.getElementById('geofence-fill');
+let smsTriggered = false;
+let atStopShown  = false;
 
-// ── MAP SETUP ──
-const map = L.map('map', { zoomControl: true, attributionControl: false });
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
-
-// Target pin
-let destMarker = null;
-let driverMarker = null;
-let geofenceCircle = null;
-
-if (DEST_LAT && DEST_LNG) {
-  const targetIcon = L.divIcon({
-    html: '<div style="background:#00ff88;width:18px;height:18px;border-radius:50%;border:3px solid #fff;box-shadow:0 0 8px rgba(0,255,136,0.8);"></div>',
-    className: '', iconAnchor: [9,9]
-  });
-  destMarker = L.marker([DEST_LAT, DEST_LNG], {icon: targetIcon}).addTo(map);
-  destMarker.bindPopup('<b>Target Address</b>').openPopup();
-
-  // Geofence circle (150ft ≈ 46m)
-  geofenceCircle = L.circle([DEST_LAT, DEST_LNG], {
-    radius: 46,
-    color: '#00ff88',
-    fillColor: '#00ff88',
-    fillOpacity: 0.06,
-    weight: 2,
-    dashArray: '6,4'
-  }).addTo(map);
-
-  map.setView([DEST_LAT, DEST_LNG], 17);
-} else {
-  map.setView([42.33, -83.05], 16);
-}
-
-const driverIcon = L.divIcon({
-  html: '<div style="background:#0088ff;width:14px;height:14px;border-radius:50%;border:2px solid #fff;box-shadow:0 0 6px rgba(0,136,255,0.8);"></div>',
-  className: '', iconAnchor: [7,7]
+// ── MAPBOX MAP SETUP ──────────────────────────────────────────
+const mbMap = new mapboxgl.Map({
+  container: 'map',
+  style: 'mapbox://styles/mapbox/dark-v11',
+  center: DEST_LNG && DEST_LAT ? [DEST_LNG, DEST_LAT] : [-83.05, 42.33],
+  zoom: 17,
+  pitch: 50,
+  bearing: -10,
+  antialias: true,
 });
 
-// ── ROUTING ──
-let routingControl = null;
-let routeInitialized = false;
-let lastRouteUpdate = 0;
-const ROUTE_UPDATE_INTERVAL = 30000; // only recalculate every 30s — avoid spamming OSRM
+mbMap.addControl(new mapboxgl.NavigationControl({showCompass:true}), 'top-right');
 
-function initRoute(driverLat, driverLng) {
-  if (!DEST_LAT || !DEST_LNG || routeInitialized) return;
-  routeInitialized = true;
-  try {
-    routingControl = L.Routing.control({
-      waypoints: [
-        L.latLng(driverLat, driverLng),
-        L.latLng(DEST_LAT, DEST_LNG)
-      ],
-      routeWhileDragging: false,
-      addWaypoints: false,
-      draggableWaypoints: false,
-      fitSelectedRoutes: false,   // keep our zoom logic in charge
-      show: true,
-      collapsible: true,
-      collapsed: false,
-      lineOptions: {
-        styles: [{ color: '#0088ff', weight: 5, opacity: 0.8 }],
-        extendToWaypoints: false,
-        missingRouteTolerance: 0
-      },
-      createMarker: function() { return null; }, // preserve our custom pins
-      router: L.Routing.osrmv1({
-        serviceUrl: 'https://router.project-osrm.org/route/v1',
-        profile: 'driving'
-      })
-    }).addTo(map);
+// Destination marker
+let destMarker = null;
+let driverMarker = null;
+let routeDrawn = false;
 
-    routingControl.on('routingerror', function(e) {
-      console.warn('Routing error:', e);
-      // Fail silently — map + geofence still work without route
-    });
-  } catch(e) {
-    console.warn('Routing init failed:', e);
-  }
-}
-
-function updateRoute(driverLat, driverLng) {
-  if (!routingControl || !DEST_LAT || !DEST_LNG) return;
-  const now = Date.now();
-  if (now - lastRouteUpdate < ROUTE_UPDATE_INTERVAL) return; // throttle
-  lastRouteUpdate = now;
-  try {
-    routingControl.setWaypoints([
-      L.latLng(driverLat, driverLng),
-      L.latLng(DEST_LAT, DEST_LNG)
-    ]);
-  } catch(e) {
-    console.warn('Route update failed:', e);
-  }
-}
-
-// ── GPS + API ──
-function sendLocation(lat, lng) {
-  // Update driver marker on map
-  if (!driverMarker) {
-    driverMarker = L.marker([lat, lng], {icon: driverIcon}).addTo(map);
-    if (DEST_LAT && DEST_LNG) {
-      map.fitBounds([[lat, lng],[DEST_LAT, DEST_LNG]], {padding:[40,40]});
+mbMap.on('load', () => {
+  // 3D buildings
+  mbMap.addLayer({
+    id:'3d-buildings', source:'composite', 'source-layer':'building',
+    filter:['==','extrude','true'], type:'fill-extrusion', minzoom:14,
+    paint:{
+      'fill-extrusion-color':'#111',
+      'fill-extrusion-height':['get','height'],
+      'fill-extrusion-base':['get','min_height'],
+      'fill-extrusion-opacity':0.85
     }
-    // Init route on first GPS fix
-    initRoute(lat, lng);
+  });
+
+  if (DEST_LAT && DEST_LNG) {
+    // Green destination pin
+    const destEl = document.createElement('div');
+    destEl.style.cssText = 'width:20px;height:20px;border-radius:50%;background:#00ff88;border:3px solid #fff;box-shadow:0 0 12px #00ff8888;cursor:pointer;';
+    destMarker = new mapboxgl.Marker({element:destEl, draggable:true})
+      .setLngLat([DEST_LNG, DEST_LAT]).addTo(mbMap);
+
+    destMarker.on('dragend', () => {
+      const ll = destMarker.getLngLat();
+      fetch('/driver/stop/' + STOP_ID + '/pin', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({lat:ll.lat, lng:ll.lng})
+      }).then(r=>r.json()).then(() => {
+        document.getElementById('edit-pin-btn').textContent = '✓ Saved';
+      });
+    });
+
+    // Geofence circle
+    mbMap.addSource('geofence', { type:'geojson', data: turf_circle(DEST_LNG, DEST_LAT, 46) });
+    mbMap.addLayer({ id:'geofence-fill', type:'fill', source:'geofence',
+      paint:{'fill-color':'#00ff88','fill-opacity':0.06}});
+    mbMap.addLayer({ id:'geofence-line', type:'line', source:'geofence',
+      paint:{'line-color':'#00ff88','line-width':2,'line-dasharray':[3,2]}});
+  }
+});
+
+function turf_circle(lng, lat, radiusMeters) {
+  const R = 6371000, steps = 64;
+  const coords = [];
+  for (let i=0; i<=steps; i++) {
+    const angle = (i/steps)*2*Math.PI;
+    const dLat = (radiusMeters/R)*(180/Math.PI)*Math.cos(angle);
+    const dLng = (radiusMeters/R)*(180/Math.PI)*(1/Math.cos(lat*Math.PI/180))*Math.sin(angle);
+    coords.push([lng+dLng, lat+dLat]);
+  }
+  return {type:'Feature', geometry:{type:'Polygon', coordinates:[coords]}};
+}
+
+// Edit pin button
+document.getElementById('edit-pin-btn').addEventListener('click', function() {
+  if (destMarker) {
+    const el = destMarker.getElement();
+    el.style.background = '#ffaa00';
+    this.textContent = 'Drag to move pin';
+    this.style.color = '#00ff88';
+  }
+});
+
+// ── GPS + PROXIMITY ───────────────────────────────────────────
+function sendLocation(lat, lng) {
+  // Update driver marker on Mapbox map
+  if (!driverMarker) {
+    const el = document.createElement('div');
+    el.style.cssText = 'width:14px;height:14px;border-radius:50%;background:#0088ff;border:3px solid #fff;box-shadow:0 0 10px #0088ff;';
+    driverMarker = new mapboxgl.Marker({element:el}).setLngLat([lng,lat]).addTo(mbMap);
+
+    // Draw route from driver to destination
+    if (DEST_LAT && DEST_LNG && !routeDrawn) {
+      routeDrawn = true;
+      fetch('https://api.mapbox.com/directions/v5/mapbox/driving/' +
+        lng+','+lat+';'+DEST_LNG+','+DEST_LAT+
+        '?geometries=geojson&overview=full&access_token=' + mapboxgl.accessToken)
+      .then(r=>r.json()).then(d => {
+        if (d.routes && d.routes[0]) {
+          const geo = d.routes[0].geometry;
+          mbMap.addSource('route', {type:'geojson', data:{type:'Feature',geometry:geo}});
+          mbMap.addLayer({id:'route-line', type:'line', source:'route',
+            layout:{'line-join':'round','line-cap':'round'},
+            paint:{'line-color':'#0088ff','line-width':4,'line-opacity':0.8}});
+          // Fit map to route
+          const coords = geo.coordinates;
+          const bounds = coords.reduce((b,c)=>b.extend(c), new mapboxgl.LngLatBounds(coords[0],coords[0]));
+          mbMap.fitBounds(bounds, {padding:60});
+        }
+      }).catch(()=>{});
+    }
   } else {
-    driverMarker.setLatLng([lat, lng]);
-    // Update route waypoint as driver moves
-    updateRoute(lat, lng);
+    driverMarker.setLngLat([lng,lat]);
   }
 
+  // Send to server
   fetch('/api/location', {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
+    method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({lat, lng, stop_id: STOP_ID})
   })
-  .then(r => r.json())
+  .then(r=>r.json())
   .then(data => {
-    // GPS dot active
-    gpsDot.style.cssText = 'display:inline-block;width:10px;height:10px;border-radius:50%;flex-shrink:0;background:#00ff88;';
-    gpsDot.classList.add('gps-active');
-
+    gpsDot.style.cssText = 'display:inline-block;width:10px;height:10px;border-radius:50%;flex-shrink:0;background:#00ff88;animation:gpsPulse 1.5s infinite;';
     const feet = data.distance_feet;
     const miles = data.distance_miles;
-
     if (feet !== null && feet !== undefined) {
-      // Proximity bar — full at 0ft, empty at 2640ft (0.5mi)
-      const pct = Math.max(0, Math.min(100, Math.round((1 - feet / 2640) * 100)));
+      const pct = Math.max(0, Math.min(100, Math.round((1-feet/2640)*100)));
       gfFill.style.width = pct + '%';
       gfFill.style.background = data.at_stop ? '#00ff88' : feet < 528 ? '#ffaa00' : '#444';
-
       if (data.at_stop) {
         distBadge.textContent = '✓ At stop';
         distBadge.style.color = '#00ff88';
         gpsText.textContent = 'You are at the right address';
         gpsText.style.color = '#00ff88';
-        if (!atStopShown) {
-          atBanner.style.display = 'block';
-          atStopShown = true;
-        }
+        if (!atStopShown) { atBanner.style.display='block'; atStopShown=true; }
       } else if (feet < 528) {
         distBadge.textContent = feet + ' ft away';
-        distBadge.style.color = '#ffaa00';
         gpsText.textContent = 'Almost there — ' + feet + ' ft';
         gpsText.style.color = '#ffaa00';
         atBanner.style.display = 'none';
       } else {
         distBadge.textContent = miles + ' mi away';
-        distBadge.style.color = '#aaa';
-        gpsText.textContent = 'En route — ' + miles + ' mi to stop';
+        gpsText.textContent = 'En route — ' + miles + ' mi';
         gpsText.style.color = '#aaa';
         atBanner.style.display = 'none';
       }
     } else {
-      // GPS is active but stop pin not yet geocoded — show live instead of stuck "Acquiring"
       gpsText.textContent = 'GPS active — locating stop pin...';
       gpsText.style.color = '#00ff88';
     }
-
-    if (data.sms_triggered && !smsTriggered) {
-      smsTriggered = true;
-      smsAlert.style.display = 'block';
-    }
-  })
-  .catch(() => {
+    if (data.sms_triggered && !smsTriggered) { smsTriggered=true; smsAlert.style.display='block'; }
+  }).catch(()=>{
     gpsText.textContent = 'GPS sync error — retrying...';
     gpsText.style.color = '#ff6666';
   });
 }
 
-// ── PIN CORRECTION ──
-document.getElementById('edit-pin-btn').addEventListener('click', function() {
-  if (!destMarker) return;
-  destMarker.setIcon(L.divIcon({
-    html: '<div style="background:#ffaa00;width:18px;height:18px;border-radius:50%;border:3px solid #fff;box-shadow:0 0 8px rgba(255,170,0,0.8);"></div>',
-    className: '', iconAnchor: [9,9]
-  }));
-  destMarker.dragging.enable();
-  this.textContent = 'Saving...';
-  this.style.color = '#00ff88';
-  this.style.borderColor = '#00ff88';
-
-  destMarker.on('dragend', function(e) {
-    const {lat, lng} = e.target.getLatLng();
-    fetch(`/driver/stop/${STOP_ID}/pin`, {
-      method: 'POST',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({lat, lng})
-    })
-    .then(r => r.json())
-    .then(() => {
-      // Update geofence circle
-      if (geofenceCircle) map.removeLayer(geofenceCircle);
-      geofenceCircle = L.circle([lat, lng], {
-        radius: 46, color: '#00ff88', fillColor: '#00ff88',
-        fillOpacity: 0.06, weight: 2, dashArray: '6,4'
-      }).addTo(map);
-      document.getElementById('edit-pin-btn').textContent = '✓ Saved';
-      destMarker.dragging.disable();
-    });
-  });
-});
-
-let accuracyCircle = null;
-
 function handlePosition(pos) {
-  const lat      = pos.coords.latitude;
-  const lng      = pos.coords.longitude;
-  const accuracy = pos.coords.accuracy; // metres
-  const accFt    = Math.round(accuracy * 3.281);
-
-  // Draw accuracy circle on map
-  if (accuracyCircle) map.removeLayer(accuracyCircle);
-  accuracyCircle = L.circle([lat, lng], {
-    radius: accuracy,
-    color: accuracy < 15 ? '#00ff88' : accuracy < 40 ? '#ffaa00' : '#ff3333',
-    fillOpacity: 0.06, weight: 1, dashArray: '4,4'
-  }).addTo(map);
-
-  // Warn driver if signal is very weak but still send location
-  if (accuracy > 100) {
-    gpsDot.style.background = '#ffaa00';
-    gpsText.textContent = `⚠️ Weak GPS signal — ±${accFt}ft. Move outside for better accuracy.`;
-    gpsText.style.color = '#ffaa00';
-    // Still send location — don't block on cold start
-  }
-
-  sendLocation(lat, lng);
+  sendLocation(pos.coords.latitude, pos.coords.longitude);
 }
 
 if (navigator.geolocation) {
   navigator.geolocation.watchPosition(
     handlePosition,
-    err => { gpsText.textContent = 'GPS unavailable: ' + err.message; gpsText.style.color = '#ff6666'; },
-    { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+    err => { gpsText.textContent = 'GPS unavailable: ' + err.message; gpsText.style.color='#ff6666'; },
+    {enableHighAccuracy:true, timeout:15000, maximumAge:0}
   );
 } else {
   gpsText.textContent = 'GPS not available on this device';

@@ -218,6 +218,7 @@ def unhandled(e):
     return render_template('error.html', code=500, msg='Unexpected error — please try again'), 500
 
 DB = 'data/unit.db'
+MAPBOX_TOKEN    = os.environ.get('MAPBOX_TOKEN', '')
 GOOGLE_MAPS_KEY = os.environ.get('GOOGLE_MAPS_KEY', '')
 TWILIO_SID   = os.environ.get('TWILIO_SID', '')
 TWILIO_TOKEN = os.environ.get('TWILIO_TOKEN', '')
@@ -686,7 +687,7 @@ def driver_dashboard():
             (route['id'],)
         ).fetchall()
     db.close()
-    return render_template('driver_dashboard.html', route=route, stops=stops, driver=session['driver_name'], gmaps_key=GOOGLE_MAPS_KEY)
+    return render_template('driver_dashboard.html', route=route, stops=stops, driver=session['driver_name'], gmaps_key=GOOGLE_MAPS_KEY, mapbox_token=MAPBOX_TOKEN)
 
 # ─── ROUTE IMPORT ──────────────────────────────────────────────
 
@@ -1142,7 +1143,7 @@ def stop_active(stop_id):
             db.commit()
             stop = db.execute("SELECT * FROM stops WHERE id=?", (stop_id,)).fetchone()
     db.close()
-    return render_template('stop_active.html', stop=stop, gmaps_key=GOOGLE_MAPS_KEY)
+    return render_template('stop_active.html', stop=stop, gmaps_key=GOOGLE_MAPS_KEY, mapbox_token=MAPBOX_TOKEN)
 
 @app.route('/driver/stop/<int:stop_id>/pin', methods=['POST'])
 def stop_pin(stop_id):
