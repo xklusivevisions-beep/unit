@@ -760,6 +760,21 @@ def driver_dashboard():
     return render_template('driver_dashboard.html', route=route, stops=stops, driver=session['driver_name'], gmaps_key=GOOGLE_MAPS_KEY, mapbox_token=MAPBOX_TOKEN)
 
 
+# ─── TEMP DEBUG ────────────────────────────────────────
+@app.route('/driver/debug-dashboard')
+def debug_dashboard():
+    try:
+        db = get_db()
+        today = datetime.now().strftime('%Y-%m-%d')
+        route = db.execute(
+            "SELECT * FROM routes WHERE driver_id=? AND date=? ORDER BY id DESC LIMIT 1",
+            (1, today)
+        ).fetchone()
+        db.close()
+        return jsonify({'ok': True, 'route': dict(route) if route else None})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e), 'trace': traceback.format_exc()}), 500
+
 # ─── PACKAGE SCAN ──────────────────────────────────────────────
 
 def _get_or_create_scan_session(db, driver_id):
