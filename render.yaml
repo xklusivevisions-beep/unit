@@ -37,3 +37,7 @@ services:
         sync: false
       - key: STRIPE_PRICE_ID
         sync: false
+      - key: MAPBOX_TOKEN
+        sync: false
+      - key: GOOGLE_MAPS_KEY
+        sync: false
