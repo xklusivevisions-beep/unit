@@ -106,6 +106,57 @@ Rules:
     except Exception as e:
         log.error(f'Claude Vision error: {e}')
     return []
+
+
+def extract_package_label(img_bytes):
+    """Use Claude Vision to extract delivery info from a shipping label photo."""
+    if not ANTHROPIC_KEY:
+        return None
+    try:
+        img_bytes = compress_for_api(img_bytes)
+        client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+        b64 = base64.standard_b64encode(img_bytes).decode('utf-8')
+        resp = client.messages.create(
+            model='claude-haiku-4-5-20251001',
+            max_tokens=512,
+            messages=[{
+                'role': 'user',
+                'content': [
+                    {
+                        'type': 'image',
+                        'source': {'type': 'base64', 'media_type': 'image/jpeg', 'data': b64}
+                    },
+                    {
+                        'type': 'text',
+                        'text': '''This is a shipping label. Extract the delivery information.
+Return ONLY a JSON object, no markdown, no code blocks.
+
+Extract:
+- tracking: the main tracking/barcode number (usually at bottom, longest number)
+- name: recipient name ("Ship To" field)
+- address: full delivery address as one string (street, city, state, zip)
+- zip: just the 5-digit zip code
+
+Example output:
+{"tracking": "YWORD010176279569", "name": "Skye Scaglione", "address": "5750 Woodward Avenue 6, Detroit, MI 48202", "zip": "48202"}
+
+If a field is not visible, use an empty string.
+Return ONLY the JSON object.'''
+                    }
+                ]
+            }]
+        )
+        text = resp.content[0].text.strip()
+        # Strip markdown if model wrapped it
+        if text.startswith('```'):
+            text = re.sub(r'^```[a-z]*\n?', '', text)
+            text = re.sub(r'\n?```$', '', text)
+        return json.loads(text)
+    except Exception as e:
+        log.error(f'extract_package_label error: {e}')
+        return None
+
+
 from twilio.rest import Client
 import stripe
 
@@ -379,6 +430,25 @@ def init_db():
         )""",
         "ALTER TABLE live_sessions ADD COLUMN viewed_at TEXT",
         "ALTER TABLE live_sessions ADD COLUMN view_count INTEGER DEFAULT 0",
+        """CREATE TABLE IF NOT EXISTS scan_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            driver_id INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            status TEXT DEFAULT 'scanning',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )""",
+        """CREATE TABLE IF NOT EXISTS scan_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER NOT NULL,
+            tracking TEXT,
+            customer_name TEXT,
+            address TEXT,
+            zip_code TEXT,
+            dest_lat REAL,
+            dest_lng REAL,
+            raw_json TEXT,
+            added_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )""",
     ]:
         try:
             db.execute(migration)
@@ -674,6 +744,220 @@ def driver_logout():
 def driver_dashboard():
     if 'driver_id' not in session:
         return redirect(url_for('driver_login'))
+
+
+# ─── PACKAGE SCAN ──────────────────────────────────────────────
+
+def _get_or_create_scan_session(db, driver_id):
+    """Get today's open scan session or create one."""
+    today = datetime.now().strftime('%Y-%m-%d')
+    ss = db.execute(
+        "SELECT * FROM scan_sessions WHERE driver_id=? AND date=? AND status='scanning' ORDER BY id DESC LIMIT 1",
+        (driver_id, today)
+    ).fetchone()
+    if ss:
+        return ss['id']
+    db.execute(
+        "INSERT INTO scan_sessions (driver_id, date, status) VALUES (?,?,?)",
+        (driver_id, today, 'scanning')
+    )
+    db.commit()
+    row = db.execute(
+        "SELECT id FROM scan_sessions WHERE driver_id=? AND date=? ORDER BY id DESC LIMIT 1",
+        (driver_id, today)
+    ).fetchone()
+    return row['id']
+
+
+@app.route('/driver/scan', methods=['GET'])
+def scan_packages():
+    if 'driver_id' not in session:
+        return redirect(url_for('driver_login'))
+    db = get_db()
+    ss_id = _get_or_create_scan_session(db, session['driver_id'])
+    items = db.execute(
+        "SELECT * FROM scan_items WHERE session_id=? ORDER BY id ASC",
+        (ss_id,)
+    ).fetchall()
+    db.close()
+    return render_template('scan.html', items=items, session_id=ss_id, driver=session['driver_name'])
+
+
+@app.route('/driver/scan/process', methods=['POST'])
+def scan_process():
+    """Receive label photo, run Claude Vision, return parsed JSON."""
+    if 'driver_id' not in session:
+        return jsonify({'ok': False, 'error': 'not logged in'}), 401
+    file = request.files.get('photo')
+    if not file:
+        return jsonify({'ok': False, 'error': 'No photo received'})
+    img_bytes = file.read()
+    result = extract_package_label(img_bytes)
+    if not result:
+        return jsonify({'ok': False, 'error': 'Could not read label — try a clearer photo'})
+    return jsonify({'ok': True, 'data': result})
+
+
+@app.route('/driver/scan/add', methods=['POST'])
+def scan_add():
+    """Add a confirmed package to the scan session."""
+    if 'driver_id' not in session:
+        return jsonify({'ok': False, 'error': 'not logged in'}), 401
+    data = request.get_json() or {}
+    tracking = data.get('tracking', '').strip()
+    name = data.get('name', '').strip()
+    address = data.get('address', '').strip()
+    zip_code = data.get('zip', '').strip()
+    if not address:
+        return jsonify({'ok': False, 'error': 'Address is required'})
+    db = get_db()
+    ss_id = _get_or_create_scan_session(db, session['driver_id'])
+    db.execute(
+        """INSERT INTO scan_items (session_id, tracking, customer_name, address, zip_code, raw_json)
+           VALUES (?,?,?,?,?,?)""",
+        (ss_id, tracking, name, address, zip_code, json.dumps(data))
+    )
+    db.commit()
+    count = db.execute("SELECT COUNT(*) FROM scan_items WHERE session_id=?", (ss_id,)).fetchone()[0]
+    db.close()
+    return jsonify({'ok': True, 'count': count})
+
+
+@app.route('/driver/scan/remove/<int:item_id>', methods=['POST'])
+def scan_remove(item_id):
+    if 'driver_id' not in session:
+        return jsonify({'ok': False}), 401
+    db = get_db()
+    db.execute("DELETE FROM scan_items WHERE id=?", (item_id,))
+    db.commit()
+    db.close()
+    return jsonify({'ok': True})
+
+
+@app.route('/driver/scan/clear', methods=['POST'])
+def scan_clear():
+    if 'driver_id' not in session:
+        return jsonify({'ok': False}), 401
+    db = get_db()
+    today = datetime.now().strftime('%Y-%m-%d')
+    ss = db.execute(
+        "SELECT id FROM scan_sessions WHERE driver_id=? AND date=? AND status='scanning' ORDER BY id DESC LIMIT 1",
+        (session['driver_id'], today)
+    ).fetchone()
+    if ss:
+        db.execute("DELETE FROM scan_items WHERE session_id=?", (ss['id'],))
+        db.execute("UPDATE scan_sessions SET status='cleared' WHERE id=?", (ss['id'],))
+        db.commit()
+    db.close()
+    return jsonify({'ok': True})
+
+
+@app.route('/driver/scan/build-route', methods=['POST'])
+def scan_build_route():
+    """Geocode all scanned packages and create an optimized route."""
+    if 'driver_id' not in session:
+        return jsonify({'ok': False, 'error': 'not logged in'}), 401
+    db = get_db()
+    today = datetime.now().strftime('%Y-%m-%d')
+    ss = db.execute(
+        "SELECT id FROM scan_sessions WHERE driver_id=? AND date=? AND status='scanning' ORDER BY id DESC LIMIT 1",
+        (session['driver_id'], today)
+    ).fetchone()
+    if not ss:
+        db.close()
+        return jsonify({'ok': False, 'error': 'No scan session found'})
+    ss_id = ss['id']
+    items = db.execute(
+        "SELECT * FROM scan_items WHERE session_id=?", (ss_id,)
+    ).fetchall()
+    if not items:
+        db.close()
+        return jsonify({'ok': False, 'error': 'No packages scanned yet'})
+
+    # Create a new route
+    route_name = f'Scan Route {today}'
+    db.execute(
+        "INSERT INTO routes (driver_id, driver_name, name, date) VALUES (?,?,?,?)",
+        (session['driver_id'], session['driver_name'], route_name, today)
+    )
+    db.commit()
+    route = db.execute(
+        "SELECT id FROM routes WHERE driver_id=? AND date=? ORDER BY id DESC LIMIT 1",
+        (session['driver_id'], today)
+    ).fetchone()
+    route_id = route['id']
+
+    # Geocode and insert stops
+    geocoded = 0
+    failed_addresses = []
+    for i, item in enumerate(items):
+        lat, lng = None, None
+        if item['address']:
+            coords = geocode_address(item['address'])
+            if coords:
+                lat, lng = coords
+                geocoded += 1
+                # Update scan_items with geocoded coords
+                db.execute(
+                    "UPDATE scan_items SET dest_lat=?, dest_lng=? WHERE id=?",
+                    (lat, lng, item['id'])
+                )
+            else:
+                failed_addresses.append(item['address'])
+        import secrets as _sec
+        token = _sec.token_urlsafe(12)
+        db.execute(
+            """INSERT INTO stops
+               (route_id, stop_number, address, customer_name, tracking, dest_lat, dest_lng, status, token)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            (route_id, i + 1, item['address'], item['customer_name'],
+             item['tracking'], lat, lng, 'pending', token)
+        )
+    db.commit()
+
+    # Optimize using OSRM (nearest-neighbor fallback built into optimize_route)
+    geocoded_stops = db.execute(
+        "SELECT id, dest_lat, dest_lng FROM stops WHERE route_id=? AND dest_lat IS NOT NULL ORDER BY stop_number",
+        (route_id,)
+    ).fetchall()
+    if len(geocoded_stops) >= 2:
+        try:
+            coords = ';'.join(f"{s['dest_lng']},{s['dest_lat']}" for s in geocoded_stops)
+            osrm_url = (f"http://router.project-osrm.org/trip/v1/driving/{coords}"
+                        f"?roundtrip=false&source=first&destination=last&overview=false")
+            resp = requests.get(osrm_url, timeout=8)
+            if resp.status_code == 200:
+                trip = resp.json()
+                if trip.get('code') == 'Ok' and trip.get('waypoints'):
+                    waypoints = sorted(trip['waypoints'], key=lambda w: w['waypoint_index'])
+                    stop_list = list(geocoded_stops)
+                    for new_num, wp in enumerate(waypoints, 1):
+                        # Match waypoint to closest stop
+                        closest = min(
+                            stop_list,
+                            key=lambda s: abs(s['dest_lat'] - wp['location'][1]) + abs(s['dest_lng'] - wp['location'][0])
+                        )
+                        db.execute("UPDATE stops SET stop_number=? WHERE id=?", (new_num, closest['id']))
+                    db.commit()
+                    log.info(f'Scan route {route_id} optimized via OSRM')
+        except Exception as e:
+            log.warning(f'OSRM optimize on scan build failed: {e}')
+
+    # Mark scan session as built
+    db.execute("UPDATE scan_sessions SET status='built' WHERE id=?", (ss_id,))
+    db.commit()
+    db.close()
+    return jsonify({
+        'ok': True,
+        'route_id': route_id,
+        'total': len(items),
+        'geocoded': geocoded,
+        'failed': failed_addresses,
+        'redirect': url_for('route_detail', route_id=route_id)
+    })
+
+
+# ─── END PACKAGE SCAN ──────────────────────────────────────────
     db = get_db()
     today = datetime.now().strftime('%Y-%m-%d')
     route = db.execute(

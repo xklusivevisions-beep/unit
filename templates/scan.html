@@ -1,0 +1,343 @@
+{% extends "base.html" %}
+{% block title %}Scan Packages — UNIT{% endblock %}
+{% block content %}
+<style>
+  .scan-page { max-width: 480px; margin: 0 auto; padding: 16px; }
+  .scan-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+  .scan-header h1 { font-size: 1.4rem; font-weight: 700; margin: 0; }
+  .scan-count { background: #f59e0b; color: #000; font-weight: 700; font-size: 0.85rem;
+                padding: 4px 12px; border-radius: 999px; }
+
+  /* Camera zone */
+  .camera-zone { background: #111; border-radius: 16px; overflow: hidden;
+                 position: relative; margin-bottom: 16px; }
+  .camera-zone video { width: 100%; display: block; max-height: 260px; object-fit: cover; }
+  .camera-zone canvas { display: none; }
+  #camera-placeholder { height: 200px; display: flex; flex-direction: column; align-items: center;
+                         justify-content: center; color: #888; gap: 10px; cursor: pointer; }
+  #camera-placeholder svg { width: 48px; height: 48px; }
+  #camera-placeholder span { font-size: 0.95rem; }
+
+  /* Capture button */
+  .capture-btn { width: 100%; padding: 16px; font-size: 1.05rem; font-weight: 700;
+                 background: #f59e0b; color: #000; border: none; border-radius: 12px;
+                 cursor: pointer; margin-bottom: 8px; display: none; }
+  .capture-btn:active { background: #d97706; }
+  .file-btn { width: 100%; padding: 12px; font-size: 0.95rem; font-weight: 600;
+              background: #1f2937; color: #fff; border: none; border-radius: 12px;
+              cursor: pointer; margin-bottom: 16px; }
+
+  /* Preview card */
+  #preview-card { background: #1f2937; border-radius: 16px; padding: 16px;
+                  margin-bottom: 16px; display: none; }
+  #preview-card h3 { font-size: 0.85rem; color: #9ca3af; text-transform: uppercase;
+                     letter-spacing: .05em; margin: 0 0 12px; }
+  .preview-field { margin-bottom: 10px; }
+  .preview-field label { font-size: 0.75rem; color: #6b7280; display: block; margin-bottom: 2px; }
+  .preview-field input { width: 100%; background: #111827; border: 1px solid #374151;
+                         color: #fff; border-radius: 8px; padding: 8px 10px;
+                         font-size: 0.9rem; box-sizing: border-box; }
+  .preview-actions { display: flex; gap: 8px; margin-top: 12px; }
+  .btn-confirm { flex: 1; padding: 12px; background: #10b981; color: #fff;
+                 border: none; border-radius: 10px; font-weight: 700; cursor: pointer; font-size: 0.95rem; }
+  .btn-discard { flex: 0 0 auto; padding: 12px 16px; background: #374151; color: #fff;
+                 border: none; border-radius: 10px; font-weight: 700; cursor: pointer; }
+
+  /* Loading spinner */
+  #loading { display: none; text-align: center; padding: 24px; color: #9ca3af; }
+  .spinner { border: 3px solid #374151; border-top-color: #f59e0b; border-radius: 50%;
+             width: 36px; height: 36px; animation: spin 0.8s linear infinite; margin: 0 auto 10px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Package list */
+  .pkg-list { margin-bottom: 20px; }
+  .pkg-list h2 { font-size: 1rem; font-weight: 700; margin: 0 0 12px; color: #f3f4f6; }
+  .pkg-item { background: #1f2937; border-radius: 12px; padding: 12px 14px;
+              margin-bottom: 8px; display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+  .pkg-info { flex: 1; min-width: 0; }
+  .pkg-name { font-weight: 700; font-size: 0.9rem; color: #fff;
+              white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pkg-addr { font-size: 0.8rem; color: #9ca3af; margin-top: 2px;
+              white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pkg-tracking { font-size: 0.7rem; color: #6b7280; margin-top: 2px; font-family: monospace; }
+  .pkg-num { font-size: 0.75rem; background: #374151; color: #9ca3af;
+             padding: 2px 8px; border-radius: 999px; white-space: nowrap; margin-top: 4px; display: inline-block; }
+  .pkg-remove { background: none; border: none; color: #ef4444; cursor: pointer;
+                padding: 4px; font-size: 1.1rem; flex-shrink: 0; }
+  .empty-state { text-align: center; padding: 32px 16px; color: #6b7280; font-size: 0.9rem; }
+
+  /* Build route button */
+  .build-btn { width: 100%; padding: 18px; font-size: 1.1rem; font-weight: 700;
+               background: #3b82f6; color: #fff; border: none; border-radius: 14px;
+               cursor: pointer; margin-bottom: 10px; }
+  .build-btn:disabled { background: #1f2937; color: #6b7280; cursor: not-allowed; }
+  .clear-btn { width: 100%; padding: 12px; font-size: 0.9rem; font-weight: 600;
+               background: transparent; color: #ef4444; border: 1px solid #ef4444;
+               border-radius: 10px; cursor: pointer; }
+
+  .toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+           background: #10b981; color: #fff; padding: 10px 20px; border-radius: 10px;
+           font-weight: 700; display: none; z-index: 999; white-space: nowrap; }
+  .toast.err { background: #ef4444; }
+</style>
+
+<div class="scan-page">
+  <div class="scan-header">
+    <h1>📦 Scan Packages</h1>
+    <span class="scan-count" id="pkg-count">{{ items|length }} scanned</span>
+  </div>
+
+  <!-- Camera zone -->
+  <div class="camera-zone" id="camera-zone">
+    <div id="camera-placeholder" onclick="startCamera()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <path d="M6.827 6.175A2.31 2.31 0 015.186 7.23c-.38.054-.757.112-1.134.175C2.999 7.58 2.25 8.507 2.25 9.574V18a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9.574c0-1.067-.75-1.994-1.802-2.169a47.865 47.865 0 00-1.134-.175 2.31 2.31 0 01-1.64-1.055l-.822-1.316a2.192 2.192 0 00-1.736-1.039 48.774 48.774 0 00-5.232 0 2.192 2.192 0 00-1.736 1.039l-.821 1.316z"/>
+        <path d="M16.5 12.75a4.5 4.5 0 11-9 0 4.5 4.5 0 019 0zM18.75 10.5h.008v.008h-.008V10.5z"/>
+      </svg>
+      <span>Tap to open camera</span>
+    </div>
+    <video id="camera-feed" autoplay playsinline style="display:none"></video>
+    <canvas id="canvas"></canvas>
+  </div>
+
+  <button class="capture-btn" id="capture-btn" onclick="capturePhoto()">📸 Capture Label</button>
+
+  <!-- File fallback -->
+  <input type="file" accept="image/*" capture="environment" id="file-input" style="display:none" onchange="handleFile(this)">
+  <button class="file-btn" onclick="document.getElementById('file-input').click()">📁 Upload Label Photo</button>
+
+  <!-- Loading -->
+  <div id="loading">
+    <div class="spinner"></div>
+    <div>Reading label…</div>
+  </div>
+
+  <!-- Preview card -->
+  <div id="preview-card">
+    <h3>Confirm Package</h3>
+    <div class="preview-field">
+      <label>Recipient Name</label>
+      <input type="text" id="p-name" placeholder="Name">
+    </div>
+    <div class="preview-field">
+      <label>Delivery Address</label>
+      <input type="text" id="p-address" placeholder="Full address">
+    </div>
+    <div class="preview-field">
+      <label>Tracking Number</label>
+      <input type="text" id="p-tracking" placeholder="Tracking #">
+    </div>
+    <div class="preview-actions">
+      <button class="btn-discard" onclick="discardPreview()">✕ Discard</button>
+      <button class="btn-confirm" onclick="confirmPackage()">✓ Add Package</button>
+    </div>
+  </div>
+
+  <!-- Package list -->
+  <div class="pkg-list">
+    <h2>Scanned Packages</h2>
+    <div id="pkg-list-inner">
+      {% if items %}
+        {% for item in items %}
+        <div class="pkg-item" id="item-{{ item.id }}">
+          <div class="pkg-info">
+            <div class="pkg-name">{{ item.customer_name or 'Unknown' }}</div>
+            <div class="pkg-addr">{{ item.address }}</div>
+            {% if item.tracking %}
+            <div class="pkg-tracking">{{ item.tracking }}</div>
+            {% endif %}
+            <span class="pkg-num">#{{ loop.index }}</span>
+          </div>
+          <button class="pkg-remove" onclick="removeItem({{ item.id }}, this)">✕</button>
+        </div>
+        {% endfor %}
+      {% else %}
+        <div class="empty-state" id="empty-msg">No packages yet. Scan your first label above.</div>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- Actions -->
+  <button class="build-btn" id="build-btn" onclick="buildRoute()" {% if not items %}disabled{% endif %}>
+    🗺️ Build Optimized Route ({{ items|length }} stops)
+  </button>
+  {% if items %}
+  <button class="clear-btn" onclick="clearAll()">Clear All Packages</button>
+  {% endif %}
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+let stream = null;
+let pkgCount = {{ items|length }};
+
+function showToast(msg, isErr) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'toast' + (isErr ? ' err' : '');
+  t.style.display = 'block';
+  setTimeout(() => t.style.display = 'none', 2800);
+}
+
+function updateCount() {
+  document.getElementById('pkg-count').textContent = pkgCount + ' scanned';
+  const btn = document.getElementById('build-btn');
+  btn.disabled = pkgCount === 0;
+  btn.textContent = `🗺️ Build Optimized Route (${pkgCount} stops)`;
+}
+
+// ── Camera ──
+async function startCamera() {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
+    });
+    const video = document.getElementById('camera-feed');
+    video.srcObject = stream;
+    video.style.display = 'block';
+    document.getElementById('camera-placeholder').style.display = 'none';
+    document.getElementById('capture-btn').style.display = 'block';
+  } catch (e) {
+    showToast('Camera not available — use the upload button', true);
+  }
+}
+
+function capturePhoto() {
+  const video = document.getElementById('camera-feed');
+  const canvas = document.getElementById('canvas');
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  canvas.getContext('2d').drawImage(video, 0, 0);
+  canvas.toBlob(blob => {
+    stopCamera();
+    processBlob(blob);
+  }, 'image/jpeg', 0.92);
+}
+
+function stopCamera() {
+  if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+  document.getElementById('camera-feed').style.display = 'none';
+  document.getElementById('capture-btn').style.display = 'none';
+  document.getElementById('camera-placeholder').style.display = 'flex';
+}
+
+function handleFile(input) {
+  if (input.files && input.files[0]) {
+    processBlob(input.files[0]);
+    input.value = '';
+  }
+}
+
+// ── Process label ──
+function processBlob(blob) {
+  document.getElementById('loading').style.display = 'block';
+  document.getElementById('preview-card').style.display = 'none';
+  const fd = new FormData();
+  fd.append('photo', blob, 'label.jpg');
+  fetch('/driver/scan/process', { method: 'POST', body: fd })
+    .then(r => r.json())
+    .then(data => {
+      document.getElementById('loading').style.display = 'none';
+      if (!data.ok) { showToast(data.error || 'Could not read label', true); return; }
+      const d = data.data;
+      document.getElementById('p-name').value = d.name || '';
+      document.getElementById('p-address').value = d.address || '';
+      document.getElementById('p-tracking').value = d.tracking || '';
+      document.getElementById('preview-card').style.display = 'block';
+    })
+    .catch(() => {
+      document.getElementById('loading').style.display = 'none';
+      showToast('Server error — try again', true);
+    });
+}
+
+function discardPreview() {
+  document.getElementById('preview-card').style.display = 'none';
+}
+
+// ── Confirm & add ──
+function confirmPackage() {
+  const name = document.getElementById('p-name').value.trim();
+  const address = document.getElementById('p-address').value.trim();
+  const tracking = document.getElementById('p-tracking').value.trim();
+  if (!address) { showToast('Address is required', true); return; }
+  const zip = (address.match(/\b(\d{5})\b/) || ['',''])[1];
+  fetch('/driver/scan/add', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, address, tracking, zip })
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (!data.ok) { showToast(data.error || 'Error', true); return; }
+    pkgCount = data.count;
+    updateCount();
+    discardPreview();
+    appendPackageToList({ name, address, tracking, id: Date.now() });
+    showToast('Package added ✓');
+    // Reload to get real IDs after a moment
+    setTimeout(() => location.reload(), 1200);
+  })
+  .catch(() => showToast('Error adding package', true));
+}
+
+function appendPackageToList(pkg) {
+  const empty = document.getElementById('empty-msg');
+  if (empty) empty.remove();
+  const el = document.createElement('div');
+  el.className = 'pkg-item';
+  el.id = 'item-' + pkg.id;
+  el.innerHTML = `
+    <div class="pkg-info">
+      <div class="pkg-name">${pkg.name || 'Unknown'}</div>
+      <div class="pkg-addr">${pkg.address}</div>
+      ${pkg.tracking ? `<div class="pkg-tracking">${pkg.tracking}</div>` : ''}
+      <span class="pkg-num">#${pkgCount}</span>
+    </div>
+    <button class="pkg-remove" onclick="removeItem(${pkg.id}, this)">✕</button>`;
+  document.getElementById('pkg-list-inner').appendChild(el);
+}
+
+// ── Remove ──
+function removeItem(id, btn) {
+  fetch(`/driver/scan/remove/${id}`, { method: 'POST' })
+    .then(r => r.json())
+    .then(data => {
+      if (data.ok) {
+        const el = btn.closest('.pkg-item');
+        if (el) el.remove();
+        pkgCount = Math.max(0, pkgCount - 1);
+        updateCount();
+        if (pkgCount === 0) {
+          document.getElementById('pkg-list-inner').innerHTML =
+            '<div class="empty-state" id="empty-msg">No packages yet. Scan your first label above.</div>';
+        }
+        showToast('Removed');
+      }
+    });
+}
+
+// ── Build route ──
+function buildRoute() {
+  const btn = document.getElementById('build-btn');
+  btn.disabled = true;
+  btn.textContent = '⏳ Building route…';
+  fetch('/driver/scan/build-route', { method: 'POST' })
+    .then(r => r.json())
+    .then(data => {
+      if (!data.ok) { showToast(data.error || 'Build failed', true); btn.disabled = false; return; }
+      showToast(`Route built! ${data.geocoded}/${data.total} geocoded`);
+      setTimeout(() => { window.location.href = data.redirect; }, 1000);
+    })
+    .catch(() => { showToast('Error building route', true); btn.disabled = false; });
+}
+
+// ── Clear all ──
+function clearAll() {
+  if (!confirm('Clear all scanned packages?')) return;
+  fetch('/driver/scan/clear', { method: 'POST' })
+    .then(() => location.reload());
+}
+</script>
+{% endblock %}
