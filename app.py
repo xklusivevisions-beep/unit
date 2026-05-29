@@ -218,6 +218,7 @@ def unhandled(e):
     return render_template('error.html', code=500, msg='Unexpected error — please try again'), 500
 
 DB = 'data/unit.db'
+GOOGLE_MAPS_KEY = os.environ.get('GOOGLE_MAPS_KEY', '')
 TWILIO_SID   = os.environ.get('TWILIO_SID', '')
 TWILIO_TOKEN = os.environ.get('TWILIO_TOKEN', '')
 TWILIO_PHONE = os.environ.get('TWILIO_PHONE', '')
@@ -685,7 +686,7 @@ def driver_dashboard():
             (route['id'],)
         ).fetchall()
     db.close()
-    return render_template('driver_dashboard.html', route=route, stops=stops, driver=session['driver_name'])
+    return render_template('driver_dashboard.html', route=route, stops=stops, driver=session['driver_name'], gmaps_key=GOOGLE_MAPS_KEY)
 
 # ─── ROUTE IMPORT ──────────────────────────────────────────────
 
@@ -1141,7 +1142,7 @@ def stop_active(stop_id):
             db.commit()
             stop = db.execute("SELECT * FROM stops WHERE id=?", (stop_id,)).fetchone()
     db.close()
-    return render_template('stop_active.html', stop=stop)
+    return render_template('stop_active.html', stop=stop, gmaps_key=GOOGLE_MAPS_KEY)
 
 @app.route('/driver/stop/<int:stop_id>/pin', methods=['POST'])
 def stop_pin(stop_id):
@@ -1427,6 +1428,39 @@ def optimize_route(route_id):
     db.close()
     log.info(f'Route {route_id} optimized: {len(optimized_ids)} stops reordered')
     return jsonify({'ok': True, 'reordered': len(optimized_ids)})
+
+
+@app.route('/driver/test/proximity', methods=['POST'])
+def test_proximity_alert():
+    """Test the iMessage proximity alert — fires immediately to driver phone."""
+    if 'driver_id' not in session:
+        return jsonify({'ok': False}), 401
+    db = get_db()
+    data = request.get_json() or {}
+    stop_id = data.get('stop_id')
+    # Get driver phone
+    driver = db.execute("SELECT * FROM drivers WHERE id=?", (session['driver_id'],)).fetchone()
+    if not driver or not driver['phone']:
+        db.close()
+        return jsonify({'ok': False, 'error': 'No phone number on your driver account'})
+    # Build test message
+    if stop_id:
+        stop = db.execute("SELECT * FROM stops WHERE id=?", (stop_id,)).fetchone()
+        if stop:
+            track_url = f"{get_base_url()}/track/{stop['token']}"
+            customer_msg = f"Your driver is on the way! Track live \U0001F4CD {track_url}"
+            test_msg = (f"\U0001F4E6 UNIT TEST — Stop #{stop['stop_number']}\n"
+                       f"{stop['address'].split(',')[0] if stop['address'] else 'Test Stop'}"
+                       f"{' Apt ' + stop['unit'] if stop['unit'] else ''}\n\n"
+                       f"Copy for Speed X:\n{customer_msg}\n\n"
+                       f"(This is a proximity alert test)")
+        else:
+            test_msg = "\U0001F4E6 UNIT TEST — proximity alert is working! \U00002705"
+    else:
+        test_msg = "\U0001F4E6 UNIT TEST — proximity alert is working! \U00002705\n\nWhen you are within 0.5 miles of a stop, this message will auto-fire with the Speed X copy text."
+    ok = send_imessage_to_driver(driver['phone'], test_msg)
+    db.close()
+    return jsonify({'ok': ok, 'sent_to': driver['phone'], 'message': test_msg if ok else 'iMessage failed — check Mac mini Messages.app'})
 
 # ─── QUICK LIVE SHARE (no stop/address required) ─────────────────────────────
 
