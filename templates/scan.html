@@ -54,6 +54,14 @@
   @keyframes spin { to { transform: rotate(360deg); } }
 
   /* Package list */
+  /* Live Sort Map */
+  #live-map-section { margin-bottom: 16px; display: none; }
+  #live-map-section h2 { font-size: 1rem; font-weight: 700; margin: 0 0 8px; color: #f3f4f6; display: flex; align-items: center; gap: 8px; }
+  .sort-badge { font-size: 0.7rem; background: #10b981; color: #fff; padding: 2px 8px; border-radius: 999px; }
+  .sort-badge.pending { background: #f59e0b; color: #000; }
+  #live-map { width: 100%; height: 220px; border-radius: 14px; overflow: hidden; background: #111; }
+  .map-legend { font-size: 0.72rem; color: #6b7280; margin-top: 6px; text-align: center; }
+
   .pkg-list { margin-bottom: 20px; }
   .pkg-list h2 { font-size: 1rem; font-weight: 700; margin: 0 0 12px; color: #f3f4f6; }
   .pkg-item { background: #1f2937; border-radius: 12px; padding: 12px 14px;
@@ -66,6 +74,11 @@
   .pkg-tracking { font-size: 0.7rem; color: #6b7280; margin-top: 2px; font-family: monospace; }
   .pkg-num { font-size: 0.75rem; background: #374151; color: #9ca3af;
              padding: 2px 8px; border-radius: 999px; white-space: nowrap; margin-top: 4px; display: inline-block; }
+  .load-badge { font-size: 0.72rem; font-weight: 700; padding: 2px 8px; border-radius: 999px;
+                white-space: nowrap; margin-top: 4px; display: inline-block; margin-left: 4px; }
+  .load-badge.first  { background: #10b981; color: #fff; }   /* deliver first = load last */
+  .load-badge.last   { background: #f59e0b; color: #000; }   /* load first (back of truck) */
+  .load-badge.middle { background: #374151; color: #9ca3af; }
   .pkg-remove { background: none; border: none; color: #ef4444; cursor: pointer;
                 padding: 4px; font-size: 1.1rem; flex-shrink: 0; }
   .empty-state { text-align: center; padding: 32px 16px; color: #6b7280; font-size: 0.9rem; }
@@ -143,6 +156,13 @@
     </div>
   </div>
 
+  <!-- Live Sort Map -->
+  <div id="live-map-section">
+    <h2>📍 Live Route Sort <span class="sort-badge pending" id="sort-status">Sorting...</span></h2>
+    <div id="live-map"></div>
+    <p class="map-legend">🟢 Load last (deliver first) &nbsp;|&nbsp; 🟡 Load first (back of truck)</p>
+  </div>
+
   <!-- Package list -->
   <div class="pkg-list">
     <h2>Scanned Packages</h2>
@@ -178,9 +198,110 @@
 
 <div class="toast" id="toast"></div>
 
+<!-- Leaflet.js for live map -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
 <script>
 let stream = null;
 let pkgCount = {{ items|length }};
+let liveMap = null;
+let mapMarkers = [];
+let mapPolyline = null;
+
+// ── Live Sort Map ──
+function initMap() {
+  if (liveMap) return;
+  const mapEl = document.getElementById('live-map');
+  if (!mapEl) return;
+  liveMap = L.map('live-map', { zoomControl: true, attributionControl: false });
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+    maxZoom: 18
+  }).addTo(liveMap);
+}
+
+function refreshLiveSort() {
+  if (pkgCount === 0) return;
+  fetch('/driver/scan/live-sort')
+    .then(r => r.json())
+    .then(data => {
+      if (!data.ok || !data.items.length) return;
+
+      // Show map section
+      const section = document.getElementById('live-map-section');
+      section.style.display = 'block';
+      initMap();
+
+      // Update sort status badge
+      const badge = document.getElementById('sort-status');
+      if (data.sorted) {
+        badge.textContent = 'Sorted ✓';
+        badge.className = 'sort-badge';
+      } else {
+        badge.textContent = 'Sorting...';
+        badge.className = 'sort-badge pending';
+      }
+
+      // Clear old markers + line
+      mapMarkers.forEach(m => m.remove());
+      mapMarkers = [];
+      if (mapPolyline) { mapPolyline.remove(); mapPolyline = null; }
+
+      const latlngs = [];
+      const total = data.items.length;
+
+      data.items.forEach((pkg, idx) => {
+        if (!pkg.lat || !pkg.lng) return;
+        const deliveryNum = pkg.delivery_order;
+        const isFirst = deliveryNum === 1;
+        const isLast  = deliveryNum === total;
+        const color   = isFirst ? '#10b981' : isLast ? '#f59e0b' : '#3b82f6';
+
+        const icon = L.divIcon({
+          html: `<div style="background:${color};color:#fff;border-radius:50%;width:26px;height:26px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:11px;border:2px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.5)">${deliveryNum}</div>`,
+          className: '', iconSize: [26, 26], iconAnchor: [13, 13]
+        });
+        const marker = L.marker([pkg.lat, pkg.lng], { icon })
+          .bindPopup(`<b>Stop ${deliveryNum}</b><br>${pkg.name || ''}<br><small>${pkg.address}</small><br><b>Load position: #${pkg.load_position}</b>`);
+        marker.addTo(liveMap);
+        mapMarkers.push(marker);
+        latlngs.push([pkg.lat, pkg.lng]);
+      });
+
+      if (latlngs.length >= 2) {
+        mapPolyline = L.polyline(latlngs, { color: '#3b82f6', weight: 2, opacity: 0.7, dashArray: '6,4' }).addTo(liveMap);
+        liveMap.fitBounds(mapPolyline.getBounds(), { padding: [20, 20] });
+      } else if (latlngs.length === 1) {
+        liveMap.setView(latlngs[0], 14);
+      }
+
+      // Re-render package list in sorted order with load badges
+      const listEl = document.getElementById('pkg-list-inner');
+      listEl.innerHTML = '';
+      data.items.forEach((pkg, idx) => {
+        const isFirst = pkg.delivery_order === 1;
+        const isLast  = pkg.delivery_order === total;
+        const badgeClass = isFirst ? 'first' : isLast ? 'last' : 'middle';
+        const badgeLabel = isFirst ? '🟢 Deliver 1st — Load last'
+                         : isLast  ? '🟡 Load first (back of truck)'
+                         : `Stop ${pkg.delivery_order} — Load pos. #${pkg.load_position}`;
+        listEl.innerHTML += `
+          <div class="pkg-item" id="item-${pkg.id}">
+            <div class="pkg-info">
+              <div class="pkg-name">${pkg.name || 'Unknown'}</div>
+              <div class="pkg-addr">${pkg.address}</div>
+              ${pkg.tracking ? `<div class="pkg-tracking">${pkg.tracking}</div>` : ''}
+              <span class="load-badge ${badgeClass}">${badgeLabel}</span>
+            </div>
+            <button class="pkg-remove" onclick="removeItem(${pkg.id}, this)">✕</button>
+          </div>`;
+      });
+    })
+    .catch(e => console.warn('live-sort error', e));
+}
+
+// Auto-refresh map if packages already exist
+if (pkgCount > 0) setTimeout(refreshLiveSort, 500);
 
 function showToast(msg, isErr) {
   const t = document.getElementById('toast');
@@ -284,10 +405,9 @@ function confirmPackage() {
     pkgCount = data.count;
     updateCount();
     discardPreview();
-    appendPackageToList({ name, address, tracking, id: Date.now() });
-    showToast('Package added ✓');
-    // Reload to get real IDs after a moment
-    setTimeout(() => location.reload(), 1200);
+    showToast('Package added ✓' + (data.geocoded ? ' 📍' : ''));
+    // Refresh live sort map + reorder list
+    setTimeout(refreshLiveSort, 600);
   })
   .catch(() => showToast('Error adding package', true));
 }
@@ -322,6 +442,9 @@ function removeItem(id, btn) {
         if (pkgCount === 0) {
           document.getElementById('pkg-list-inner').innerHTML =
             '<div class="empty-state" id="empty-msg">No packages yet. Scan your first label above.</div>';
+          document.getElementById('live-map-section').style.display = 'none';
+        } else {
+          setTimeout(refreshLiveSort, 400);
         }
         showToast('Removed');
       }

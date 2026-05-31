@@ -829,7 +829,7 @@ def scan_process():
 
 @app.route('/driver/scan/add', methods=['POST'])
 def scan_add():
-    """Add a confirmed package to the scan session."""
+    """Add a confirmed package to the scan session — geocodes immediately for live sort."""
     if 'driver_id' not in session:
         return jsonify({'ok': False, 'error': 'not logged in'}), 401
     data = request.get_json() or {}
@@ -839,17 +839,133 @@ def scan_add():
     zip_code = data.get('zip', '').strip()
     if not address:
         return jsonify({'ok': False, 'error': 'Address is required'})
+
+    # Geocode immediately so live-sort works right away
+    lat, lng = None, None
+    try:
+        coords = geocode_address(address)
+        if coords:
+            lat, lng = coords
+    except Exception as e:
+        log.warning(f'Live geocode failed for {address}: {e}')
+
     db = get_db()
     ss_id = _get_or_create_scan_session(db, session['driver_id'])
     db.execute(
-        """INSERT INTO scan_items (session_id, tracking, customer_name, address, zip_code, raw_json)
-           VALUES (?,?,?,?,?,?)""",
-        (ss_id, tracking, name, address, zip_code, json.dumps(data))
+        """INSERT INTO scan_items (session_id, tracking, customer_name, address, zip_code, raw_json, dest_lat, dest_lng)
+           VALUES (?,?,?,?,?,?,?,?)""",
+        (ss_id, tracking, name, address, zip_code, json.dumps(data), lat, lng)
     )
     db.commit()
     count = db.execute("SELECT COUNT(*) FROM scan_items WHERE session_id=?", (ss_id,)).fetchone()[0]
     db.close()
-    return jsonify({'ok': True, 'count': count})
+    return jsonify({'ok': True, 'count': count, 'geocoded': lat is not None})
+
+
+@app.route('/driver/scan/live-sort', methods=['GET'])
+def scan_live_sort():
+    """Return all scanned packages sorted in optimal route order with geo coords."""
+    if 'driver_id' not in session:
+        return jsonify({'ok': False, 'error': 'not logged in'}), 401
+    db = get_db()
+    today = datetime.now().strftime('%Y-%m-%d')
+    ss = db.execute(
+        "SELECT id FROM scan_sessions WHERE driver_id=? AND date=? AND status='scanning' ORDER BY id DESC LIMIT 1",
+        (session['driver_id'], today)
+    ).fetchone()
+    if not ss:
+        db.close()
+        return jsonify({'ok': True, 'items': [], 'sorted': False})
+
+    items = db.execute(
+        "SELECT * FROM scan_items WHERE session_id=? ORDER BY id ASC",
+        (ss['id'],)
+    ).fetchall()
+    db.close()
+
+    if not items:
+        return jsonify({'ok': True, 'items': [], 'sorted': False})
+
+    packages = []
+    for item in items:
+        packages.append({
+            'id':       item['id'],
+            'tracking': item['tracking'],
+            'name':     item['customer_name'],
+            'address':  item['address'],
+            'lat':      item['dest_lat'],
+            'lng':      item['dest_lng'],
+        })
+
+    # Split into geocoded and non-geocoded
+    geocoded   = [p for p in packages if p['lat'] and p['lng']]
+    ungeoced   = [p for p in packages if not (p['lat'] and p['lng'])]
+
+    sorted_pkgs = []
+    if len(geocoded) >= 2:
+        try:
+            # OSRM nearest-neighbor trip optimization
+            coords = ';'.join(f"{p['lng']},{p['lat']}" for p in geocoded)
+            osrm_url = (f"http://router.project-osrm.org/trip/v1/driving/{coords}"
+                        f"?roundtrip=false&source=first&destination=last&overview=false")
+            resp = requests.get(osrm_url, timeout=6)
+            if resp.status_code == 200:
+                trip = resp.json()
+                if trip.get('code') == 'Ok' and trip.get('waypoints'):
+                    waypoints = sorted(trip['waypoints'], key=lambda w: w['waypoint_index'])
+                    for wp in waypoints:
+                        closest = min(
+                            geocoded,
+                            key=lambda p: abs(p['lat'] - wp['location'][1]) + abs(p['lng'] - wp['location'][0])
+                        )
+                        sorted_pkgs.append(closest)
+                    # Remove duplicates while preserving order
+                    seen = set()
+                    deduped = []
+                    for p in sorted_pkgs:
+                        if p['id'] not in seen:
+                            seen.add(p['id'])
+                            deduped.append(p)
+                    sorted_pkgs = deduped
+        except Exception as e:
+            log.warning(f'OSRM live-sort failed: {e}')
+
+    if not sorted_pkgs:
+        # Nearest-neighbor fallback (pure Python)
+        remaining = list(geocoded)
+        if remaining:
+            current = remaining.pop(0)
+            sorted_pkgs = [current]
+            while remaining:
+                nearest = min(remaining, key=lambda p: geodesic(
+                    (current['lat'], current['lng']), (p['lat'], p['lng'])
+                ).miles)
+                remaining.remove(nearest)
+                sorted_pkgs.append(nearest)
+                current = nearest
+
+    # Append ungeocoded at the end
+    seen_ids = {p['id'] for p in sorted_pkgs}
+    for p in ungeoced:
+        if p['id'] not in seen_ids:
+            sorted_pkgs.append(p)
+    # Also append any geocoded packages that got dropped
+    for p in geocoded:
+        if p['id'] not in seen_ids:
+            sorted_pkgs.append(p)
+
+    # Add load position (reverse of delivery order = how to load the truck)
+    total = len(sorted_pkgs)
+    for i, p in enumerate(sorted_pkgs):
+        p['delivery_order'] = i + 1        # 1 = deliver first
+        p['load_position']  = total - i    # highest = load first (goes in back of truck)
+
+    return jsonify({
+        'ok':     True,
+        'items':  sorted_pkgs,
+        'sorted': len(geocoded) >= 2,
+        'total':  total,
+    })
 
 
 @app.route('/driver/scan/remove/<int:item_id>', methods=['POST'])
