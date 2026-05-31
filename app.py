@@ -271,6 +271,113 @@ def unhandled(e):
 DB = 'data/unit.db'
 MAPBOX_TOKEN    = os.environ.get('MAPBOX_TOKEN', '')
 GOOGLE_MAPS_KEY = os.environ.get('GOOGLE_MAPS_KEY', '')
+
+# ── VEHICLE ZONE CONFIGS ──────────────────────────────────────────
+# Each vehicle type defines ordered zones: index 0 = load FIRST (deepest),
+# last index = load LAST (closest to door). Delivery order maps inversely.
+VEHICLE_ZONES = {
+    'small_car': [
+        {'id': 'trunk-back',   'label': 'Trunk — Back Wall',    'icon': '🔵', 'desc': 'Against the back wall of trunk'},
+        {'id': 'trunk-mid',    'label': 'Trunk — Middle',       'icon': '🔵', 'desc': 'Middle of trunk'},
+        {'id': 'trunk-front',  'label': 'Trunk — Front',       'icon': '🟡', 'desc': 'Front of trunk, near seat'},
+        {'id': 'backseat-r',   'label': 'Back Seat — Right',   'icon': '🟠', 'desc': 'Right rear passenger seat'},
+        {'id': 'backseat-l',   'label': 'Back Seat — Left',    'icon': '🟠', 'desc': 'Left rear passenger seat'},
+        {'id': 'backseat-mid', 'label': 'Back Seat — Middle',  'icon': '🟠', 'desc': 'Middle rear seat'},
+    ],
+    'sedan': [
+        {'id': 'trunk-back',   'label': 'Trunk — Back Wall',    'icon': '🔵', 'desc': 'Against the back wall of trunk'},
+        {'id': 'trunk-mid',    'label': 'Trunk — Middle',       'icon': '🔵', 'desc': 'Middle of trunk'},
+        {'id': 'trunk-front',  'label': 'Trunk — Front',       'icon': '🟡', 'desc': 'Front of trunk, near seat'},
+        {'id': 'backseat-r',   'label': 'Back Seat — Right',   'icon': '🟠', 'desc': 'Right rear passenger seat'},
+        {'id': 'backseat-l',   'label': 'Back Seat — Left',    'icon': '🟠', 'desc': 'Left rear passenger seat'},
+        {'id': 'backseat-mid', 'label': 'Back Seat — Middle',  'icon': '🟠', 'desc': 'Middle rear seat'},
+        {'id': 'front-pass',   'label': 'Front Passenger',      'icon': '⚪', 'desc': 'Front passenger seat floor/seat'},
+    ],
+    'suv': [
+        {'id': 'cargo-back',   'label': 'Cargo — Back Wall',   'icon': '🔵', 'desc': 'Against rear cargo wall (load first)'},
+        {'id': 'cargo-mid',    'label': 'Cargo — Middle',      'icon': '🔵', 'desc': 'Center of cargo area'},
+        {'id': 'cargo-door',   'label': 'Cargo — Near Door',   'icon': '🟡', 'desc': 'Just inside rear door'},
+        {'id': 'row3-r',       'label': '3rd Row — Right',     'icon': '🟠', 'desc': '3rd row folded flat, right side'},
+        {'id': 'row3-l',       'label': '3rd Row — Left',      'icon': '🟠', 'desc': '3rd row folded flat, left side'},
+        {'id': 'backseat-r',   'label': '2nd Row — Right',     'icon': '⚪', 'desc': 'Right rear passenger seat'},
+        {'id': 'backseat-l',   'label': '2nd Row — Left',      'icon': '⚪', 'desc': 'Left rear passenger seat'},
+        {'id': 'front-pass',   'label': 'Front Passenger',      'icon': '⚪', 'desc': 'Front passenger seat/floor'},
+    ],
+    'minivan': [
+        {'id': 'cargo-back',   'label': 'Cargo — Back',        'icon': '🔵', 'desc': 'Rear cargo area behind seats'},
+        {'id': 'row3-r',       'label': '3rd Row — Right',     'icon': '🔵', 'desc': 'Right side 3rd row (fold flat)'},
+        {'id': 'row3-l',       'label': '3rd Row — Left',      'icon': '🔵', 'desc': 'Left side 3rd row (fold flat)'},
+        {'id': 'row2-r',       'label': '2nd Row — Right',     'icon': '🟠', 'desc': 'Right captain\'s chair area'},
+        {'id': 'row2-l',       'label': '2nd Row — Left',      'icon': '🟠', 'desc': 'Left captain\'s chair area'},
+        {'id': 'row2-mid',     'label': '2nd Row — Middle',    'icon': '🟠', 'desc': 'Center aisle / middle row'},
+        {'id': 'front-pass',   'label': 'Front Passenger',      'icon': '⚪', 'desc': 'Front passenger seat/floor'},
+    ],
+    'pickup': [
+        {'id': 'bed-cab',      'label': 'Bed — Cab Wall',      'icon': '🔵', 'desc': 'Against cab — load first, stays dry if covered'},
+        {'id': 'bed-mid',      'label': 'Bed — Middle',        'icon': '🔵', 'desc': 'Middle of truck bed'},
+        {'id': 'bed-gate',     'label': 'Bed — Near Tailgate', 'icon': '🟡', 'desc': 'Near tailgate — grab first'},
+        {'id': 'backseat-r',   'label': 'Back Seat — Right',   'icon': '🟠', 'desc': 'Crew cab right rear (if applicable)'},
+        {'id': 'backseat-l',   'label': 'Back Seat — Left',    'icon': '🟠', 'desc': 'Crew cab left rear (if applicable)'},
+        {'id': 'front-pass',   'label': 'Front Passenger',      'icon': '⚪', 'desc': 'Front passenger seat/floor'},
+    ],
+    'cargo_van': [
+        {'id': 'A1', 'label': 'Zone A1 — Front Left',   'icon': '🔵', 'desc': 'Bulkhead left, load first'},
+        {'id': 'A2', 'label': 'Zone A2 — Front Right',  'icon': '🔵', 'desc': 'Bulkhead right, load first'},
+        {'id': 'B1', 'label': 'Zone B1 — Mid Left',     'icon': '🔵', 'desc': 'Mid-van left side'},
+        {'id': 'B2', 'label': 'Zone B2 — Mid Right',    'icon': '🔵', 'desc': 'Mid-van right side'},
+        {'id': 'C1', 'label': 'Zone C1 — Rear Left',    'icon': '🟡', 'desc': 'Near rear doors, left'},
+        {'id': 'C2', 'label': 'Zone C2 — Rear Right',   'icon': '🟡', 'desc': 'Near rear doors, right'},
+        {'id': 'C3', 'label': 'Zone C3 — Door Stack',   'icon': '🟡', 'desc': 'Stacked at rear door opening'},
+    ],
+    'box_truck': [
+        {'id': 'A1', 'label': 'Row A — Left Front',  'icon': '🔵', 'desc': 'Front of box, driver side'},
+        {'id': 'A2', 'label': 'Row A — Right Front', 'icon': '🔵', 'desc': 'Front of box, passenger side'},
+        {'id': 'B1', 'label': 'Row B — Left Mid',    'icon': '🔵', 'desc': 'Middle of box, left'},
+        {'id': 'B2', 'label': 'Row B — Right Mid',   'icon': '🔵', 'desc': 'Middle of box, right'},
+        {'id': 'C1', 'label': 'Row C — Left Rear',   'icon': '🟡', 'desc': 'Near door, left side'},
+        {'id': 'C2', 'label': 'Row C — Right Rear',  'icon': '🟡', 'desc': 'Near door, right side'},
+        {'id': 'D1', 'label': 'Door Stack — Left',   'icon': '🟡', 'desc': 'Right at the door, grab first'},
+        {'id': 'D2', 'label': 'Door Stack — Right',  'icon': '🟡', 'desc': 'Right at the door, grab first'},
+    ],
+}
+
+VEHICLE_LABELS = {
+    'small_car':  '🚗 Small Car',
+    'sedan':      '🚗 Sedan',
+    'suv':        '🚙 SUV / Crossover',
+    'minivan':    '🚐 Minivan',
+    'pickup':     '🚚 Pickup Truck',
+    'cargo_van':  '🚐 Cargo Van',
+    'box_truck':  '🚚 Box Truck',
+}
+
+def assign_vehicle_zones(sorted_pkgs, vehicle_type):
+    """Assign a specific vehicle zone to each package based on delivery order.
+    Delivery order 1 = deliver first = load LAST = zone closest to door.
+    Delivery order N = deliver last = load FIRST = deepest zone.
+    """
+    zones = VEHICLE_ZONES.get(vehicle_type, VEHICLE_ZONES['suv'])
+    total = len(sorted_pkgs)
+    if total == 0:
+        return sorted_pkgs
+    for pkg in sorted_pkgs:
+        delivery_pos = pkg.get('delivery_order', 1)   # 1-based, 1 = first stop
+        load_pos     = pkg.get('load_position', 1)     # load_pos = total - delivery_pos + 1
+        # Map load_position (1=load last/door, total=load first/deep) to zone index
+        # load_pos 1 = closest to door = last zone index
+        # load_pos N = deepest = zone index 0
+        zone_count = len(zones)
+        # Scale load_pos across zone count
+        zone_idx = int(round((load_pos - 1) / max(total - 1, 1) * (zone_count - 1))) if total > 1 else 0
+        zone_idx = max(0, min(zone_idx, zone_count - 1))
+        # Invert: load_pos=1 (door) should map to LAST zone, load_pos=N (deep) to FIRST zone
+        zone_idx = zone_count - 1 - zone_idx
+        zone = zones[zone_idx]
+        pkg['zone_id']    = zone['id']
+        pkg['zone_label'] = zone['label']
+        pkg['zone_icon']  = zone['icon']
+        pkg['zone_desc']  = zone['desc']
+    return sorted_pkgs
 TWILIO_SID   = os.environ.get('TWILIO_SID', '')
 TWILIO_TOKEN = os.environ.get('TWILIO_TOKEN', '')
 TWILIO_PHONE = os.environ.get('TWILIO_PHONE', '')
@@ -412,6 +519,8 @@ def init_db():
         "ALTER TABLE residents ADD COLUMN customer_name TEXT",
         "ALTER TABLE drivers ADD COLUMN onboarded INTEGER DEFAULT 0",
         "ALTER TABLE drivers ADD COLUMN is_beta INTEGER DEFAULT 0",
+        "ALTER TABLE drivers ADD COLUMN vehicle_type TEXT DEFAULT 'suv'",
+        "ALTER TABLE drivers ADD COLUMN vehicle_capacity INTEGER DEFAULT 100",
         "CREATE TABLE IF NOT EXISTS pin_corrections (id INTEGER PRIMARY KEY AUTOINCREMENT, address TEXT UNIQUE NOT NULL, lat REAL NOT NULL, lng REAL NOT NULL, corrected_by TEXT, corrected_at TEXT DEFAULT CURRENT_TIMESTAMP)",
         "CREATE TABLE IF NOT EXISTS login_attempts (id INTEGER PRIMARY KEY AUTOINCREMENT, ip TEXT NOT NULL, attempted_at TEXT NOT NULL)",
         "CREATE INDEX IF NOT EXISTS idx_login_attempts_ip ON login_attempts (ip, attempted_at)",
@@ -881,10 +990,15 @@ def scan_live_sort():
         "SELECT * FROM scan_items WHERE session_id=? ORDER BY id ASC",
         (ss['id'],)
     ).fetchall()
+    # Get driver vehicle type
+    driver = db.execute("SELECT vehicle_type FROM drivers WHERE id=?", (session['driver_id'],)).fetchone()
+    vehicle_type = (driver['vehicle_type'] if driver and driver['vehicle_type'] else 'suv')
     db.close()
 
     if not items:
-        return jsonify({'ok': True, 'items': [], 'sorted': False})
+        return jsonify({'ok': True, 'items': [], 'sorted': False, 'vehicle_type': vehicle_type,
+                        'vehicle_label': VEHICLE_LABELS.get(vehicle_type, 'Vehicle'),
+                        'vehicle_zones': VEHICLE_ZONES.get(vehicle_type, VEHICLE_ZONES['suv'])})
 
     packages = []
     for item in items:
@@ -960,11 +1074,52 @@ def scan_live_sort():
         p['delivery_order'] = i + 1        # 1 = deliver first
         p['load_position']  = total - i    # highest = load first (goes in back of truck)
 
+    # Assign vehicle zones based on driver's vehicle type
+    sorted_pkgs = assign_vehicle_zones(sorted_pkgs, vehicle_type)
+
     return jsonify({
-        'ok':     True,
-        'items':  sorted_pkgs,
-        'sorted': len(geocoded) >= 2,
-        'total':  total,
+        'ok':           True,
+        'items':        sorted_pkgs,
+        'sorted':       len(geocoded) >= 2,
+        'total':        total,
+        'vehicle_type':  vehicle_type,
+        'vehicle_label': VEHICLE_LABELS.get(vehicle_type, 'Vehicle'),
+        'vehicle_zones': VEHICLE_ZONES.get(vehicle_type, VEHICLE_ZONES['suv']),
+    })
+
+
+@app.route('/driver/vehicle-setup', methods=['POST'])
+def vehicle_setup():
+    """Save driver's vehicle type preference."""
+    if 'driver_id' not in session:
+        return jsonify({'ok': False, 'error': 'not logged in'}), 401
+    data = request.get_json() or {}
+    vehicle_type = data.get('vehicle_type', '').strip()
+    if vehicle_type not in VEHICLE_ZONES:
+        return jsonify({'ok': False, 'error': 'Invalid vehicle type'})
+    db = get_db()
+    db.execute("UPDATE drivers SET vehicle_type=? WHERE id=?", (vehicle_type, session['driver_id']))
+    db.commit()
+    db.close()
+    session['vehicle_type'] = vehicle_type
+    return jsonify({'ok': True, 'vehicle_type': vehicle_type, 'label': VEHICLE_LABELS.get(vehicle_type)})
+
+
+@app.route('/driver/vehicle-setup', methods=['GET'])
+def vehicle_setup_get():
+    """Return current vehicle type + all options."""
+    if 'driver_id' not in session:
+        return jsonify({'ok': False, 'error': 'not logged in'}), 401
+    db = get_db()
+    driver = db.execute("SELECT vehicle_type FROM drivers WHERE id=?", (session['driver_id'],)).fetchone()
+    db.close()
+    vehicle_type = driver['vehicle_type'] if driver and driver['vehicle_type'] else 'suv'
+    return jsonify({
+        'ok': True,
+        'current': vehicle_type,
+        'label':   VEHICLE_LABELS.get(vehicle_type),
+        'options': [{'value': k, 'label': v} for k, v in VEHICLE_LABELS.items()],
+        'zones':   VEHICLE_ZONES.get(vehicle_type, VEHICLE_ZONES['suv']),
     })
 
 

@@ -102,6 +102,42 @@
            background: #10b981; color: #fff; padding: 10px 20px; border-radius: 10px;
            font-weight: 700; display: none; z-index: 999; white-space: nowrap; }
   .toast.err { background: #ef4444; }
+
+  /* Vehicle selector */
+  .vehicle-bar { display: flex; align-items: center; justify-content: space-between;
+                 background: #1f2937; border-radius: 12px; padding: 10px 14px;
+                 margin-bottom: 14px; cursor: pointer; }
+  .vehicle-bar-left { font-size: 0.85rem; color: #9ca3af; }
+  .vehicle-bar-val  { font-size: 0.95rem; font-weight: 700; color: #fff; margin-top: 2px; }
+  .vehicle-bar-arrow { color: #6b7280; font-size: 1.1rem; }
+
+  /* Vehicle modal */
+  .vehicle-modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.7);
+                      z-index: 800; display: none; align-items: flex-end; }
+  .vehicle-modal-bg.open { display: flex; }
+  .vehicle-modal { background: #111827; border-radius: 20px 20px 0 0; padding: 20px 16px 32px;
+                   width: 100%; max-height: 70vh; overflow-y: auto; }
+  .vehicle-modal h3 { font-size: 1rem; font-weight: 700; margin: 0 0 16px; color: #f3f4f6; }
+  .vehicle-option { display: flex; align-items: center; gap: 12px; padding: 12px 14px;
+                    border-radius: 12px; margin-bottom: 8px; cursor: pointer;
+                    border: 2px solid transparent; background: #1f2937; }
+  .vehicle-option.selected { border-color: #3b82f6; background: #1e3a5f; }
+  .vehicle-option-icon { font-size: 1.5rem; }
+  .vehicle-option-label { font-size: 0.95rem; font-weight: 600; color: #fff; }
+
+  /* Zone banner (shows after each scan) */
+  .zone-banner { background: #0f172a; border: 2px solid #3b82f6; border-radius: 14px;
+                 padding: 14px 16px; margin-bottom: 14px; display: none; }
+  .zone-banner.show { display: block; }
+  .zone-banner-title { font-size: 0.72rem; color: #6b7280; text-transform: uppercase;
+                       letter-spacing: .06em; margin-bottom: 4px; }
+  .zone-banner-main { font-size: 1.3rem; font-weight: 800; color: #fff; }
+  .zone-banner-sub  { font-size: 0.8rem; color: #9ca3af; margin-top: 2px; }
+
+  /* Zone pill on package card */
+  .zone-pill { display: inline-flex; align-items: center; gap: 4px; font-size: 0.72rem;
+               font-weight: 700; padding: 3px 9px; border-radius: 999px;
+               margin-top: 4px; margin-left: 4px; background: #1e3a5f; color: #60a5fa; }
 </style>
 
 <div class="scan-page">
@@ -114,6 +150,22 @@
   <div class="scan-header">
     <h1>📦 Scan Packages</h1>
     <span class="scan-count" id="pkg-count">{{ items|length }} scanned</span>
+  </div>
+
+  <!-- Vehicle selector bar -->
+  <div class="vehicle-bar" onclick="openVehicleModal()">
+    <div>
+      <div class="vehicle-bar-left">Your Vehicle</div>
+      <div class="vehicle-bar-val" id="vehicle-label">Loading...</div>
+    </div>
+    <span class="vehicle-bar-arrow">⚙️</span>
+  </div>
+
+  <!-- Zone flash banner (appears right after scan) -->
+  <div class="zone-banner" id="zone-banner">
+    <div class="zone-banner-title">📦 Put this package in →</div>
+    <div class="zone-banner-main" id="zone-banner-main"></div>
+    <div class="zone-banner-sub" id="zone-banner-sub"></div>
   </div>
 
   <!-- Camera zone -->
@@ -204,12 +256,86 @@
 
 <div class="toast" id="toast"></div>
 
+<!-- Vehicle modal -->
+<div class="vehicle-modal-bg" id="vehicle-modal-bg" onclick="closeVehicleModal(event)">
+  <div class="vehicle-modal">
+    <h3>🚗 Select Your Vehicle</h3>
+    <div id="vehicle-options-list"></div>
+  </div>
+</div>
+
 <script>
 let stream = null;
 let pkgCount = {{ items|length }};
 let liveMap = null;
 let mapMarkers = [];
 let mapPolyline = null;
+let currentVehicleType = 'suv';
+let lastScannedZone = null;
+
+// ── Vehicle Setup ──
+function loadVehicleType() {
+  fetch('/driver/vehicle-setup')
+    .then(r => r.json())
+    .then(data => {
+      if (!data.ok) return;
+      currentVehicleType = data.current;
+      document.getElementById('vehicle-label').textContent = data.label || data.current;
+      renderVehicleOptions(data.options, data.current);
+    })
+    .catch(() => {});
+}
+
+function renderVehicleOptions(options, current) {
+  const list = document.getElementById('vehicle-options-list');
+  if (!list || !options) return;
+  const icons = {
+    small_car: '🚗', sedan: '🚗', suv: '🚙', minivan: '🚐',
+    pickup: '🚚', cargo_van: '🚐', box_truck: '🚚'
+  };
+  list.innerHTML = options.map(opt => `
+    <div class="vehicle-option ${opt.value === current ? 'selected' : ''}" onclick="selectVehicle('${opt.value}', this)">
+      <span class="vehicle-option-icon">${icons[opt.value] || '🚗'}</span>
+      <span class="vehicle-option-label">${opt.label}</span>
+    </div>`).join('');
+}
+
+function selectVehicle(vehicleType, el) {
+  fetch('/driver/vehicle-setup', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ vehicle_type: vehicleType })
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (!data.ok) return;
+    currentVehicleType = vehicleType;
+    document.getElementById('vehicle-label').textContent = data.label;
+    document.querySelectorAll('.vehicle-option').forEach(o => o.classList.remove('selected'));
+    el.classList.add('selected');
+    closeVehicleModal();
+    showToast('Vehicle updated ✓');
+    if (pkgCount > 0) setTimeout(refreshLiveSort, 300);
+  });
+}
+
+function openVehicleModal()  { document.getElementById('vehicle-modal-bg').classList.add('open'); }
+function closeVehicleModal(e) {
+  if (!e || e.target === document.getElementById('vehicle-modal-bg'))
+    document.getElementById('vehicle-modal-bg').classList.remove('open');
+}
+
+function showZoneBanner(zone) {
+  if (!zone) return;
+  const banner = document.getElementById('zone-banner');
+  document.getElementById('zone-banner-main').textContent = zone.icon + '  ' + zone.label;
+  document.getElementById('zone-banner-sub').textContent  = zone.desc;
+  banner.classList.add('show');
+  setTimeout(() => banner.classList.remove('show'), 5000);
+}
+
+// Load vehicle on page start
+loadVehicleType();
 
 // ── Live Sort Map ──
 function initMap() {
@@ -279,23 +405,42 @@ function refreshLiveSort() {
         liveMap.setView(latlngs[0], 14);
       }
 
-      // Re-render package list in sorted order with load badges
+      // Update vehicle label
+      if (data.vehicle_label) {
+        document.getElementById('vehicle-label').textContent = data.vehicle_label;
+      }
+
+      // Show zone banner for the most recently scanned package (last in list before sort)
+      if (data.items.length > 0 && lastScannedZone === null) {
+        // After first sort, grab the newest package's zone
+        const newestPkg = data.items.find(p => p.delivery_order !== undefined);
+        if (newestPkg && newestPkg.zone_label) {
+          lastScannedZone = newestPkg.zone_label;
+          showZoneBanner({ icon: newestPkg.zone_icon, label: newestPkg.zone_label, desc: newestPkg.zone_desc });
+        }
+      }
+
+      // Re-render package list in sorted order with zone + load info
       const listEl = document.getElementById('pkg-list-inner');
       listEl.innerHTML = '';
       data.items.forEach((pkg, idx) => {
         const isFirst = pkg.delivery_order === 1;
         const isLast  = pkg.delivery_order === total;
         const badgeClass = isFirst ? 'first' : isLast ? 'last' : 'middle';
-        const badgeLabel = isFirst ? '🟢 Deliver 1st — Load last'
-                         : isLast  ? '🟡 Load first (back of truck)'
-                         : `Stop ${pkg.delivery_order} — Load pos. #${pkg.load_position}`;
+        const stopLabel  = isFirst ? '🟢 Stop 1 — Grab first'
+                         : isLast  ? '🟡 Last stop'
+                         : `Stop ${pkg.delivery_order}`;
+        const zoneHtml = pkg.zone_label
+          ? `<span class="zone-pill">${pkg.zone_icon || '📦'} ${pkg.zone_label}</span>`
+          : '';
         listEl.innerHTML += `
           <div class="pkg-item" id="item-${pkg.id}">
             <div class="pkg-info">
               <div class="pkg-name">${pkg.name || 'Unknown'}</div>
               <div class="pkg-addr">${pkg.address}</div>
               ${pkg.tracking ? `<div class="pkg-tracking">${pkg.tracking}</div>` : ''}
-              <span class="load-badge ${badgeClass}">${badgeLabel}</span>
+              <span class="load-badge ${badgeClass}">${stopLabel}</span>
+              ${zoneHtml}
             </div>
             <button class="pkg-remove" onclick="removeItem(${pkg.id}, this)">✕</button>
           </div>`;
@@ -410,6 +555,8 @@ function confirmPackage() {
     updateCount();
     discardPreview();
     showToast('Package added ✓' + (data.geocoded ? ' 📍' : ''));
+    // Reset zone banner flag so the next sort shows the new package's zone
+    lastScannedZone = null;
     // Refresh live sort map + reorder list
     setTimeout(refreshLiveSort, 600);
   })
