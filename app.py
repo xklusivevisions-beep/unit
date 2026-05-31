@@ -373,14 +373,26 @@ ZONE_COLORS = {
     'F': {'hex': '#f97316', 'name': 'Orange', 'emoji': '🟠'},
 }
 
-def calc_num_zones(n_stops):
-    """Auto-calculate number of delivery zones based on package count."""
-    if n_stops < 20:  return 1
-    if n_stops < 50:  return 2
-    if n_stops < 80:  return 3
-    if n_stops < 120: return 4
-    if n_stops < 160: return 5
-    return 6
+def calc_num_zones_adaptive(geocoded):
+    """
+    Determine zone count from actual geographic spread of stops — NOT package count.
+    Two stops 3 miles apart = 2 zones regardless of whether there are 2 or 200 packages.
+    Calibrated for Detroit ZIP code scale (~3-4 mile diameter per zip).
+    """
+    n = len(geocoded)
+    if n < 2: return 1
+    lats = [p['lat'] for p in geocoded]
+    lngs = [p['lng'] for p in geocoded]
+    # Diagonal of bounding box = worst-case geographic spread
+    span = geodesic((min(lats), min(lngs)), (max(lats), max(lngs))).miles
+    if span < 0.5:   k = 1   # tight cluster, same neighborhood block
+    elif span < 1.2: k = 2   # across a neighborhood
+    elif span < 2.5: k = 3   # half a zip code
+    elif span < 4.0: k = 4   # full zip like 48202 (~3.5mi diagonal)
+    elif span < 6.0: k = 5   # multi-zip
+    else:            k = 6   # large multi-zip route
+    return min(k, n)          # never more zones than packages
+
 
 def _dsq(a, b):
     """Squared Euclidean distance on lat/lng (fast, good enough for city scale)."""
@@ -389,7 +401,7 @@ def _dsq(a, b):
 def kmeans_geo(points, k, max_iter=40):
     """K-means clustering on lat/lng dicts. Returns list of cluster indices."""
     n = len(points)
-    if k >= n: return list(range(n))
+    if k > n:  return list(range(n))   # more clusters than points — 1 each
     if k <= 1: return [0] * n
     # k-means++ style init: pick point furthest from existing centroids each time
     centroids = [{'lat': points[0]['lat'], 'lng': points[0]['lng']}]
@@ -432,9 +444,9 @@ def assign_delivery_zones(sorted_pkgs):
         _mark_unknown(ungeoced)
         return sorted_pkgs
 
-    k = calc_num_zones(n)
+    k = calc_num_zones_adaptive(geocoded)
 
-    if k == 1 or n < 4:
+    if k == 1 or n < 2:
         color = ZONE_COLORS['A']
         for i, p in enumerate(sorted(geocoded, key=lambda x: x.get('delivery_order', 0)), 1):
             p.update({'zone_letter': 'A', 'zone_num': i, 'zone_label_full': f'A-{i}',
