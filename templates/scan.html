@@ -576,7 +576,8 @@ function showZoneBanner(zone) {
   document.getElementById('zone-banner-main').style.color = color;
   document.getElementById('zone-banner-sub').textContent  = zone.desc;
   banner.classList.add('show');
-  setTimeout(() => banner.classList.remove('show'), 6000);
+  // Stay up 8s when zones locked (no confirm tap), 5s otherwise
+  setTimeout(() => banner.classList.remove('show'), zonesLocked ? 8000 : 5000);
 }
 
 // Load vehicle on page start
@@ -860,11 +861,49 @@ function processBlob(blob) {
 
       // ─ Lookup mode: package already in session ─
       if (data.mode === 'lookup') {
-        showLookupCard(data);
+        if (data.zones_locked) {
+          // ─ ZONES LOCKED: zero taps — flash zone banner instantly, no card ─
+          showZoneBanner({
+            icon:  data.zone_emoji  || '📦',
+            label: `${data.zone_letter || '?'} — ${data.vehicle_zone_label || ''}`,
+            desc:  (data.vehicle_zone_desc || '') + (data.address ? `  •  ${data.address}` : ''),
+            color: data.zone_color || '#3b82f6',
+          });
+          setTimeout(refreshLiveSort, 300);
+        } else {
+          // Zones still calibrating — show card so driver knows zone is tentative
+          showLookupCard(data);
+        }
         return;
       }
 
       const d = data.data;
+
+      // ─ If zones locked + tracking present: auto-add, skip confirm card ─
+      if (zonesLocked && d.tracking) {
+        fetch('/driver/scan/add', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: d.name||'', address: d.address||'', tracking: d.tracking||'', zip: d.zip||'' })
+        })
+        .then(r => r.json())
+        .then(added => {
+          if (!added.ok) { showToast(added.error||'Error', true); return; }
+          pkgCount = added.count;
+          updateCount();
+          lastScannedZone  = null;
+          lastAddedItemId  = added.new_item_id || null;
+          if (added.zip_warning) {
+            document.getElementById('zip-warn-text').textContent = added.zip_warning;
+            document.getElementById('zip-warn-banner').classList.add('show');
+            setTimeout(() => document.getElementById('zip-warn-banner').classList.remove('show'), 8000);
+          }
+          setTimeout(refreshLiveSort, 400);
+        });
+        return;
+      }
+
+      // ─ Default: show confirm card (zones not locked or no tracking) ─
       document.getElementById('p-name').value     = d.name || '';
       document.getElementById('p-address').value   = d.address || '';
       document.getElementById('p-tracking').value  = d.tracking || '';

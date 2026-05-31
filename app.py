@@ -1276,24 +1276,45 @@ def scan_process():
                 (ss['id'], tracking)
             ).fetchone()
             if existing:
-                # Package already in session — look up its zone
+                # Package already in session — look up its zone + vehicle spot
                 stored_cents = json.loads(ss['zone_centroids']) if ss['zone_centroids'] else None
-                lookup_zone = {}
+                zones_locked = bool(ss['zones_locked'])
+                lookup_zone  = {}
                 if stored_cents and existing['dest_lat'] and existing['dest_lng']:
-                    pkg_pt = {'lat': existing['dest_lat'], 'lng': existing['dest_lng']}
+                    pkg_pt  = {'lat': existing['dest_lat'], 'lng': existing['dest_lng']}
                     nearest = min(stored_cents, key=lambda c: _dsq(pkg_pt, c))
+                    letter  = nearest['letter']
+                    # Get driver vehicle type for vehicle zone lookup
+                    drv = db.execute("SELECT vehicle_type FROM drivers WHERE id=?",
+                                     (session['driver_id'],)).fetchone()
+                    vtype  = drv['vehicle_type'] if drv and drv['vehicle_type'] else 'suv_midsize'
+                    vzones = VEHICLE_ZONES.get(vtype, VEHICLE_ZONES['suv_midsize'])
+                    # All letters in order to map delivery zone → vehicle zone
+                    all_letters = sorted({c['letter'] for c in stored_cents})
+                    n_dlv = len(all_letters)
+                    seq   = all_letters.index(letter) if letter in all_letters else 0
+                    if n_dlv > 1:
+                        v_idx = int(round(seq / (n_dlv - 1) * (len(vzones) - 1)))
+                    else:
+                        v_idx = 0
+                    v_idx = len(vzones) - 1 - v_idx
+                    v_idx = max(0, min(v_idx, len(vzones) - 1))
+                    vz    = vzones[v_idx]
                     lookup_zone = {
-                        'zone_letter': nearest['letter'],
-                        'zone_color':  nearest['color'],
-                        'zone_emoji':  nearest['emoji'],
+                        'zone_letter':       letter,
+                        'zone_color':        nearest['color'],
+                        'zone_emoji':        nearest['emoji'],
+                        'vehicle_zone_label': vz['label'],
+                        'vehicle_zone_desc':  vz['desc'],
+                        'zones_locked':       zones_locked,
                     }
                 db.close()
                 return jsonify({
-                    'ok':       True,
-                    'mode':     'lookup',
+                    'ok':      True,
+                    'mode':    'lookup',
                     'tracking': tracking,
-                    'address':  existing['customer_name'] and f"{existing['customer_name']} — {existing['address']}" or existing['address'],
-                    'data':     result,
+                    'address': (f"{existing['customer_name']} — " if existing['customer_name'] else '') + existing['address'],
+                    'data':    result,
                     **lookup_zone
                 })
         db.close()
