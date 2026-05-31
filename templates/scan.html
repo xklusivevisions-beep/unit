@@ -1,5 +1,11 @@
 {% extends "base.html" %}
 {% block title %}Scan Packages — UNIT{% endblock %}
+{% block extra_css %}
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+{% endblock %}
+{% block extra_js %}
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+{% endblock %}
 {% block content %}
 <style>
   .scan-page { max-width: 480px; margin: 0 auto; padding: 16px; }
@@ -198,10 +204,6 @@
 
 <div class="toast" id="toast"></div>
 
-<!-- Leaflet.js for live map -->
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-
 <script>
 let stream = null;
 let pkgCount = {{ items|length }};
@@ -231,6 +233,8 @@ function refreshLiveSort() {
       const section = document.getElementById('live-map-section');
       section.style.display = 'block';
       initMap();
+      // Force Leaflet to recalculate size after container becomes visible
+      setTimeout(() => liveMap && liveMap.invalidateSize(), 50);
 
       // Update sort status badge
       const badge = document.getElementById('sort-status');
