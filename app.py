@@ -1,5 +1,5 @@
 from flask import Flask, render_template, request, redirect, url_for, session, jsonify, flash, get_flashed_messages
-from datetime import datetime
+from datetime import datetime, timedelta
 from geopy.distance import geodesic
 from geopy.geocoders import Nominatim
 import sqlite3, os, json, requests, logging, traceback, csv, io, secrets, re, base64
@@ -1298,6 +1298,15 @@ def scan_build_route():
                         )
                         db.execute("UPDATE stops SET stop_number=? WHERE id=?", (new_num, closest['id']))
                     db.commit()
+                    # Store route stats for ETA calculation
+                    if trip.get('trips'):
+                        dist_miles = round(trip['trips'][0].get('distance', 0) * 0.000621371, 2)
+                        dur_mins   = round(trip['trips'][0].get('duration', 0) / 60, 1)
+                        db.execute(
+                            "UPDATE routes SET est_distance_miles=?, est_duration_mins=? WHERE id=?",
+                            (dist_miles, dur_mins, route_id)
+                        )
+                        db.commit()
                     log.info(f'Scan route {route_id} optimized via OSRM')
         except Exception as e:
             log.warning(f'OSRM optimize on scan build failed: {e}')
@@ -1904,8 +1913,8 @@ def route_eta(route_id):
         result['avg_mins_per_stop'] = round(avg, 1)
         eta_mins = avg * n_remaining
         result['eta_mins'] = round(eta_mins)
-        eta_dt = now + __import__('datetime').timedelta(minutes=eta_mins)
-        result['eta_time'] = eta_dt.strftime('%-I:%M %p')
+        eta_dt = now + timedelta(minutes=eta_mins)
+        result['eta_time'] = eta_dt.strftime('%I:%M %p').lstrip('0')
 
     return jsonify(result)
 
