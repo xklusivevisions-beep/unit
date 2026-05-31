@@ -42,6 +42,15 @@
                   margin-bottom: 16px; display: none; }
   #preview-card h3 { font-size: 0.85rem; color: #9ca3af; text-transform: uppercase;
                      letter-spacing: .05em; margin: 0 0 12px; }
+  /* Lookup card */
+  #lookup-card { border-radius: 16px; padding: 16px; margin-bottom: 16px;
+                 display: none; border: 3px solid; }
+  .lookup-zone-label { font-size: 2rem; font-weight: 900; }
+  .lookup-zone-sub   { font-size: 0.85rem; opacity: .85; margin-top: 4px; }
+  .lookup-addr       { font-size: 0.8rem; color: #9ca3af; margin-top: 8px; }
+  .lookup-dismiss    { width: 100%; padding: 10px; margin-top: 12px; background: #374151;
+                       color: #fff; border: none; border-radius: 10px;
+                       font-weight: 700; cursor: pointer; }
   .preview-field { margin-bottom: 10px; }
   .preview-field label { font-size: 0.75rem; color: #6b7280; display: block; margin-bottom: 2px; }
   .preview-field input { width: 100%; background: #111827; border: 1px solid #374151;
@@ -291,6 +300,14 @@
   <div id="loading">
     <div class="spinner"></div>
     <div>Reading label…</div>
+  </div>
+
+  <!-- Lookup card (re-scan existing package) -->
+  <div id="lookup-card">
+    <div class="lookup-zone-label" id="lookup-zone-label"></div>
+    <div class="lookup-zone-sub"  id="lookup-zone-sub"></div>
+    <div class="lookup-addr"      id="lookup-addr"></div>
+    <button class="lookup-dismiss" onclick="dismissLookup()">Got it ✓</button>
   </div>
 
   <!-- Preview card -->
@@ -714,21 +731,40 @@ function refreshLiveSort() {
       const listEl  = document.getElementById('pkg-list-inner');
       listEl.innerHTML = '';
       let lastLetter = null;
-      const isLocked = data.zones_locked;
+      let lastBag     = null;
+      const isLocked  = data.zones_locked;
       data.items.forEach((pkg) => {
-        const color  = pkg.zone_color || '#3b82f6';
-        const letter = pkg.zone_letter || '?';
-        const label  = pkg.zone_label_full || `Stop ${pkg.delivery_order}`;
-        const vzone  = pkg.vehicle_zone_label || '';
+        const color    = pkg.zone_color    || '#3b82f6';
+        const letter   = pkg.zone_letter   || '?';
+        const label    = pkg.zone_label_full || `Stop ${pkg.delivery_order}`;
+        const vzone    = pkg.vehicle_zone_label || '';
+        const bagNum   = pkg.bag_num   || 0;
+        const bagLabel = pkg.bag_label || '';
+
         // Zone group header
         if (letter !== lastLetter && letter !== '?') {
           lastLetter = letter;
+          lastBag    = null;
           const lockIcon = isLocked ? '🔒 ' : '🟡 ';
+          // Count stops in this zone from data
+          const zoneCount = data.items.filter(p => p.zone_letter === letter).length;
+          const bagCount  = Math.ceil(zoneCount / 8);
           listEl.innerHTML += `
-            <div style="padding:8px 4px 4px;font-size:0.72rem;font-weight:800;color:${color};text-transform:uppercase;letter-spacing:.08em;">
-              ${lockIcon}${pkg.zone_emoji || ''} Zone ${letter} &nbsp;•&nbsp; ${vzone}
+            <div style="padding:10px 4px 4px;font-size:0.78rem;font-weight:800;color:${color};text-transform:uppercase;letter-spacing:.08em;">
+              ${lockIcon}${pkg.zone_emoji||''} Zone ${letter} — ${zoneCount} stops, ${bagCount} bag${bagCount!==1?'s':''} • ${vzone}
             </div>`;
         }
+
+        // Bag sub-header within zone
+        if (isLocked && bagNum && bagNum !== lastBag) {
+          lastBag = bagNum;
+          listEl.innerHTML += `
+            <div style="padding:4px 8px;margin:4px 0 2px;background:${color}22;border-left:3px solid ${color};
+                        border-radius:6px;font-size:0.72rem;font-weight:700;color:${color};">
+              🚿 ${bagLabel} &nbsp;—&nbsp; stops ${letter}-${(bagNum-1)*8+1} to ${letter}-${Math.min(bagNum*8, data.items.filter(p=>p.zone_letter===letter).length)}
+            </div>`;
+        }
+
         const holdBadge = !isLocked
           ? `<span class="hold-badge">⏸ HOLD — don’t load yet</span>`
           : '';
@@ -821,10 +857,17 @@ function processBlob(blob) {
     .then(data => {
       document.getElementById('loading').style.display = 'none';
       if (!data.ok) { showToast(data.error || 'Could not read label', true); return; }
+
+      // ─ Lookup mode: package already in session ─
+      if (data.mode === 'lookup') {
+        showLookupCard(data);
+        return;
+      }
+
       const d = data.data;
-      document.getElementById('p-name').value = d.name || '';
-      document.getElementById('p-address').value = d.address || '';
-      document.getElementById('p-tracking').value = d.tracking || '';
+      document.getElementById('p-name').value     = d.name || '';
+      document.getElementById('p-address').value   = d.address || '';
+      document.getElementById('p-tracking').value  = d.tracking || '';
       document.getElementById('preview-card').style.display = 'block';
     })
     .catch(() => {
@@ -835,6 +878,25 @@ function processBlob(blob) {
 
 function discardPreview() {
   document.getElementById('preview-card').style.display = 'none';
+}
+
+function showLookupCard(data) {
+  const card   = document.getElementById('lookup-card');
+  const color  = data.zone_color  || '#3b82f6';
+  const emoji  = data.zone_emoji  || '📦';
+  const letter = data.zone_letter || '?';
+  card.style.borderColor = color;
+  card.style.background  = color + '15';
+  document.getElementById('lookup-zone-label').textContent = `${emoji} Zone ${letter}`;
+  document.getElementById('lookup-zone-label').style.color = color;
+  document.getElementById('lookup-zone-sub').textContent   =
+    data.zone_letter ? `Already sorted — load in ${letter}-zone spot` : 'Already in session';
+  document.getElementById('lookup-addr').textContent = data.address || '';
+  card.style.display = 'block';
+}
+
+function dismissLookup() {
+  document.getElementById('lookup-card').style.display = 'none';
 }
 
 // ── Confirm & add ──

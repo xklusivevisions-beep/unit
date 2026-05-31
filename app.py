@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from geopy.distance import geodesic
 from geopy.geocoders import Nominatim
 import sqlite3, os, json, requests, logging, traceback, csv, io, secrets, re, base64
-import pdfplumber
+import pdfplumber, math
 from PIL import Image
 import anthropic
 
@@ -424,65 +424,160 @@ def kmeans_geo(points, k, max_iter=40):
                 }
     return assignments
 
+BAG_SIZE = 8  # stops per bag within a zone
+
+def _mark_unknown(pkgs):
+    for p in pkgs:
+        p.update({'zone_letter':'?','zone_num':0,'zone_label_full':'?',
+                  'zone_color':'#6b7280','zone_emoji':'⚪','bag_num':0,'bag_label':'?'})
+
+def cluster_packages_geo(geocoded):
+    """
+    Step 1 of optimized routing: cluster packages into geographic zones by k-means.
+    Returns dict: {cluster_index: [pkg, ...]} and cluster_letter map.
+    """
+    n = len(geocoded)
+    if n == 0:
+        return {}, {}
+    k = calc_num_zones_adaptive(geocoded)
+    if k <= 1 or n < 2:
+        return {0: geocoded}, {0: 'A'}
+    assignments = kmeans_geo(geocoded, k)
+    groups = {}
+    for i, p in enumerate(geocoded):
+        groups.setdefault(assignments[i], []).append(p)
+    # Zone order: nearest-neighbor on centroids starting from first geocoded pkg
+    centroids = [
+        {'cluster': c,
+         'lat': sum(p['lat'] for p in pts) / len(pts),
+         'lng': sum(p['lng'] for p in pts) / len(pts)}
+        for c, pts in groups.items()
+    ]
+    start = {'lat': geocoded[0]['lat'], 'lng': geocoded[0]['lng']}
+    ordered = []
+    remaining = list(centroids)
+    cur = start
+    while remaining:
+        nearest = min(remaining, key=lambda c: _dsq(cur, c))
+        ordered.append(nearest['cluster'])
+        cur = nearest
+        remaining.remove(nearest)
+    cluster_letter = {c: chr(65 + seq) for seq, c in enumerate(ordered)}
+    return groups, cluster_letter
+
+def osrm_optimize_segment(pkgs):
+    """
+    Step 2: Run OSRM trip optimization on a single zone's packages.
+    Returns (ordered_pkgs, dist_meters, dur_seconds).
+    Falls back to nearest-neighbor if OSRM fails.
+    """
+    if len(pkgs) <= 1:
+        return pkgs, 0, 0
+    try:
+        coords = ';'.join(f"{p['lng']},{p['lat']}" for p in pkgs)
+        url = (f"http://router.project-osrm.org/trip/v1/driving/{coords}"
+               f"?roundtrip=false&source=first&destination=last&overview=false")
+        resp = requests.get(url, timeout=8)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get('code') == 'Ok' and data.get('waypoints'):
+                wps = sorted(data['waypoints'], key=lambda w: w['waypoint_index'])
+                ordered, seen = [], set()
+                for wp in wps:
+                    closest = min(pkgs,
+                        key=lambda p: abs(p['lat']-wp['location'][1])+abs(p['lng']-wp['location'][0]))
+                    if closest['id'] not in seen:
+                        seen.add(closest['id'])
+                        ordered.append(closest)
+                # append any missed
+                for p in pkgs:
+                    if p['id'] not in seen:
+                        ordered.append(p)
+                dist = data['trips'][0].get('distance', 0) if data.get('trips') else 0
+                dur  = data['trips'][0].get('duration', 0) if data.get('trips') else 0
+                return ordered, dist, dur
+    except Exception as e:
+        log.warning(f'OSRM segment failed: {e}')
+    # Nearest-neighbor fallback
+    remaining = list(pkgs)
+    cur = remaining.pop(0)
+    ordered = [cur]
+    while remaining:
+        nxt = min(remaining, key=lambda p: _dsq(cur, p))
+        remaining.remove(nxt)
+        ordered.append(nxt)
+        cur = nxt
+    return ordered, 0, 0
+
+def build_optimized_route(geocoded):
+    """
+    Full optimized routing pipeline:
+    1. Cluster packages into geographic zones (k-means)
+    2. Determine zone driving order (nearest-neighbor on centroids)
+    3. Run OSRM per zone for within-zone optimization
+    4. Combine into final delivery sequence
+    Returns (sorted_pkgs, total_dist_m, total_dur_s)
+    """
+    if not geocoded:
+        return [], 0, 0
+    groups, cluster_letter = cluster_packages_geo(geocoded)
+    total_dist, total_dur = 0, 0
+    result = []
+    delivery_counter = 1
+    for cluster_idx in sorted(groups, key=lambda c: cluster_letter.get(c,'Z')):
+        zone_pkgs = groups[cluster_idx]
+        letter    = cluster_letter.get(cluster_idx, 'A')
+        color     = ZONE_COLORS.get(letter, {'hex':'#6b7280','emoji':'⚪'})
+        ordered, dist_m, dur_s = osrm_optimize_segment(zone_pkgs)
+        total_dist += dist_m
+        total_dur  += dur_s
+        for local_num, p in enumerate(ordered, 1):
+            p.update({
+                'zone_letter':    letter,
+                'zone_num':       local_num,
+                'zone_label_full':f'{letter}-{local_num}',
+                'zone_color':     color['hex'],
+                'zone_emoji':     color['emoji'],
+                'bag_num':        math.ceil(local_num / BAG_SIZE),
+                'bag_label':      f'{letter}-Bag{math.ceil(local_num / BAG_SIZE)}',
+                'delivery_order': delivery_counter,
+                'load_position':  0,  # filled in below
+            })
+            result.append(p)
+            delivery_counter += 1
+    # Set load positions (last delivery = highest load_position = load first)
+    total = len(result)
+    for i, p in enumerate(result):
+        p['load_position'] = total - i
+    return result, total_dist, total_dur
+
 def assign_delivery_zones(sorted_pkgs):
     """
-    Cluster OSRM-sorted packages into geographic color zones (A, B, C…).
-    Within each zone, packages are numbered sequentially in delivery order (A-1, A-2…).
-    Zone sequence determined by which cluster appears first in the optimized route.
-    Returns packages sorted by zone_letter then zone_num (for loading grouping).
+    Legacy wrapper used by import-route and manual lock paths.
+    Clusters pre-sorted packages into zones (no per-zone OSRM).
     """
     geocoded = [p for p in sorted_pkgs if p.get('lat') and p.get('lng')]
     ungeoced = [p for p in sorted_pkgs if not (p.get('lat') and p.get('lng'))]
     n = len(geocoded)
-
-    def _mark_unknown(pkgs):
-        for p in pkgs:
-            p.update({'zone_letter': '?', 'zone_num': 0,
-                      'zone_label_full': '?', 'zone_color': '#6b7280', 'zone_emoji': '⚪'})
-
     if n == 0:
         _mark_unknown(ungeoced)
         return sorted_pkgs
-
-    k = calc_num_zones_adaptive(geocoded)
-
-    if k == 1 or n < 2:
-        color = ZONE_COLORS['A']
-        for i, p in enumerate(sorted(geocoded, key=lambda x: x.get('delivery_order', 0)), 1):
-            p.update({'zone_letter': 'A', 'zone_num': i, 'zone_label_full': f'A-{i}',
-                      'zone_color': color['hex'], 'zone_emoji': color['emoji']})
-        _mark_unknown(ungeoced)
-        return sorted(geocoded, key=lambda p: (p['zone_letter'], p['zone_num'])) + ungeoced
-
-    assignments = kmeans_geo(geocoded, k)
-
-    # Determine zone sequence: cluster whose earliest delivery_order is lowest → Zone A
-    cluster_earliest = {}
-    for i, p in enumerate(geocoded):
-        c = assignments[i]
-        do = p.get('delivery_order', 9999)
-        if c not in cluster_earliest or do < cluster_earliest[c]:
-            cluster_earliest[c] = do
-
-    cluster_seq   = sorted(cluster_earliest, key=lambda c: cluster_earliest[c])
-    cluster_letter = {c: chr(65 + seq) for seq, c in enumerate(cluster_seq)}  # 0→'A', 1→'B'…
-
-    # Group by letter, sort within group by delivery_order, assign local numbers
-    groups = {}
-    for i, p in enumerate(geocoded):
-        letter = cluster_letter[assignments[i]]
-        groups.setdefault(letter, []).append(p)
-
+    groups, cluster_letter = cluster_packages_geo(geocoded)
     result = []
-    for letter in sorted(groups):
-        color = ZONE_COLORS.get(letter, {'hex': '#6b7280', 'emoji': '⚪'})
-        for local_num, p in enumerate(sorted(groups[letter],
-                                             key=lambda x: x.get('delivery_order', 0)), 1):
-            p.update({'zone_letter': letter, 'zone_num': local_num,
-                      'zone_label_full': f'{letter}-{local_num}',
-                      'zone_color': color['hex'], 'zone_emoji': color['emoji']})
+    for cluster_idx in sorted(groups, key=lambda c: cluster_letter.get(c,'Z')):
+        letter = cluster_letter.get(cluster_idx, 'A')
+        color  = ZONE_COLORS.get(letter, {'hex':'#6b7280','emoji':'⚪'})
+        for local_num, p in enumerate(
+            sorted(groups[cluster_idx], key=lambda x: x.get('delivery_order', 0)), 1
+        ):
+            p.update({
+                'zone_letter':    letter, 'zone_num':       local_num,
+                'zone_label_full':f'{letter}-{local_num}',
+                'zone_color':     color['hex'], 'zone_emoji': color['emoji'],
+                'bag_num':        math.ceil(local_num / BAG_SIZE),
+                'bag_label':      f'{letter}-Bag{math.ceil(local_num / BAG_SIZE)}',
+            })
             result.append(p)
-
     _mark_unknown(ungeoced)
     return result + ungeoced
 
@@ -1151,7 +1246,11 @@ def scan_packages():
 
 @app.route('/driver/scan/process', methods=['POST'])
 def scan_process():
-    """Receive label photo, run Claude Vision, return parsed JSON."""
+    """
+    Receive label photo, run Claude Vision, return parsed JSON.
+    If the tracking number already exists in the session (re-scan / lookup),
+    returns mode='lookup' with the package's current zone assignment.
+    """
     if 'driver_id' not in session:
         return jsonify({'ok': False, 'error': 'not logged in'}), 401
     file = request.files.get('photo')
@@ -1161,7 +1260,45 @@ def scan_process():
     result = extract_package_label(img_bytes)
     if not result:
         return jsonify({'ok': False, 'error': 'Could not read label — try a clearer photo'})
-    return jsonify({'ok': True, 'data': result})
+
+    # ─ Lookup mode: check if tracking already in session ─
+    tracking = result.get('tracking', '').strip()
+    if tracking:
+        db = get_db()
+        today = datetime.now().strftime('%Y-%m-%d')
+        ss = db.execute(
+            "SELECT * FROM scan_sessions WHERE driver_id=? AND date=? AND status='scanning' ORDER BY id DESC LIMIT 1",
+            (session['driver_id'], today)
+        ).fetchone()
+        if ss:
+            existing = db.execute(
+                "SELECT * FROM scan_items WHERE session_id=? AND tracking=? LIMIT 1",
+                (ss['id'], tracking)
+            ).fetchone()
+            if existing:
+                # Package already in session — look up its zone
+                stored_cents = json.loads(ss['zone_centroids']) if ss['zone_centroids'] else None
+                lookup_zone = {}
+                if stored_cents and existing['dest_lat'] and existing['dest_lng']:
+                    pkg_pt = {'lat': existing['dest_lat'], 'lng': existing['dest_lng']}
+                    nearest = min(stored_cents, key=lambda c: _dsq(pkg_pt, c))
+                    lookup_zone = {
+                        'zone_letter': nearest['letter'],
+                        'zone_color':  nearest['color'],
+                        'zone_emoji':  nearest['emoji'],
+                    }
+                db.close()
+                return jsonify({
+                    'ok':       True,
+                    'mode':     'lookup',
+                    'tracking': tracking,
+                    'address':  existing['customer_name'] and f"{existing['customer_name']} — {existing['address']}" or existing['address'],
+                    'data':     result,
+                    **lookup_zone
+                })
+        db.close()
+
+    return jsonify({'ok': True, 'mode': 'confirm', 'data': result})
 
 
 @app.route('/driver/scan/add', methods=['POST'])
@@ -1301,14 +1438,13 @@ def scan_live_sort():
     geocoded   = [p for p in packages if p['lat'] and p['lng']]
     ungeoced   = [p for p in packages if not (p['lat'] and p['lng'])]
 
-    sorted_pkgs = []
-    route_miles       = None
-    route_drive_mins  = None
-    naive_miles       = None
-    savings_miles     = None
+    route_miles      = None
+    route_drive_mins = None
+    naive_miles      = None
+    savings_miles    = None
 
+    # ─ Naive distance (sequential scan order) for savings calc ─
     if len(geocoded) >= 2:
-        # ─ Naive distance (sequential scan order, no optimization) ─
         naive_dist_m = sum(
             geodesic((geocoded[i]['lat'], geocoded[i]['lng']),
                      (geocoded[i+1]['lat'], geocoded[i+1]['lng'])).meters
@@ -1316,92 +1452,38 @@ def scan_live_sort():
         )
         naive_miles = round(naive_dist_m * 0.000621371, 2)
 
-        try:
-            # OSRM trip optimization — request duration+distance in response
-            # Split into chunks of 100 if >100 stops (OSRM public limit)
-            chunk_size = 100
-            if len(geocoded) <= chunk_size:
-                chunks = [geocoded]
-            else:
-                chunks = [geocoded[i:i+chunk_size] for i in range(0, len(geocoded), chunk_size)]
+    # ─ Cluster-first, per-zone OSRM optimization ─
+    sorted_pkgs, total_dist_m, total_dur_s = build_optimized_route(geocoded)
 
-            all_sorted = []
-            total_dist_m = 0
-            total_dur_s  = 0
-
-            for chunk in chunks:
-                coords = ';'.join(f"{p['lng']},{p['lat']}" for p in chunk)
-                osrm_url = (f"http://router.project-osrm.org/trip/v1/driving/{coords}"
-                            f"?roundtrip=false&source=first&destination=last&overview=false")
-                resp = requests.get(osrm_url, timeout=8)
-                if resp.status_code == 200:
-                    trip_data = resp.json()
-                    if trip_data.get('code') == 'Ok' and trip_data.get('waypoints'):
-                        waypoints = sorted(trip_data['waypoints'], key=lambda w: w['waypoint_index'])
-                        for wp in waypoints:
-                            closest = min(
-                                chunk,
-                                key=lambda p: abs(p['lat'] - wp['location'][1]) + abs(p['lng'] - wp['location'][0])
-                            )
-                            all_sorted.append(closest)
-                        # Accumulate distance + duration
-                        if trip_data.get('trips'):
-                            total_dist_m += trip_data['trips'][0].get('distance', 0)
-                            total_dur_s  += trip_data['trips'][0].get('duration', 0)
-
-            if all_sorted:
-                # Deduplicate
-                seen = set()
-                for p in all_sorted:
-                    if p['id'] not in seen:
-                        seen.add(p['id'])
-                        sorted_pkgs.append(p)
-                route_miles      = round(total_dist_m * 0.000621371, 2)
-                route_drive_mins = round(total_dur_s / 60, 1)
-                savings_miles    = round(naive_miles - route_miles, 2) if naive_miles and route_miles else None
-        except Exception as e:
-            log.warning(f'OSRM live-sort failed: {e}')
-
-    if not sorted_pkgs:
-        # Nearest-neighbor fallback (pure Python)
-        remaining = list(geocoded)
-        if remaining:
-            current = remaining.pop(0)
-            sorted_pkgs = [current]
-            while remaining:
-                nearest = min(remaining, key=lambda p: geodesic(
-                    (current['lat'], current['lng']), (p['lat'], p['lng'])
-                ).miles)
-                remaining.remove(nearest)
-                sorted_pkgs.append(nearest)
-                current = nearest
-
-    # Append ungeocoded at the end
+    # Add ungeocoded at end
     seen_ids = {p['id'] for p in sorted_pkgs}
     for p in ungeoced:
         if p['id'] not in seen_ids:
-            sorted_pkgs.append(p)
-    # Also append any geocoded packages that got dropped
-    for p in geocoded:
-        if p['id'] not in seen_ids:
+            p.update({'zone_letter':'?','zone_num':0,'zone_label_full':'?',
+                      'zone_color':'#6b7280','zone_emoji':'⚪',
+                      'bag_num':0,'bag_label':'?',
+                      'delivery_order': len(sorted_pkgs)+1,
+                      'load_position': 0})
             sorted_pkgs.append(p)
 
-    # Add load position (reverse of delivery order = how to load the truck)
     total = len(sorted_pkgs)
-    for i, p in enumerate(sorted_pkgs):
-        p['delivery_order'] = i + 1        # 1 = deliver first
-        p['load_position']  = total - i    # highest = load first (goes in back of truck)
+
+    if total_dist_m > 0:
+        route_miles      = round(total_dist_m * 0.000621371, 2)
+        route_drive_mins = round(total_dur_s / 60, 1)
+        savings_miles    = round(naive_miles - route_miles, 2) if naive_miles else None
 
     just_locked = False
     scans_until_lock = max(0, ZONE_LOCK_THRESHOLD - len(geocoded))
 
     if zones_locked and stored_cents:
         # ── FAST PATH: zones locked — instant centroid lookup, no re-clustering ──
+        # sorted_pkgs already has zone/bag assignments from build_optimized_route;
+        # just re-snap to locked centroids to keep zone letters stable
         sorted_pkgs = assign_zones_from_centroids(sorted_pkgs, stored_cents)
     else:
-        # ── CALIBRATION PATH: cluster + check for auto-lock ──
-        sorted_pkgs = assign_delivery_zones(sorted_pkgs)
-
+        # ── CALIBRATION PATH: sorted_pkgs already built+zoned by build_optimized_route ──
+        # Check for auto-lock
         if len(geocoded) >= ZONE_LOCK_THRESHOLD:
             new_cents = compute_centroids(sorted_pkgs)
             if centroids_stable(prev_cents, new_cents) or len(geocoded) >= ZONE_LOCK_THRESHOLD + 5:
@@ -1444,6 +1526,11 @@ def scan_live_sort():
                 'load_order':   len(zone_summary) + 1,
             }
         zone_summary[letter]['count'] += 1
+    # Add bag counts per zone
+    for letter, zs in zone_summary.items():
+        n_bags = math.ceil(zs['count'] / BAG_SIZE)
+        zs['n_bags'] = n_bags
+        zs['bags']   = [f'{letter}-Bag{b}' for b in range(1, n_bags + 1)]
     zone_list = sorted(zone_summary.values(), key=lambda z: z['letter'], reverse=True)
     for i, z in enumerate(zone_list):
         z['load_order'] = i + 1
