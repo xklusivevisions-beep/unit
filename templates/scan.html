@@ -103,6 +103,22 @@
            font-weight: 700; display: none; z-index: 999; white-space: nowrap; }
   .toast.err { background: #ef4444; }
 
+  /* Route stats bar */
+  #route-stats { background: #0f172a; border-radius: 14px; padding: 12px 16px;
+                 margin-bottom: 14px; display: none; }
+  .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; text-align: center; }
+  .stat-item .stat-val { font-size: 1.05rem; font-weight: 800; color: #fff; }
+  .stat-item .stat-lbl { font-size: 0.65rem; color: #6b7280; text-transform: uppercase;
+                         letter-spacing: .05em; margin-top: 2px; }
+  .stat-savings { color: #10b981 !important; }
+  .stat-warn    { color: #f59e0b !important; }
+
+  /* Zip warning */
+  .zip-warn-banner { background: #7c2d12; border: 1px solid #f97316; border-radius: 10px;
+                     padding: 10px 14px; margin-bottom: 10px; font-size: 0.85rem;
+                     color: #fed7aa; display: none; }
+  .zip-warn-banner.show { display: block; }
+
   /* Vehicle selector */
   .vehicle-bar { display: flex; align-items: center; justify-content: space-between;
                  background: #1f2937; border-radius: 12px; padding: 10px 14px;
@@ -159,6 +175,33 @@
       <div class="vehicle-bar-val" id="vehicle-label">Loading...</div>
     </div>
     <span class="vehicle-bar-arrow">⚙️</span>
+  </div>
+
+  <!-- Route stats bar -->
+  <div id="route-stats">
+    <div class="stats-grid">
+      <div class="stat-item">
+        <div class="stat-val" id="stat-miles">—</div>
+        <div class="stat-lbl">Miles</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-val" id="stat-time">—</div>
+        <div class="stat-lbl">Drive Time</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-val stat-savings" id="stat-savings">—</div>
+        <div class="stat-lbl">Miles Saved</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-val stat-warn" id="stat-eta">—</div>
+        <div class="stat-lbl">Est. Done</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Zip warning banner -->
+  <div class="zip-warn-banner" id="zip-warn-banner">
+    ⚠️ <span id="zip-warn-text"></span>
   </div>
 
   <!-- Zone flash banner (appears right after scan) -->
@@ -411,6 +454,25 @@ function refreshLiveSort() {
         document.getElementById('vehicle-label').textContent = data.vehicle_label;
       }
 
+      // Update route stats bar
+      if (data.route_miles !== null && data.route_miles !== undefined) {
+        document.getElementById('route-stats').style.display = 'block';
+        document.getElementById('stat-miles').textContent  = data.route_miles + ' mi';
+        const dm = data.route_drive_mins;
+        document.getElementById('stat-time').textContent   = dm >= 60
+          ? Math.floor(dm/60) + 'h ' + Math.round(dm%60) + 'm'
+          : Math.round(dm) + ' min';
+        const sv = data.savings_miles;
+        document.getElementById('stat-savings').textContent = sv > 0 ? '-' + sv + ' mi' : '—';
+        // ETA estimate (not yet started — show pre-route estimate)
+        if (data.est_total_mins) {
+          const etaMins = data.est_total_mins;
+          document.getElementById('stat-eta').textContent = etaMins >= 60
+            ? Math.floor(etaMins/60) + 'h ' + Math.round(etaMins%60) + 'm'
+            : '~' + Math.round(etaMins) + ' min';
+        }
+      }
+
       // Show zone banner for the most recently scanned package (by its DB id)
       if (lastAddedItemId !== null) {
         const newPkg = data.items.find(p => p.id === lastAddedItemId);
@@ -555,6 +617,15 @@ function confirmPackage() {
     pkgCount = data.count;
     updateCount();
     discardPreview();
+    // Show zip warning if package is outside assigned zone
+    const zipWarnEl = document.getElementById('zip-warn-banner');
+    if (data.zip_warning) {
+      document.getElementById('zip-warn-text').textContent = data.zip_warning;
+      zipWarnEl.classList.add('show');
+      setTimeout(() => zipWarnEl.classList.remove('show'), 8000);
+    } else {
+      zipWarnEl.classList.remove('show');
+    }
     showToast('Package added ✓' + (data.geocoded ? ' 📍' : ''));
     // Reset zone banner flag so the next sort shows the new package's zone
     lastScannedZone = null;

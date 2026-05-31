@@ -520,6 +520,12 @@ def init_db():
         "ALTER TABLE drivers ADD COLUMN is_beta INTEGER DEFAULT 0",
         "ALTER TABLE drivers ADD COLUMN vehicle_type TEXT DEFAULT 'suv'",
         "ALTER TABLE drivers ADD COLUMN vehicle_capacity INTEGER DEFAULT 100",
+        "ALTER TABLE drivers ADD COLUMN assigned_zips TEXT",
+        "ALTER TABLE stops ADD COLUMN delivered_at TEXT",
+        "ALTER TABLE routes ADD COLUMN est_distance_miles REAL",
+        "ALTER TABLE routes ADD COLUMN est_duration_mins REAL",
+        "ALTER TABLE routes ADD COLUMN route_started_at TEXT",
+        "ALTER TABLE routes ADD COLUMN first_delivery_at TEXT",
         "CREATE TABLE IF NOT EXISTS pin_corrections (id INTEGER PRIMARY KEY AUTOINCREMENT, address TEXT UNIQUE NOT NULL, lat REAL NOT NULL, lng REAL NOT NULL, corrected_by TEXT, corrected_at TEXT DEFAULT CURRENT_TIMESTAMP)",
         "CREATE TABLE IF NOT EXISTS login_attempts (id INTEGER PRIMARY KEY AUTOINCREMENT, ip TEXT NOT NULL, attempted_at TEXT NOT NULL)",
         "CREATE INDEX IF NOT EXISTS idx_login_attempts_ip ON login_attempts (ip, attempted_at)",
@@ -959,6 +965,15 @@ def scan_add():
 
     db = get_db()
     ss_id = _get_or_create_scan_session(db, session['driver_id'])
+
+    # Check zip against driver's assigned zips
+    zip_warning = None
+    driver_row = db.execute("SELECT assigned_zips FROM drivers WHERE id=?", (session['driver_id'],)).fetchone()
+    if driver_row and driver_row['assigned_zips'] and zip_code:
+        assigned = [z.strip() for z in driver_row['assigned_zips'].split(',') if z.strip()]
+        if assigned and zip_code not in assigned:
+            zip_warning = f'ZIP {zip_code} is outside your assigned zone ({driver_row["assigned_zips"]})'
+
     db.execute(
         """INSERT INTO scan_items (session_id, tracking, customer_name, address, zip_code, raw_json, dest_lat, dest_lng)
            VALUES (?,?,?,?,?,?,?,?)""",
@@ -968,7 +983,8 @@ def scan_add():
     new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
     count = db.execute("SELECT COUNT(*) FROM scan_items WHERE session_id=?", (ss_id,)).fetchone()[0]
     db.close()
-    return jsonify({'ok': True, 'count': count, 'geocoded': lat is not None, 'new_item_id': new_id})
+    return jsonify({'ok': True, 'count': count, 'geocoded': lat is not None,
+                   'new_item_id': new_id, 'zip_warning': zip_warning})
 
 
 @app.route('/driver/scan/live-sort', methods=['GET'])
@@ -1016,31 +1032,63 @@ def scan_live_sort():
     ungeoced   = [p for p in packages if not (p['lat'] and p['lng'])]
 
     sorted_pkgs = []
+    route_miles       = None
+    route_drive_mins  = None
+    naive_miles       = None
+    savings_miles     = None
+
     if len(geocoded) >= 2:
+        # ─ Naive distance (sequential scan order, no optimization) ─
+        naive_dist_m = sum(
+            geodesic((geocoded[i]['lat'], geocoded[i]['lng']),
+                     (geocoded[i+1]['lat'], geocoded[i+1]['lng'])).meters
+            for i in range(len(geocoded) - 1)
+        )
+        naive_miles = round(naive_dist_m * 0.000621371, 2)
+
         try:
-            # OSRM nearest-neighbor trip optimization
-            coords = ';'.join(f"{p['lng']},{p['lat']}" for p in geocoded)
-            osrm_url = (f"http://router.project-osrm.org/trip/v1/driving/{coords}"
-                        f"?roundtrip=false&source=first&destination=last&overview=false")
-            resp = requests.get(osrm_url, timeout=6)
-            if resp.status_code == 200:
-                trip = resp.json()
-                if trip.get('code') == 'Ok' and trip.get('waypoints'):
-                    waypoints = sorted(trip['waypoints'], key=lambda w: w['waypoint_index'])
-                    for wp in waypoints:
-                        closest = min(
-                            geocoded,
-                            key=lambda p: abs(p['lat'] - wp['location'][1]) + abs(p['lng'] - wp['location'][0])
-                        )
-                        sorted_pkgs.append(closest)
-                    # Remove duplicates while preserving order
-                    seen = set()
-                    deduped = []
-                    for p in sorted_pkgs:
-                        if p['id'] not in seen:
-                            seen.add(p['id'])
-                            deduped.append(p)
-                    sorted_pkgs = deduped
+            # OSRM trip optimization — request duration+distance in response
+            # Split into chunks of 100 if >100 stops (OSRM public limit)
+            chunk_size = 100
+            if len(geocoded) <= chunk_size:
+                chunks = [geocoded]
+            else:
+                chunks = [geocoded[i:i+chunk_size] for i in range(0, len(geocoded), chunk_size)]
+
+            all_sorted = []
+            total_dist_m = 0
+            total_dur_s  = 0
+
+            for chunk in chunks:
+                coords = ';'.join(f"{p['lng']},{p['lat']}" for p in chunk)
+                osrm_url = (f"http://router.project-osrm.org/trip/v1/driving/{coords}"
+                            f"?roundtrip=false&source=first&destination=last&overview=false")
+                resp = requests.get(osrm_url, timeout=8)
+                if resp.status_code == 200:
+                    trip_data = resp.json()
+                    if trip_data.get('code') == 'Ok' and trip_data.get('waypoints'):
+                        waypoints = sorted(trip_data['waypoints'], key=lambda w: w['waypoint_index'])
+                        for wp in waypoints:
+                            closest = min(
+                                chunk,
+                                key=lambda p: abs(p['lat'] - wp['location'][1]) + abs(p['lng'] - wp['location'][0])
+                            )
+                            all_sorted.append(closest)
+                        # Accumulate distance + duration
+                        if trip_data.get('trips'):
+                            total_dist_m += trip_data['trips'][0].get('distance', 0)
+                            total_dur_s  += trip_data['trips'][0].get('duration', 0)
+
+            if all_sorted:
+                # Deduplicate
+                seen = set()
+                for p in all_sorted:
+                    if p['id'] not in seen:
+                        seen.add(p['id'])
+                        sorted_pkgs.append(p)
+                route_miles      = round(total_dist_m * 0.000621371, 2)
+                route_drive_mins = round(total_dur_s / 60, 1)
+                savings_miles    = round(naive_miles - route_miles, 2) if naive_miles and route_miles else None
         except Exception as e:
             log.warning(f'OSRM live-sort failed: {e}')
 
@@ -1077,14 +1125,25 @@ def scan_live_sort():
     # Assign vehicle zones based on driver's vehicle type
     sorted_pkgs = assign_vehicle_zones(sorted_pkgs, vehicle_type)
 
+    # ETA projection: drive time + 3 min per stop
+    est_total_mins = None
+    if route_drive_mins is not None:
+        est_total_mins = round(route_drive_mins + (total * 3), 1)
+
     return jsonify({
-        'ok':           True,
-        'items':        sorted_pkgs,
-        'sorted':       len(geocoded) >= 2,
-        'total':        total,
-        'vehicle_type':  vehicle_type,
-        'vehicle_label': VEHICLE_LABELS.get(vehicle_type, 'Vehicle'),
-        'vehicle_zones': VEHICLE_ZONES.get(vehicle_type, VEHICLE_ZONES['suv']),
+        'ok':              True,
+        'items':           sorted_pkgs,
+        'sorted':          len(geocoded) >= 2,
+        'total':           total,
+        'vehicle_type':    vehicle_type,
+        'vehicle_label':   VEHICLE_LABELS.get(vehicle_type, 'Vehicle'),
+        'vehicle_zones':   VEHICLE_ZONES.get(vehicle_type, VEHICLE_ZONES['suv']),
+        # Route stats
+        'route_miles':     route_miles,
+        'route_drive_mins': route_drive_mins,
+        'naive_miles':     naive_miles,
+        'savings_miles':   savings_miles,
+        'est_total_mins':  est_total_mins,
     })
 
 
@@ -1746,9 +1805,19 @@ def stop_delivered(stop_id):
         return redirect(url_for('driver_login'))
     db = get_db()
     stop = db.execute("SELECT * FROM stops WHERE id=?", (stop_id,)).fetchone()
-    db.execute("UPDATE stops SET status='delivered' WHERE id=?", (stop_id,))
+    now_iso = datetime.now().isoformat()
+    db.execute("UPDATE stops SET status='delivered', delivered_at=? WHERE id=?", (now_iso, stop_id))
     db.commit()
     route_id = stop['route_id'] if stop else None
+
+    if route_id:
+        route = db.execute("SELECT * FROM routes WHERE id=?", (route_id,)).fetchone()
+        # Record first delivery time on the route
+        if route and not route['first_delivery_at']:
+            db.execute("UPDATE routes SET first_delivery_at=?, route_started_at=? WHERE id=?",
+                       (now_iso, now_iso, route_id))
+            db.commit()
+
     # Auto-advance: find next pending stop in route
     next_stop = None
     if route_id:
@@ -1784,6 +1853,62 @@ def stop_failed(stop_id):
     if next_stop:
         return redirect(url_for('stop_active', stop_id=next_stop['id']))
     return redirect(url_for('route_detail', route_id=route_id) if route_id else url_for('driver_dashboard'))
+
+@app.route('/driver/route/<int:route_id>/eta', methods=['GET'])
+def route_eta(route_id):
+    """Live ETA: based on first delivery time + avg time per stop."""
+    if 'driver_id' not in session:
+        return jsonify({'ok': False}), 401
+    db = get_db()
+    route = db.execute("SELECT * FROM routes WHERE id=?", (route_id,)).fetchone()
+    if not route:
+        db.close()
+        return jsonify({'ok': False, 'error': 'Route not found'})
+
+    stops = db.execute(
+        "SELECT * FROM stops WHERE route_id=? ORDER BY stop_number ASC", (route_id,)
+    ).fetchall()
+    db.close()
+
+    total      = len(stops)
+    delivered  = [s for s in stops if s['status'] == 'delivered' and s['delivered_at']]
+    remaining  = [s for s in stops if s['status'] not in ('delivered', 'failed')]
+    n_done     = len(delivered)
+    n_remaining= len(remaining)
+
+    result = {
+        'ok':          True,
+        'total':       total,
+        'done':        n_done,
+        'remaining':   n_remaining,
+        'pct':         round(n_done / total * 100) if total else 0,
+        'eta_time':    None,
+        'eta_mins':    None,
+        'avg_mins_per_stop': None,
+        'started_at':  route['first_delivery_at'],
+    }
+
+    if n_done >= 1 and route['first_delivery_at']:
+        start = datetime.fromisoformat(route['first_delivery_at'])
+        now   = datetime.now()
+        elapsed_mins = (now - start).total_seconds() / 60
+
+        if n_done >= 2:
+            # Average based on actual pace
+            avg = elapsed_mins / n_done
+        else:
+            # First stop just delivered — use OSRM estimate if available (3 min/stop fallback)
+            est = route['est_duration_mins']
+            avg = (est / total) if est and total else 3.5
+
+        result['avg_mins_per_stop'] = round(avg, 1)
+        eta_mins = avg * n_remaining
+        result['eta_mins'] = round(eta_mins)
+        eta_dt = now + __import__('datetime').timedelta(minutes=eta_mins)
+        result['eta_time'] = eta_dt.strftime('%-I:%M %p')
+
+    return jsonify(result)
+
 
 @app.route('/driver/route/<int:route_id>/clear', methods=['POST'])
 def route_clear(route_id):
@@ -2373,6 +2498,22 @@ def admin_create_driver():
         send_sms(phone, f"Your UNIT driver PIN is: {pin}\nLogin at: {get_base_url()}/driver/login")
     flash(f'Driver created — {name} | PIN: {pin} | Login: {get_base_url()}/driver/login', 'beta_pin')
     return redirect(url_for('admin'))
+
+@app.route('/admin/driver/<int:driver_id>/assign-zips', methods=['POST'])
+def admin_assign_zips(driver_id):
+    """Admin: assign zip codes to a driver for today's route."""
+    if not session.get('admin'):
+        return jsonify({'ok': False}), 403
+    data = request.get_json() or {}
+    zips_raw = data.get('zips', '')
+    # Normalize: comma-separated, strip spaces, numbers only
+    zips = ','.join(z.strip() for z in str(zips_raw).replace(' ', '').split(',') if z.strip().isdigit() and len(z.strip()) == 5)
+    db = get_db()
+    db.execute("UPDATE drivers SET assigned_zips=? WHERE id=?", (zips or None, driver_id))
+    db.commit()
+    db.close()
+    return jsonify({'ok': True, 'assigned_zips': zips})
+
 
 @app.route('/admin/cleanup-drivers', methods=['POST'])
 def admin_cleanup_drivers():

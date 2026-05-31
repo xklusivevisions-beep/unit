@@ -148,6 +148,19 @@
   </div>
   <div id="optimize-status" style="display:none;text-align:center;font-size:0.8rem;color:#ffaa00;margin-bottom:12px;"></div>
 
+  <!-- Live ETA bar -->
+  <div id="eta-bar" style="display:none;background:#0f172a;border-radius:14px;padding:12px 16px;margin-bottom:14px;">
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;text-align:center;">
+      <div><div id="eta-done" style="font-size:1.1rem;font-weight:800;color:#10b981;">-</div><div style="font-size:0.65rem;color:#6b7280;text-transform:uppercase;">Done</div></div>
+      <div><div id="eta-remaining" style="font-size:1.1rem;font-weight:800;color:#fff;">-</div><div style="font-size:0.65rem;color:#6b7280;text-transform:uppercase;">Left</div></div>
+      <div><div id="eta-pace" style="font-size:1.1rem;font-weight:800;color:#60a5fa;">-</div><div style="font-size:0.65rem;color:#6b7280;text-transform:uppercase;">Min/Stop</div></div>
+      <div><div id="eta-finish" style="font-size:1.1rem;font-weight:800;color:#f59e0b;">-</div><div style="font-size:0.65rem;color:#6b7280;text-transform:uppercase;">Est. Done</div></div>
+    </div>
+    <div style="margin-top:10px;background:#1e293b;border-radius:8px;height:6px;overflow:hidden;">
+      <div id="eta-progress" style="height:100%;background:#10b981;transition:width .5s;"></div>
+    </div>
+  </div>
+
   <!-- Stop List -->
   <h6 class="text-secondary mb-3" style="letter-spacing:0.1em;font-size:0.75rem;">ALL STOPS</h6>
   {% for stop in stops %}
@@ -486,6 +499,27 @@ document.addEventListener('click', e => {
     closeSheet();
   }
 });
+
+// ── Live ETA ──
+const ROUTE_ID = {{ route.id }};
+function refreshEta() {
+  fetch(`/driver/route/${ROUTE_ID}/eta`)
+    .then(r => r.json())
+    .then(data => {
+      if (!data.ok || data.done === 0) return;
+      const bar = document.getElementById('eta-bar');
+      bar.style.display = 'block';
+      document.getElementById('eta-done').textContent      = data.done + '/' + data.total;
+      document.getElementById('eta-remaining').textContent = data.remaining + ' left';
+      document.getElementById('eta-pace').textContent      = data.avg_mins_per_stop ? data.avg_mins_per_stop + ' min' : '—';
+      document.getElementById('eta-finish').textContent    = data.eta_time || '—';
+      document.getElementById('eta-progress').style.width  = data.pct + '%';
+    })
+    .catch(() => {});
+}
+// Poll every 60 seconds while on this page
+refreshEta();
+setInterval(refreshEta, 60000);
 </script>
 <script src='https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.js'></script>
 {% endblock %}
