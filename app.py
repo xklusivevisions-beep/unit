@@ -277,105 +277,245 @@ GOOGLE_MAPS_KEY = os.environ.get('GOOGLE_MAPS_KEY', '')
 # last index = load LAST (closest to door). Delivery order maps inversely.
 VEHICLE_ZONES = {
     'small_car': [
-        {'id': 'trunk-back',   'label': 'Trunk — Back Wall',    'icon': '🔵', 'desc': 'Against the back wall of trunk'},
-        {'id': 'trunk-mid',    'label': 'Trunk — Middle',       'icon': '🔵', 'desc': 'Middle of trunk'},
-        {'id': 'trunk-front',  'label': 'Trunk — Front',       'icon': '🟡', 'desc': 'Front of trunk, near seat'},
-        {'id': 'backseat-r',   'label': 'Back Seat — Right',   'icon': '🟠', 'desc': 'Right rear passenger seat'},
-        {'id': 'backseat-l',   'label': 'Back Seat — Left',    'icon': '🟠', 'desc': 'Left rear passenger seat'},
-        {'id': 'backseat-mid', 'label': 'Back Seat — Middle',  'icon': '🟠', 'desc': 'Middle rear seat'},
+        {'id': 'trunk-back',   'label': 'Trunk — Back Wall',   'icon': '🔵', 'desc': 'Against back wall of trunk (load first)'},
+        {'id': 'trunk-mid',    'label': 'Trunk — Middle',      'icon': '🔵', 'desc': 'Middle of trunk'},
+        {'id': 'trunk-front',  'label': 'Trunk — Front',      'icon': '🟡', 'desc': 'Front of trunk near seat (load last)'},
+        {'id': 'backseat-r',   'label': 'Back Seat — Right',  'icon': '🟠', 'desc': 'Right rear passenger seat'},
+        {'id': 'backseat-l',   'label': 'Back Seat — Left',   'icon': '🟠', 'desc': 'Left rear passenger seat'},
+        {'id': 'backseat-mid', 'label': 'Back Seat — Middle', 'icon': '🟠', 'desc': 'Middle rear seat'},
     ],
     'sedan': [
-        {'id': 'trunk-back',   'label': 'Trunk — Back Wall',    'icon': '🔵', 'desc': 'Against the back wall of trunk'},
-        {'id': 'trunk-mid',    'label': 'Trunk — Middle',       'icon': '🔵', 'desc': 'Middle of trunk'},
-        {'id': 'trunk-front',  'label': 'Trunk — Front',       'icon': '🟡', 'desc': 'Front of trunk, near seat'},
-        {'id': 'backseat-r',   'label': 'Back Seat — Right',   'icon': '🟠', 'desc': 'Right rear passenger seat'},
-        {'id': 'backseat-l',   'label': 'Back Seat — Left',    'icon': '🟠', 'desc': 'Left rear passenger seat'},
-        {'id': 'backseat-mid', 'label': 'Back Seat — Middle',  'icon': '🟠', 'desc': 'Middle rear seat'},
-        {'id': 'front-pass',   'label': 'Front Passenger',      'icon': '⚪', 'desc': 'Front passenger seat floor/seat'},
+        {'id': 'trunk-back',   'label': 'Trunk — Back Wall',   'icon': '🔵', 'desc': 'Against back wall of trunk (load first)'},
+        {'id': 'trunk-mid',    'label': 'Trunk — Middle',      'icon': '🔵', 'desc': 'Middle of trunk'},
+        {'id': 'trunk-front',  'label': 'Trunk — Front',      'icon': '🟡', 'desc': 'Front of trunk near seat'},
+        {'id': 'backseat-r',   'label': 'Back Seat — Right',  'icon': '🟠', 'desc': 'Right rear passenger seat'},
+        {'id': 'backseat-l',   'label': 'Back Seat — Left',   'icon': '🟠', 'desc': 'Left rear passenger seat'},
+        {'id': 'backseat-mid', 'label': 'Back Seat — Middle', 'icon': '🟠', 'desc': 'Middle rear seat'},
+        {'id': 'front-pass',   'label': 'Front Passenger',     'icon': '⚪', 'desc': 'Front passenger seat/floor'},
     ],
-    'suv': [
-        {'id': 'cargo-back',   'label': 'Cargo — Back Wall',   'icon': '🔵', 'desc': 'Against rear cargo wall (load first)'},
-        {'id': 'cargo-mid',    'label': 'Cargo — Middle',      'icon': '🔵', 'desc': 'Center of cargo area'},
-        {'id': 'cargo-door',   'label': 'Cargo — Near Door',   'icon': '🟡', 'desc': 'Just inside rear door'},
-        {'id': 'row3-r',       'label': '3rd Row — Right',     'icon': '🟠', 'desc': '3rd row folded flat, right side'},
-        {'id': 'row3-l',       'label': '3rd Row — Left',      'icon': '🟠', 'desc': '3rd row folded flat, left side'},
-        {'id': 'backseat-r',   'label': '2nd Row — Right',     'icon': '⚪', 'desc': 'Right rear passenger seat'},
-        {'id': 'backseat-l',   'label': '2nd Row — Left',      'icon': '⚪', 'desc': 'Left rear passenger seat'},
-        {'id': 'front-pass',   'label': 'Front Passenger',      'icon': '⚪', 'desc': 'Front passenger seat/floor'},
+    'suv_midsize': [
+        # No 3rd row — Jeep Grand Cherokee, Toyota 4Runner, Ford Explorer, etc.
+        {'id': 'cargo-back',   'label': 'Cargo — Back',        'icon': '🔵', 'desc': 'Against rear seats — load first'},
+        {'id': 'cargo-mid',    'label': 'Cargo — Middle',     'icon': '🔵', 'desc': 'Center of cargo area'},
+        {'id': 'cargo-lift',   'label': 'Cargo — Liftgate',   'icon': '🟡', 'desc': 'Near liftgate — grab first'},
+        {'id': 'backseat-r',   'label': 'Back Seat — Right',  'icon': '🟠', 'desc': 'Right rear passenger seat'},
+        {'id': 'backseat-mid', 'label': 'Back Seat — Middle', 'icon': '🟠', 'desc': 'Middle rear seat'},
+        {'id': 'backseat-l',   'label': 'Back Seat — Left',   'icon': '🟠', 'desc': 'Left rear passenger seat'},
+        {'id': 'front-pass',   'label': 'Front Passenger',     'icon': '⚪', 'desc': 'Front passenger seat/floor'},
+    ],
+    'suv_fullsize': [
+        # With 3rd row — Chevy Tahoe, GMC Yukon, Ford Expedition, etc.
+        {'id': 'cargo-back',   'label': 'Cargo — Back',        'icon': '🔵', 'desc': 'Behind 3rd row or folded flat — load first'},
+        {'id': 'cargo-mid',    'label': 'Cargo — Middle',     'icon': '🔵', 'desc': 'Center of cargo area'},
+        {'id': 'cargo-lift',   'label': 'Cargo — Liftgate',   'icon': '🟡', 'desc': 'Near liftgate — grab first'},
+        {'id': 'row3-r',       'label': '3rd Row — Right',    'icon': '🟠', 'desc': '3rd row folded flat, right side'},
+        {'id': 'row3-l',       'label': '3rd Row — Left',     'icon': '🟠', 'desc': '3rd row folded flat, left side'},
+        {'id': 'backseat-r',   'label': '2nd Row — Right',    'icon': '⚪', 'desc': 'Right rear passenger seat'},
+        {'id': 'backseat-l',   'label': '2nd Row — Left',     'icon': '⚪', 'desc': 'Left rear passenger seat'},
+        {'id': 'front-pass',   'label': 'Front Passenger',     'icon': '⚪', 'desc': 'Front passenger seat/floor'},
     ],
     'minivan': [
-        {'id': 'cargo-back',   'label': 'Cargo — Back',        'icon': '🔵', 'desc': 'Rear cargo area behind seats'},
-        {'id': 'row3-r',       'label': '3rd Row — Right',     'icon': '🔵', 'desc': 'Right side 3rd row (fold flat)'},
-        {'id': 'row3-l',       'label': '3rd Row — Left',      'icon': '🔵', 'desc': 'Left side 3rd row (fold flat)'},
-        {'id': 'row2-r',       'label': '2nd Row — Right',     'icon': '🟠', 'desc': 'Right captain\'s chair area'},
-        {'id': 'row2-l',       'label': '2nd Row — Left',      'icon': '🟠', 'desc': 'Left captain\'s chair area'},
-        {'id': 'row2-mid',     'label': '2nd Row — Middle',    'icon': '🟠', 'desc': 'Center aisle / middle row'},
-        {'id': 'front-pass',   'label': 'Front Passenger',      'icon': '⚪', 'desc': 'Front passenger seat/floor'},
+        {'id': 'cargo-back',   'label': 'Cargo — Back',       'icon': '🔵', 'desc': 'Rear cargo behind seats (load first)'},
+        {'id': 'row3-r',       'label': '3rd Row — Right',    'icon': '🔵', 'desc': 'Right side 3rd row (fold flat)'},
+        {'id': 'row3-l',       'label': '3rd Row — Left',     'icon': '🔵', 'desc': 'Left side 3rd row (fold flat)'},
+        {'id': 'row2-r',       'label': '2nd Row — Right',    'icon': '🟠', 'desc': "Right captain's chair area"},
+        {'id': 'row2-l',       'label': '2nd Row — Left',     'icon': '🟠', 'desc': "Left captain's chair area"},
+        {'id': 'row2-mid',     'label': '2nd Row — Middle',   'icon': '🟠', 'desc': 'Center aisle / middle row'},
+        {'id': 'front-pass',   'label': 'Front Passenger',     'icon': '⚪', 'desc': 'Front passenger seat/floor'},
     ],
     'pickup': [
-        {'id': 'bed-cab',      'label': 'Bed — Cab Wall',      'icon': '🔵', 'desc': 'Against cab — load first, stays dry if covered'},
-        {'id': 'bed-mid',      'label': 'Bed — Middle',        'icon': '🔵', 'desc': 'Middle of truck bed'},
-        {'id': 'bed-gate',     'label': 'Bed — Near Tailgate', 'icon': '🟡', 'desc': 'Near tailgate — grab first'},
-        {'id': 'backseat-r',   'label': 'Back Seat — Right',   'icon': '🟠', 'desc': 'Crew cab right rear (if applicable)'},
-        {'id': 'backseat-l',   'label': 'Back Seat — Left',    'icon': '🟠', 'desc': 'Crew cab left rear (if applicable)'},
-        {'id': 'front-pass',   'label': 'Front Passenger',      'icon': '⚪', 'desc': 'Front passenger seat/floor'},
+        {'id': 'bed-cab',      'label': 'Bed — Cab Wall',     'icon': '🔵', 'desc': 'Against cab wall — load first'},
+        {'id': 'bed-mid',      'label': 'Bed — Middle',       'icon': '🔵', 'desc': 'Middle of truck bed'},
+        {'id': 'bed-gate',     'label': 'Bed — Tailgate',     'icon': '🟡', 'desc': 'Near tailgate — grab first'},
+        {'id': 'backseat-r',   'label': 'Back Seat — Right',  'icon': '🟠', 'desc': 'Crew cab right rear'},
+        {'id': 'backseat-l',   'label': 'Back Seat — Left',   'icon': '🟠', 'desc': 'Crew cab left rear'},
+        {'id': 'front-pass',   'label': 'Front Passenger',     'icon': '⚪', 'desc': 'Front passenger seat/floor'},
     ],
     'cargo_van': [
-        {'id': 'A1', 'label': 'Zone A1 — Front Left',   'icon': '🔵', 'desc': 'Bulkhead left, load first'},
-        {'id': 'A2', 'label': 'Zone A2 — Front Right',  'icon': '🔵', 'desc': 'Bulkhead right, load first'},
-        {'id': 'B1', 'label': 'Zone B1 — Mid Left',     'icon': '🔵', 'desc': 'Mid-van left side'},
-        {'id': 'B2', 'label': 'Zone B2 — Mid Right',    'icon': '🔵', 'desc': 'Mid-van right side'},
-        {'id': 'C1', 'label': 'Zone C1 — Rear Left',    'icon': '🟡', 'desc': 'Near rear doors, left'},
-        {'id': 'C2', 'label': 'Zone C2 — Rear Right',   'icon': '🟡', 'desc': 'Near rear doors, right'},
-        {'id': 'C3', 'label': 'Zone C3 — Door Stack',   'icon': '🟡', 'desc': 'Stacked at rear door opening'},
+        {'id': 'A1', 'label': 'Front Left — Bulkhead',  'icon': '🔵', 'desc': 'Driver side bulkhead wall — load first'},
+        {'id': 'A2', 'label': 'Front Right — Bulkhead', 'icon': '🔵', 'desc': 'Passenger side bulkhead wall'},
+        {'id': 'B1', 'label': 'Mid Left',               'icon': '🔵', 'desc': 'Mid-van left side'},
+        {'id': 'B2', 'label': 'Mid Right',              'icon': '🔵', 'desc': 'Mid-van right side'},
+        {'id': 'C1', 'label': 'Rear Left — Doors',     'icon': '🟡', 'desc': 'Near rear doors, left side'},
+        {'id': 'C2', 'label': 'Rear Right — Doors',    'icon': '🟡', 'desc': 'Near rear doors, right side'},
+        {'id': 'C3', 'label': 'Door Stack',             'icon': '🟡', 'desc': 'Stacked right at door opening — grab first'},
     ],
     'box_truck': [
-        {'id': 'A1', 'label': 'Row A — Left Front',  'icon': '🔵', 'desc': 'Front of box, driver side'},
-        {'id': 'A2', 'label': 'Row A — Right Front', 'icon': '🔵', 'desc': 'Front of box, passenger side'},
-        {'id': 'B1', 'label': 'Row B — Left Mid',    'icon': '🔵', 'desc': 'Middle of box, left'},
-        {'id': 'B2', 'label': 'Row B — Right Mid',   'icon': '🔵', 'desc': 'Middle of box, right'},
-        {'id': 'C1', 'label': 'Row C — Left Rear',   'icon': '🟡', 'desc': 'Near door, left side'},
-        {'id': 'C2', 'label': 'Row C — Right Rear',  'icon': '🟡', 'desc': 'Near door, right side'},
-        {'id': 'D1', 'label': 'Door Stack — Left',   'icon': '🟡', 'desc': 'Right at the door, grab first'},
-        {'id': 'D2', 'label': 'Door Stack — Right',  'icon': '🟡', 'desc': 'Right at the door, grab first'},
+        {'id': 'A1', 'label': 'Row A — Left Front',   'icon': '🔵', 'desc': 'Front of box, driver side — load first'},
+        {'id': 'A2', 'label': 'Row A — Right Front',  'icon': '🔵', 'desc': 'Front of box, passenger side'},
+        {'id': 'B1', 'label': 'Row B — Left Mid',     'icon': '🔵', 'desc': 'Middle of box, left'},
+        {'id': 'B2', 'label': 'Row B — Right Mid',    'icon': '🔵', 'desc': 'Middle of box, right'},
+        {'id': 'C1', 'label': 'Row C — Left Rear',    'icon': '🟡', 'desc': 'Near door, left side'},
+        {'id': 'C2', 'label': 'Row C — Right Rear',   'icon': '🟡', 'desc': 'Near door, right side'},
+        {'id': 'D1', 'label': 'Door — Left',          'icon': '🟡', 'desc': 'Right at door — grab first'},
+        {'id': 'D2', 'label': 'Door — Right',         'icon': '🟡', 'desc': 'Right at door — grab first'},
     ],
 }
 
 VEHICLE_LABELS = {
-    'small_car':  '🚗 Small Car',
-    'sedan':      '🚗 Sedan',
-    'suv':        '🚙 SUV / Crossover',
-    'minivan':    '🚐 Minivan',
-    'pickup':     '🚚 Pickup Truck',
-    'cargo_van':  '🚐 Cargo Van',
-    'box_truck':  '🚚 Box Truck',
+    'small_car':   '🚗 Small Car',
+    'sedan':       '🚗 Sedan',
+    'suv_midsize': '🚙 SUV — Midsize (No 3rd Row)',
+    'suv_fullsize':'🚙 SUV — Full Size (3rd Row)',
+    'minivan':     '🚐 Minivan',
+    'pickup':      '🚚 Pickup Truck',
+    'cargo_van':   '🚐 Cargo Van',
+    'box_truck':   '🚚 Box Truck',
 }
 
-def assign_vehicle_zones(sorted_pkgs, vehicle_type):
-    """Assign a specific vehicle zone to each package based on delivery order.
-    Delivery order 1 = deliver first = load LAST = zone closest to door.
-    Delivery order N = deliver last = load FIRST = deepest zone.
+# ── DELIVERY ZONE COLORS (A–F) ───────────────────────────────────────
+ZONE_COLORS = {
+    'A': {'hex': '#ef4444', 'name': 'Red',    'emoji': '🔴'},
+    'B': {'hex': '#3b82f6', 'name': 'Blue',   'emoji': '🔵'},
+    'C': {'hex': '#10b981', 'name': 'Green',  'emoji': '🟢'},
+    'D': {'hex': '#f59e0b', 'name': 'Yellow', 'emoji': '🟡'},
+    'E': {'hex': '#8b5cf6', 'name': 'Purple', 'emoji': '🟣'},
+    'F': {'hex': '#f97316', 'name': 'Orange', 'emoji': '🟠'},
+}
+
+def calc_num_zones(n_stops):
+    """Auto-calculate number of delivery zones based on package count."""
+    if n_stops < 20:  return 1
+    if n_stops < 50:  return 2
+    if n_stops < 80:  return 3
+    if n_stops < 120: return 4
+    if n_stops < 160: return 5
+    return 6
+
+def _dsq(a, b):
+    """Squared Euclidean distance on lat/lng (fast, good enough for city scale)."""
+    return (a['lat'] - b['lat'])**2 + (a['lng'] - b['lng'])**2
+
+def kmeans_geo(points, k, max_iter=40):
+    """K-means clustering on lat/lng dicts. Returns list of cluster indices."""
+    n = len(points)
+    if k >= n: return list(range(n))
+    if k <= 1: return [0] * n
+    # k-means++ style init: pick point furthest from existing centroids each time
+    centroids = [{'lat': points[0]['lat'], 'lng': points[0]['lng']}]
+    for _ in range(k - 1):
+        dists = [min(_dsq(p, c) for c in centroids) for p in points]
+        best  = max(range(n), key=lambda i: dists[i])
+        centroids.append({'lat': points[best]['lat'], 'lng': points[best]['lng']})
+    assignments = [0] * n
+    for _ in range(max_iter):
+        new_asgn = [min(range(k), key=lambda j: _dsq(p, centroids[j])) for p in points]
+        if new_asgn == assignments:
+            break
+        assignments = new_asgn
+        for j in range(k):
+            grp = [points[i] for i in range(n) if assignments[i] == j]
+            if grp:
+                centroids[j] = {
+                    'lat': sum(p['lat'] for p in grp) / len(grp),
+                    'lng': sum(p['lng'] for p in grp) / len(grp),
+                }
+    return assignments
+
+def assign_delivery_zones(sorted_pkgs):
     """
-    zones = VEHICLE_ZONES.get(vehicle_type, VEHICLE_ZONES['suv'])
-    total = len(sorted_pkgs)
-    if total == 0:
+    Cluster OSRM-sorted packages into geographic color zones (A, B, C…).
+    Within each zone, packages are numbered sequentially in delivery order (A-1, A-2…).
+    Zone sequence determined by which cluster appears first in the optimized route.
+    Returns packages sorted by zone_letter then zone_num (for loading grouping).
+    """
+    geocoded = [p for p in sorted_pkgs if p.get('lat') and p.get('lng')]
+    ungeoced = [p for p in sorted_pkgs if not (p.get('lat') and p.get('lng'))]
+    n = len(geocoded)
+
+    def _mark_unknown(pkgs):
+        for p in pkgs:
+            p.update({'zone_letter': '?', 'zone_num': 0,
+                      'zone_label_full': '?', 'zone_color': '#6b7280', 'zone_emoji': '⚪'})
+
+    if n == 0:
+        _mark_unknown(ungeoced)
         return sorted_pkgs
-    zone_count = len(zones)
-    for pkg in sorted_pkgs:
-        delivery_order = pkg.get('delivery_order', 1)  # 1 = deliver first = load last = door
-        # delivery_order=1    → door zone   (zone_count-1, last index)
-        # delivery_order=total → deepest zone (index 0)
-        if total > 1:
-            zone_idx = int(round((delivery_order - 1) / (total - 1) * (zone_count - 1)))
+
+    k = calc_num_zones(n)
+
+    if k == 1 or n < 4:
+        color = ZONE_COLORS['A']
+        for i, p in enumerate(sorted(geocoded, key=lambda x: x.get('delivery_order', 0)), 1):
+            p.update({'zone_letter': 'A', 'zone_num': i, 'zone_label_full': f'A-{i}',
+                      'zone_color': color['hex'], 'zone_emoji': color['emoji']})
+        _mark_unknown(ungeoced)
+        return sorted(geocoded, key=lambda p: (p['zone_letter'], p['zone_num'])) + ungeoced
+
+    assignments = kmeans_geo(geocoded, k)
+
+    # Determine zone sequence: cluster whose earliest delivery_order is lowest → Zone A
+    cluster_earliest = {}
+    for i, p in enumerate(geocoded):
+        c = assignments[i]
+        do = p.get('delivery_order', 9999)
+        if c not in cluster_earliest or do < cluster_earliest[c]:
+            cluster_earliest[c] = do
+
+    cluster_seq   = sorted(cluster_earliest, key=lambda c: cluster_earliest[c])
+    cluster_letter = {c: chr(65 + seq) for seq, c in enumerate(cluster_seq)}  # 0→'A', 1→'B'…
+
+    # Group by letter, sort within group by delivery_order, assign local numbers
+    groups = {}
+    for i, p in enumerate(geocoded):
+        letter = cluster_letter[assignments[i]]
+        groups.setdefault(letter, []).append(p)
+
+    result = []
+    for letter in sorted(groups):
+        color = ZONE_COLORS.get(letter, {'hex': '#6b7280', 'emoji': '⚪'})
+        for local_num, p in enumerate(sorted(groups[letter],
+                                             key=lambda x: x.get('delivery_order', 0)), 1):
+            p.update({'zone_letter': letter, 'zone_num': local_num,
+                      'zone_label_full': f'{letter}-{local_num}',
+                      'zone_color': color['hex'], 'zone_emoji': color['emoji']})
+            result.append(p)
+
+    _mark_unknown(ungeoced)
+    return result + ungeoced
+
+def assign_vehicle_zones(sorted_pkgs, vehicle_type):
+    """
+    Assign vehicle cargo zone to each package based on its delivery zone letter.
+    Zone A (first delivery cluster) → near door (load last).
+    Zone C/D (last cluster) → deepest (load first).
+    All packages in the same delivery zone go to the same vehicle spot.
+    """
+    v_zones = VEHICLE_ZONES.get(vehicle_type, VEHICLE_ZONES['suv_midsize'])
+    v_count = len(v_zones)
+    if not sorted_pkgs:
+        return sorted_pkgs
+
+    # Get unique delivery zone letters in order
+    unique_letters = []
+    seen_l = set()
+    for p in sorted_pkgs:
+        letter = p.get('zone_letter', '?')
+        if letter != '?' and letter not in seen_l:
+            seen_l.add(letter)
+            unique_letters.append(letter)
+    unique_letters.sort()   # A, B, C…
+
+    n_dlv_zones = len(unique_letters)
+
+    # Map each delivery zone letter → vehicle cargo zone
+    # Zone A (first delivery) → last vehicle zone (near door)
+    # Zone Z (last delivery) → first vehicle zone (deepest)
+    letter_to_vzone = {}
+    for seq, letter in enumerate(unique_letters):
+        if n_dlv_zones > 1:
+            v_idx = int(round(seq / (n_dlv_zones - 1) * (v_count - 1)))
         else:
-            zone_idx = 0
-        zone_idx = zone_count - 1 - zone_idx   # invert: high delivery_order = deep zone
-        zone_idx = max(0, min(zone_idx, zone_count - 1))
-        zone = zones[zone_idx]
-        pkg['zone_id']    = zone['id']
-        pkg['zone_label'] = zone['label']
-        pkg['zone_icon']  = zone['icon']
-        pkg['zone_desc']  = zone['desc']
+            v_idx = 0
+        v_idx = v_count - 1 - v_idx   # invert: seq=0 (Zone A) → last v_zone (door)
+        v_idx = max(0, min(v_idx, v_count - 1))
+        letter_to_vzone[letter] = v_zones[v_idx]
+
+    for p in sorted_pkgs:
+        letter = p.get('zone_letter', '?')
+        vz = letter_to_vzone.get(letter, v_zones[-1])
+        p.update({'vehicle_zone_id': vz['id'], 'vehicle_zone_label': vz['label'],
+                  'vehicle_zone_icon': vz['icon'], 'vehicle_zone_desc': vz['desc']})
     return sorted_pkgs
 TWILIO_SID   = os.environ.get('TWILIO_SID', '')
 TWILIO_TOKEN = os.environ.get('TWILIO_TOKEN', '')
@@ -518,7 +658,7 @@ def init_db():
         "ALTER TABLE residents ADD COLUMN customer_name TEXT",
         "ALTER TABLE drivers ADD COLUMN onboarded INTEGER DEFAULT 0",
         "ALTER TABLE drivers ADD COLUMN is_beta INTEGER DEFAULT 0",
-        "ALTER TABLE drivers ADD COLUMN vehicle_type TEXT DEFAULT 'suv'",
+        "ALTER TABLE drivers ADD COLUMN vehicle_type TEXT DEFAULT 'suv_midsize'",
         "ALTER TABLE drivers ADD COLUMN vehicle_capacity INTEGER DEFAULT 100",
         "ALTER TABLE drivers ADD COLUMN assigned_zips TEXT",
         "ALTER TABLE stops ADD COLUMN delivered_at TEXT",
@@ -1008,13 +1148,13 @@ def scan_live_sort():
     ).fetchall()
     # Get driver vehicle type
     driver = db.execute("SELECT vehicle_type FROM drivers WHERE id=?", (session['driver_id'],)).fetchone()
-    vehicle_type = (driver['vehicle_type'] if driver and driver['vehicle_type'] else 'suv')
+    vehicle_type = (driver['vehicle_type'] if driver and driver['vehicle_type'] else 'suv_midsize')
     db.close()
 
     if not items:
         return jsonify({'ok': True, 'items': [], 'sorted': False, 'vehicle_type': vehicle_type,
                         'vehicle_label': VEHICLE_LABELS.get(vehicle_type, 'Vehicle'),
-                        'vehicle_zones': VEHICLE_ZONES.get(vehicle_type, VEHICLE_ZONES['suv'])})
+                        'vehicle_zones': VEHICLE_ZONES.get(vehicle_type, VEHICLE_ZONES['suv_midsize'])})
 
     packages = []
     for item in items:
@@ -1122,8 +1262,30 @@ def scan_live_sort():
         p['delivery_order'] = i + 1        # 1 = deliver first
         p['load_position']  = total - i    # highest = load first (goes in back of truck)
 
-    # Assign vehicle zones based on driver's vehicle type
+    # ─ Cluster into delivery zones (A-1, A-2... B-1, B-2...) ─
+    sorted_pkgs = assign_delivery_zones(sorted_pkgs)
+
+    # ─ Assign vehicle cargo zones based on delivery zone letter ─
     sorted_pkgs = assign_vehicle_zones(sorted_pkgs, vehicle_type)
+
+    # ─ Build zone summary (how many packages per zone, vehicle spot) ─
+    zone_summary = {}
+    for p in sorted_pkgs:
+        letter = p.get('zone_letter', '?')
+        if letter not in zone_summary:
+            zone_summary[letter] = {
+                'letter':        letter,
+                'count':         0,
+                'color':         p.get('zone_color', '#6b7280'),
+                'emoji':         p.get('zone_emoji', '⚪'),
+                'vehicle_spot':  p.get('vehicle_zone_label', ''),
+                'load_order':    len(zone_summary) + 1,
+            }
+        zone_summary[letter]['count'] += 1
+    # Sort zone_summary so last-letter zone loads first
+    zone_list = sorted(zone_summary.values(), key=lambda z: z['letter'], reverse=True)
+    for i, z in enumerate(zone_list):
+        z['load_order'] = i + 1
 
     # ETA projection: drive time + 3 min per stop
     est_total_mins = None
@@ -1135,10 +1297,10 @@ def scan_live_sort():
         'items':           sorted_pkgs,
         'sorted':          len(geocoded) >= 2,
         'total':           total,
+        'zone_summary':    zone_list,
         'vehicle_type':    vehicle_type,
         'vehicle_label':   VEHICLE_LABELS.get(vehicle_type, 'Vehicle'),
-        'vehicle_zones':   VEHICLE_ZONES.get(vehicle_type, VEHICLE_ZONES['suv']),
-        # Route stats
+        'vehicle_zones':   VEHICLE_ZONES.get(vehicle_type, VEHICLE_ZONES['suv_midsize']),
         'route_miles':     route_miles,
         'route_drive_mins': route_drive_mins,
         'naive_miles':     naive_miles,
@@ -1178,7 +1340,7 @@ def vehicle_setup_get():
         'current': vehicle_type,
         'label':   VEHICLE_LABELS.get(vehicle_type),
         'options': [{'value': k, 'label': v} for k, v in VEHICLE_LABELS.items()],
-        'zones':   VEHICLE_ZONES.get(vehicle_type, VEHICLE_ZONES['suv']),
+        'zones':   VEHICLE_ZONES.get(vehicle_type, VEHICLE_ZONES['suv_midsize']),
     })
 
 

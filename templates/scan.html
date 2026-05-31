@@ -68,6 +68,17 @@
   #live-map { width: 100%; height: 220px; border-radius: 14px; overflow: hidden; background: #111; }
   .map-legend { font-size: 0.72rem; color: #6b7280; margin-top: 6px; text-align: center; }
 
+  /* Zone summary strip */
+  #zone-summary { display: none; margin-bottom: 14px; }
+  .zone-strip { display: flex; gap: 8px; flex-wrap: wrap; }
+  .zone-chip { border-radius: 10px; padding: 8px 12px; flex: 1; min-width: 80px; text-align: center; }
+  .zone-chip-letter { font-size: 1.3rem; font-weight: 900; }
+  .zone-chip-count  { font-size: 0.72rem; font-weight: 700; opacity: .85; }
+  .zone-chip-spot   { font-size: 0.65rem; opacity: .7; margin-top: 2px; }
+  .load-order-bar { margin-top: 10px; background: #1f2937; border-radius: 10px; padding: 8px 12px;
+                    font-size: 0.78rem; color: #9ca3af; }
+  .load-order-bar b { color: #fff; }
+
   .pkg-list { margin-bottom: 20px; }
   .pkg-list h2 { font-size: 1rem; font-weight: 700; margin: 0 0 12px; color: #f3f4f6; }
   .pkg-item { background: #1f2937; border-radius: 12px; padding: 12px 14px;
@@ -257,11 +268,17 @@
     </div>
   </div>
 
+  <!-- Zone Summary Strip -->
+  <div id="zone-summary">
+    <div class="zone-strip" id="zone-strip"></div>
+    <div class="load-order-bar" id="load-order-bar"></div>
+  </div>
+
   <!-- Live Sort Map -->
   <div id="live-map-section">
     <h2>📍 Live Route Sort <span class="sort-badge pending" id="sort-status">Sorting...</span></h2>
     <div id="live-map"></div>
-    <p class="map-legend">🟢 Load last (deliver first) &nbsp;|&nbsp; 🟡 Load first (back of truck)</p>
+    <p class="map-legend">Markers colored by zone — numbers = delivery order within zone</p>
   </div>
 
   <!-- Package list -->
@@ -334,8 +351,8 @@ function renderVehicleOptions(options, current) {
   const list = document.getElementById('vehicle-options-list');
   if (!list || !options) return;
   const icons = {
-    small_car: '🚗', sedan: '🚗', suv: '🚙', minivan: '🚐',
-    pickup: '🚚', cargo_van: '🚐', box_truck: '🚚'
+    small_car: '🚗', sedan: '🚗', suv_midsize: '🚙', suv_fullsize: '🚙',
+    minivan: '🚐', pickup: '🚚', cargo_van: '🚐', box_truck: '🚚'
   };
   list.innerHTML = options.map(opt => `
     <div class="vehicle-option ${opt.value === current ? 'selected' : ''}" onclick="selectVehicle('${opt.value}', this)">
@@ -372,10 +389,14 @@ function closeVehicleModal(e) {
 function showZoneBanner(zone) {
   if (!zone) return;
   const banner = document.getElementById('zone-banner');
+  const color  = zone.color || '#3b82f6';
+  banner.style.borderColor = color;
+  banner.style.background  = color + '18';
   document.getElementById('zone-banner-main').textContent = zone.icon + '  ' + zone.label;
+  document.getElementById('zone-banner-main').style.color = color;
   document.getElementById('zone-banner-sub').textContent  = zone.desc;
   banner.classList.add('show');
-  setTimeout(() => banner.classList.remove('show'), 5000);
+  setTimeout(() => banner.classList.remove('show'), 6000);
 }
 
 // Load vehicle on page start
@@ -416,37 +437,63 @@ function refreshLiveSort() {
         badge.className = 'sort-badge pending';
       }
 
-      // Clear old markers + line
+      // ─ Zone summary strip ─
+      if (data.zone_summary && data.zone_summary.length > 0) {
+        document.getElementById('zone-summary').style.display = 'block';
+        const strip = document.getElementById('zone-strip');
+        strip.innerHTML = data.zone_summary.map(z => `
+          <div class="zone-chip" style="background:${z.color}22;border:2px solid ${z.color};">
+            <div class="zone-chip-letter" style="color:${z.color}">${z.emoji} ${z.letter}</div>
+            <div class="zone-chip-count" style="color:${z.color}">${z.count} pkg${z.count !== 1 ? 's' : ''}</div>
+            <div class="zone-chip-spot" style="color:${z.color}">${z.vehicle_spot}</div>
+          </div>`).join('');
+        // Loading order instructions
+        const loadBar = document.getElementById('load-order-bar');
+        const loadSteps = data.zone_summary.map((z, i) =>
+          `<b style="color:${z.color}">${z.emoji} Zone ${z.letter}</b> (${z.count} pkgs)`
+        ).join(' → ');
+        loadBar.innerHTML = '📦 Load order: ' + loadSteps + ' → drive';
+      }
+
+      // ─ Map markers colored by delivery zone ─
       mapMarkers.forEach(m => m.remove());
       mapMarkers = [];
       if (mapPolyline) { mapPolyline.remove(); mapPolyline = null; }
 
-      const latlngs = [];
+      // Draw one polyline per zone in zone color
+      const zoneLines = {};
       const total = data.items.length;
 
-      data.items.forEach((pkg, idx) => {
+      data.items.forEach((pkg) => {
         if (!pkg.lat || !pkg.lng) return;
-        const deliveryNum = pkg.delivery_order;
-        const isFirst = deliveryNum === 1;
-        const isLast  = deliveryNum === total;
-        const color   = isFirst ? '#10b981' : isLast ? '#f59e0b' : '#3b82f6';
-
+        const color  = pkg.zone_color || '#3b82f6';
+        const label  = pkg.zone_label_full || pkg.delivery_order;
         const icon = L.divIcon({
-          html: `<div style="background:${color};color:#fff;border-radius:50%;width:26px;height:26px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:11px;border:2px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.5)">${deliveryNum}</div>`,
-          className: '', iconSize: [26, 26], iconAnchor: [13, 13]
+          html: `<div style="background:${color};color:#fff;border-radius:50%;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:10px;border:2px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.6);white-space:nowrap;">${label}</div>`,
+          className: '', iconSize: [28, 28], iconAnchor: [14, 14]
         });
         const marker = L.marker([pkg.lat, pkg.lng], { icon })
-          .bindPopup(`<b>Stop ${deliveryNum}</b><br>${pkg.name || ''}<br><small>${pkg.address}</small><br><b>Load position: #${pkg.load_position}</b>`);
+          .bindPopup(`<b>${label}</b><br>${pkg.name || ''}<br><small>${pkg.address}</small><br>📦 ${pkg.vehicle_zone_label || ''}`);
         marker.addTo(liveMap);
         mapMarkers.push(marker);
-        latlngs.push([pkg.lat, pkg.lng]);
+        // Collect latlngs per zone for colored polylines
+        const zl = pkg.zone_letter || 'A';
+        if (!zoneLines[zl]) zoneLines[zl] = { coords: [], color };
+        zoneLines[zl].coords.push([pkg.lat, pkg.lng]);
       });
 
-      if (latlngs.length >= 2) {
-        mapPolyline = L.polyline(latlngs, { color: '#3b82f6', weight: 2, opacity: 0.7, dashArray: '6,4' }).addTo(liveMap);
-        liveMap.fitBounds(mapPolyline.getBounds(), { padding: [20, 20] });
-      } else if (latlngs.length === 1) {
-        liveMap.setView(latlngs[0], 14);
+      // Draw colored polyline per zone
+      const allCoords = [];
+      Object.values(zoneLines).forEach(z => {
+        if (z.coords.length >= 2) {
+          L.polyline(z.coords, { color: z.color, weight: 2.5, opacity: 0.75, dashArray: '5,4' }).addTo(liveMap);
+        }
+        allCoords.push(...z.coords);
+      });
+      if (allCoords.length >= 2) {
+        liveMap.fitBounds(L.latLngBounds(allCoords), { padding: [20, 20] });
+      } else if (allCoords.length === 1) {
+        liveMap.setView(allCoords[0], 14);
       }
 
       // Update vehicle label
@@ -473,37 +520,47 @@ function refreshLiveSort() {
         }
       }
 
-      // Show zone banner for the most recently scanned package (by its DB id)
+      // ─ Zone banner for newly scanned package ─
       if (lastAddedItemId !== null) {
         const newPkg = data.items.find(p => p.id === lastAddedItemId);
-        if (newPkg && newPkg.zone_label) {
-          lastScannedZone = newPkg.zone_label;
+        if (newPkg && newPkg.zone_label_full) {
+          lastScannedZone = newPkg.zone_label_full;
           lastAddedItemId = null;
-          showZoneBanner({ icon: newPkg.zone_icon, label: newPkg.zone_label, desc: newPkg.zone_desc });
+          showZoneBanner({
+            icon:  newPkg.zone_emoji || '📦',
+            label: `${newPkg.zone_label_full} — ${newPkg.vehicle_zone_label || ''}`,
+            desc:  `${newPkg.vehicle_zone_desc || ''} — ${newPkg.address}`,
+            color: newPkg.zone_color || '#3b82f6',
+          });
         }
       }
 
-      // Re-render package list in sorted order with zone + load info
+      // ─ Re-render package list grouped by zone ─
       const listEl = document.getElementById('pkg-list-inner');
       listEl.innerHTML = '';
-      data.items.forEach((pkg, idx) => {
-        const isFirst = pkg.delivery_order === 1;
-        const isLast  = pkg.delivery_order === total;
-        const badgeClass = isFirst ? 'first' : isLast ? 'last' : 'middle';
-        const stopLabel  = isFirst ? '🟢 Stop 1 — Grab first'
-                         : isLast  ? '🟡 Last stop'
-                         : `Stop ${pkg.delivery_order}`;
-        const zoneHtml = pkg.zone_label
-          ? `<span class="zone-pill">${pkg.zone_icon || '📦'} ${pkg.zone_label}</span>`
-          : '';
+      let lastLetter = null;
+      data.items.forEach((pkg) => {
+        const color  = pkg.zone_color || '#3b82f6';
+        const letter = pkg.zone_letter || '?';
+        const label  = pkg.zone_label_full || `Stop ${pkg.delivery_order}`;
+        const vzone  = pkg.vehicle_zone_label || '';
+        // Zone group header
+        if (letter !== lastLetter && letter !== '?') {
+          lastLetter = letter;
+          listEl.innerHTML += `
+            <div style="padding:8px 4px 4px;font-size:0.72rem;font-weight:800;color:${color};text-transform:uppercase;letter-spacing:.08em;">
+              ${pkg.zone_emoji || ''} Zone ${letter} &nbsp;•&nbsp; ${pkg.vehicle_zone_icon || ''} ${vzone}
+            </div>`;
+        }
         listEl.innerHTML += `
-          <div class="pkg-item" id="item-${pkg.id}">
+          <div class="pkg-item" id="item-${pkg.id}" style="border-left:3px solid ${color};">
             <div class="pkg-info">
-              <div class="pkg-name">${pkg.name || 'Unknown'}</div>
+              <div class="pkg-name" style="display:flex;align-items:center;gap:8px;">
+                <span style="background:${color};color:#fff;border-radius:6px;padding:1px 7px;font-size:0.8rem;font-weight:800;flex-shrink:0;">${label}</span>
+                ${pkg.name || 'Unknown'}
+              </div>
               <div class="pkg-addr">${pkg.address}</div>
               ${pkg.tracking ? `<div class="pkg-tracking">${pkg.tracking}</div>` : ''}
-              <span class="load-badge ${badgeClass}">${stopLabel}</span>
-              ${zoneHtml}
             </div>
             <button class="pkg-remove" onclick="removeItem(${pkg.id}, this)">✕</button>
           </div>`;
