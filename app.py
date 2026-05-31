@@ -360,18 +360,17 @@ def assign_vehicle_zones(sorted_pkgs, vehicle_type):
     total = len(sorted_pkgs)
     if total == 0:
         return sorted_pkgs
+    zone_count = len(zones)
     for pkg in sorted_pkgs:
-        delivery_pos = pkg.get('delivery_order', 1)   # 1-based, 1 = first stop
-        load_pos     = pkg.get('load_position', 1)     # load_pos = total - delivery_pos + 1
-        # Map load_position (1=load last/door, total=load first/deep) to zone index
-        # load_pos 1 = closest to door = last zone index
-        # load_pos N = deepest = zone index 0
-        zone_count = len(zones)
-        # Scale load_pos across zone count
-        zone_idx = int(round((load_pos - 1) / max(total - 1, 1) * (zone_count - 1))) if total > 1 else 0
+        delivery_order = pkg.get('delivery_order', 1)  # 1 = deliver first = load last = door
+        # delivery_order=1    → door zone   (zone_count-1, last index)
+        # delivery_order=total → deepest zone (index 0)
+        if total > 1:
+            zone_idx = int(round((delivery_order - 1) / (total - 1) * (zone_count - 1)))
+        else:
+            zone_idx = 0
+        zone_idx = zone_count - 1 - zone_idx   # invert: high delivery_order = deep zone
         zone_idx = max(0, min(zone_idx, zone_count - 1))
-        # Invert: load_pos=1 (door) should map to LAST zone, load_pos=N (deep) to FIRST zone
-        zone_idx = zone_count - 1 - zone_idx
         zone = zones[zone_idx]
         pkg['zone_id']    = zone['id']
         pkg['zone_label'] = zone['label']
@@ -966,9 +965,10 @@ def scan_add():
         (ss_id, tracking, name, address, zip_code, json.dumps(data), lat, lng)
     )
     db.commit()
+    new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
     count = db.execute("SELECT COUNT(*) FROM scan_items WHERE session_id=?", (ss_id,)).fetchone()[0]
     db.close()
-    return jsonify({'ok': True, 'count': count, 'geocoded': lat is not None})
+    return jsonify({'ok': True, 'count': count, 'geocoded': lat is not None, 'new_item_id': new_id})
 
 
 @app.route('/driver/scan/live-sort', methods=['GET'])

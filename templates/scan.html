@@ -272,6 +272,7 @@ let mapMarkers = [];
 let mapPolyline = null;
 let currentVehicleType = 'suv';
 let lastScannedZone = null;
+let lastAddedItemId = null;
 
 // ── Vehicle Setup ──
 function loadVehicleType() {
@@ -410,13 +411,13 @@ function refreshLiveSort() {
         document.getElementById('vehicle-label').textContent = data.vehicle_label;
       }
 
-      // Show zone banner for the most recently scanned package (last in list before sort)
-      if (data.items.length > 0 && lastScannedZone === null) {
-        // After first sort, grab the newest package's zone
-        const newestPkg = data.items.find(p => p.delivery_order !== undefined);
-        if (newestPkg && newestPkg.zone_label) {
-          lastScannedZone = newestPkg.zone_label;
-          showZoneBanner({ icon: newestPkg.zone_icon, label: newestPkg.zone_label, desc: newestPkg.zone_desc });
+      // Show zone banner for the most recently scanned package (by its DB id)
+      if (lastAddedItemId !== null) {
+        const newPkg = data.items.find(p => p.id === lastAddedItemId);
+        if (newPkg && newPkg.zone_label) {
+          lastScannedZone = newPkg.zone_label;
+          lastAddedItemId = null;
+          showZoneBanner({ icon: newPkg.zone_icon, label: newPkg.zone_label, desc: newPkg.zone_desc });
         }
       }
 
@@ -557,6 +558,7 @@ function confirmPackage() {
     showToast('Package added ✓' + (data.geocoded ? ' 📍' : ''));
     // Reset zone banner flag so the next sort shows the new package's zone
     lastScannedZone = null;
+    lastAddedItemId = data.new_item_id || null;
     // Refresh live sort map + reorder list
     setTimeout(refreshLiveSort, 600);
   })
