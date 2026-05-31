@@ -529,6 +529,73 @@ def assign_vehicle_zones(sorted_pkgs, vehicle_type):
         p.update({'vehicle_zone_id': vz['id'], 'vehicle_zone_label': vz['label'],
                   'vehicle_zone_icon': vz['icon'], 'vehicle_zone_desc': vz['desc']})
     return sorted_pkgs
+# ── ZONE AUTO-LOCK HELPERS ────────────────────────────────────────
+ZONE_LOCK_THRESHOLD = 20   # packages before auto-lock triggers
+ZONE_STABLE_MILES   = 0.15 # centroid must move < this between scans to be "stable"
+
+def compute_centroids(sorted_pkgs):
+    """Extract zone centroids (avg lat/lng per zone letter) from assigned packages."""
+    zone_pts = {}
+    for p in sorted_pkgs:
+        letter = p.get('zone_letter')
+        if letter and letter != '?' and p.get('lat') and p.get('lng'):
+            zone_pts.setdefault(letter, []).append(p)
+    return [
+        {
+            'letter': letter,
+            'lat':    sum(p['lat'] for p in pts) / len(pts),
+            'lng':    sum(p['lng'] for p in pts) / len(pts),
+            'color':  pts[0].get('zone_color',  '#3b82f6'),
+            'emoji':  pts[0].get('zone_emoji',  '⚪'),
+        }
+        for letter, pts in zone_pts.items()
+    ]
+
+def centroids_stable(old_c, new_c):
+    """True when all zone centroids moved < ZONE_STABLE_MILES since last scan."""
+    if not old_c or len(old_c) != len(new_c):
+        return False
+    old_map = {c['letter']: c for c in old_c}
+    new_map = {c['letter']: c for c in new_c}
+    if set(old_map) != set(new_map):
+        return False
+    for letter, oc in old_map.items():
+        nc = new_map[letter]
+        if geodesic((oc['lat'], oc['lng']), (nc['lat'], nc['lng'])).miles > ZONE_STABLE_MILES:
+            return False
+    return True
+
+def assign_zones_from_centroids(sorted_pkgs, centroids):
+    """
+    Fast locked-zone assignment: snap each package to its nearest centroid.
+    No re-clustering. Zones never change after lock.
+    """
+    for p in sorted_pkgs:
+        if p.get('lat') and p.get('lng'):
+            nearest = min(centroids, key=lambda c: _dsq(p, c))
+            p['zone_letter'] = nearest['letter']
+            p['zone_color']  = nearest['color']
+            p['zone_emoji']  = nearest['emoji']
+        else:
+            p['zone_letter'] = '?'
+            p['zone_color']  = '#6b7280'
+            p['zone_emoji']  = '⚪'
+
+    # Number packages within each zone by delivery_order
+    zone_groups = {}
+    for p in sorted_pkgs:
+        zone_groups.setdefault(p['zone_letter'], []).append(p)
+
+    for letter, grp in zone_groups.items():
+        for num, p in enumerate(
+            sorted(grp, key=lambda x: x.get('delivery_order', 0)), 1
+        ):
+            p['zone_num']        = num
+            p['zone_label_full'] = f'{letter}-{num}' if letter != '?' else '?'
+
+    return sorted_pkgs
+
+
 TWILIO_SID   = os.environ.get('TWILIO_SID', '')
 TWILIO_TOKEN = os.environ.get('TWILIO_TOKEN', '')
 TWILIO_PHONE = os.environ.get('TWILIO_PHONE', '')
@@ -673,6 +740,10 @@ def init_db():
         "ALTER TABLE drivers ADD COLUMN vehicle_type TEXT DEFAULT 'suv_midsize'",
         "ALTER TABLE drivers ADD COLUMN vehicle_capacity INTEGER DEFAULT 100",
         "ALTER TABLE drivers ADD COLUMN assigned_zips TEXT",
+        "ALTER TABLE scan_sessions ADD COLUMN zones_locked INTEGER DEFAULT 0",
+        "ALTER TABLE scan_sessions ADD COLUMN zone_centroids TEXT",
+        "ALTER TABLE scan_sessions ADD COLUMN locked_at TEXT",
+        "ALTER TABLE scan_sessions ADD COLUMN prev_centroids TEXT",
         "ALTER TABLE stops ADD COLUMN delivered_at TEXT",
         "ALTER TABLE routes ADD COLUMN est_distance_miles REAL",
         "ALTER TABLE routes ADD COLUMN est_duration_mins REAL",
@@ -1158,13 +1229,19 @@ def scan_live_sort():
         "SELECT * FROM scan_items WHERE session_id=? ORDER BY id ASC",
         (ss['id'],)
     ).fetchall()
-    # Get driver vehicle type
-    driver = db.execute("SELECT vehicle_type FROM drivers WHERE id=?", (session['driver_id'],)).fetchone()
-    vehicle_type = (driver['vehicle_type'] if driver and driver['vehicle_type'] else 'suv_midsize')
+    # Get driver vehicle type + zone lock state
+    driver   = db.execute("SELECT vehicle_type FROM drivers WHERE id=?", (session['driver_id'],)).fetchone()
+    ss_full  = db.execute("SELECT * FROM scan_sessions WHERE id=?", (ss['id'],)).fetchone()
+    vehicle_type    = (driver['vehicle_type'] if driver and driver['vehicle_type'] else 'suv_midsize')
+    zones_locked    = bool(ss_full['zones_locked']) if ss_full else False
+    stored_cents    = json.loads(ss_full['zone_centroids']) if ss_full and ss_full['zone_centroids'] else None
+    prev_cents      = json.loads(ss_full['prev_centroids'])  if ss_full and ss_full['prev_centroids']  else None
     db.close()
 
     if not items:
-        return jsonify({'ok': True, 'items': [], 'sorted': False, 'vehicle_type': vehicle_type,
+        return jsonify({'ok': True, 'items': [], 'sorted': False, 'zones_locked': False,
+                        'scans_until_lock': ZONE_LOCK_THRESHOLD,
+                        'vehicle_type': vehicle_type,
                         'vehicle_label': VEHICLE_LABELS.get(vehicle_type, 'Vehicle'),
                         'vehicle_zones': VEHICLE_ZONES.get(vehicle_type, VEHICLE_ZONES['suv_midsize'])})
 
@@ -1274,32 +1351,63 @@ def scan_live_sort():
         p['delivery_order'] = i + 1        # 1 = deliver first
         p['load_position']  = total - i    # highest = load first (goes in back of truck)
 
-    # ─ Cluster into delivery zones (A-1, A-2... B-1, B-2...) ─
-    sorted_pkgs = assign_delivery_zones(sorted_pkgs)
+    just_locked = False
+    scans_until_lock = max(0, ZONE_LOCK_THRESHOLD - len(geocoded))
+
+    if zones_locked and stored_cents:
+        # ── FAST PATH: zones locked — instant centroid lookup, no re-clustering ──
+        sorted_pkgs = assign_zones_from_centroids(sorted_pkgs, stored_cents)
+    else:
+        # ── CALIBRATION PATH: cluster + check for auto-lock ──
+        sorted_pkgs = assign_delivery_zones(sorted_pkgs)
+
+        if len(geocoded) >= ZONE_LOCK_THRESHOLD:
+            new_cents = compute_centroids(sorted_pkgs)
+            if centroids_stable(prev_cents, new_cents) or len(geocoded) >= ZONE_LOCK_THRESHOLD + 5:
+                # Auto-lock: centroids stable OR we’ve hit the hard threshold + 5 buffer
+                db2 = get_db()
+                db2.execute(
+                    "UPDATE scan_sessions SET zones_locked=1, zone_centroids=?, locked_at=? WHERE id=?",
+                    (json.dumps(new_cents), datetime.now().isoformat(), ss['id'])
+                )
+                db2.commit()
+                db2.close()
+                zones_locked = True
+                stored_cents = new_cents
+                just_locked  = True
+                scans_until_lock = 0
+            else:
+                # Store current centroids for next scan’s stability check
+                db2 = get_db()
+                db2.execute(
+                    "UPDATE scan_sessions SET prev_centroids=? WHERE id=?",
+                    (json.dumps(compute_centroids(sorted_pkgs)), ss['id'])
+                )
+                db2.commit()
+                db2.close()
 
     # ─ Assign vehicle cargo zones based on delivery zone letter ─
     sorted_pkgs = assign_vehicle_zones(sorted_pkgs, vehicle_type)
 
-    # ─ Build zone summary (how many packages per zone, vehicle spot) ─
+    # ─ Build zone summary ─
     zone_summary = {}
     for p in sorted_pkgs:
         letter = p.get('zone_letter', '?')
         if letter not in zone_summary:
             zone_summary[letter] = {
-                'letter':        letter,
-                'count':         0,
-                'color':         p.get('zone_color', '#6b7280'),
-                'emoji':         p.get('zone_emoji', '⚪'),
-                'vehicle_spot':  p.get('vehicle_zone_label', ''),
-                'load_order':    len(zone_summary) + 1,
+                'letter':       letter,
+                'count':        0,
+                'color':        p.get('zone_color', '#6b7280'),
+                'emoji':        p.get('zone_emoji', '⚪'),
+                'vehicle_spot': p.get('vehicle_zone_label', ''),
+                'load_order':   len(zone_summary) + 1,
             }
         zone_summary[letter]['count'] += 1
-    # Sort zone_summary so last-letter zone loads first
     zone_list = sorted(zone_summary.values(), key=lambda z: z['letter'], reverse=True)
     for i, z in enumerate(zone_list):
         z['load_order'] = i + 1
 
-    # ETA projection: drive time + 3 min per stop
+    # ETA projection
     est_total_mins = None
     if route_drive_mins is not None:
         est_total_mins = round(route_drive_mins + (total * 3), 1)
@@ -1310,6 +1418,9 @@ def scan_live_sort():
         'sorted':          len(geocoded) >= 2,
         'total':           total,
         'zone_summary':    zone_list,
+        'zones_locked':    zones_locked,
+        'just_locked':     just_locked,
+        'scans_until_lock': scans_until_lock,
         'vehicle_type':    vehicle_type,
         'vehicle_label':   VEHICLE_LABELS.get(vehicle_type, 'Vehicle'),
         'vehicle_zones':   VEHICLE_ZONES.get(vehicle_type, VEHICLE_ZONES['suv_midsize']),
@@ -1367,6 +1478,45 @@ def scan_remove(item_id):
     return jsonify({'ok': True})
 
 
+@app.route('/driver/scan/lock-zones', methods=['POST'])
+def scan_lock_zones():
+    """Manual zone lock — driver taps Lock Now when confident in zone layout."""
+    if 'driver_id' not in session:
+        return jsonify({'ok': False}), 401
+    db = get_db()
+    today = datetime.now().strftime('%Y-%m-%d')
+    ss = db.execute(
+        "SELECT * FROM scan_sessions WHERE driver_id=? AND date=? AND status='scanning' ORDER BY id DESC LIMIT 1",
+        (session['driver_id'], today)
+    ).fetchone()
+    if not ss:
+        db.close()
+        return jsonify({'ok': False, 'error': 'No active scan session'})
+
+    # Get all geocoded packages
+    items = db.execute("SELECT * FROM scan_items WHERE session_id=?", (ss['id'],)).fetchall()
+    geocoded = [{'id':i['id'],'lat':i['dest_lat'],'lng':i['dest_lng'],
+                 'address':i['address'],'delivery_order':idx+1}
+                for idx,i in enumerate(items) if i['dest_lat'] and i['dest_lng']]
+
+    if len(geocoded) < 2:
+        db.close()
+        return jsonify({'ok': False, 'error': 'Need at least 2 geocoded packages to lock zones'})
+
+    # Run full clustering and lock
+    temp_pkgs = sorted(geocoded, key=lambda x: x['delivery_order'])
+    clustered = assign_delivery_zones(temp_pkgs)
+    centroids = compute_centroids(clustered)
+
+    db.execute(
+        "UPDATE scan_sessions SET zones_locked=1, zone_centroids=?, locked_at=? WHERE id=?",
+        (json.dumps(centroids), datetime.now().isoformat(), ss['id'])
+    )
+    db.commit()
+    db.close()
+    return jsonify({'ok': True, 'centroids': centroids, 'n_zones': len(centroids)})
+
+
 @app.route('/driver/scan/clear', methods=['POST'])
 def scan_clear():
     if 'driver_id' not in session:
@@ -1379,7 +1529,10 @@ def scan_clear():
     ).fetchone()
     if ss:
         db.execute("DELETE FROM scan_items WHERE session_id=?", (ss['id'],))
-        db.execute("UPDATE scan_sessions SET status='cleared' WHERE id=?", (ss['id'],))
+        db.execute(
+            "UPDATE scan_sessions SET status='cleared', zones_locked=0, zone_centroids=NULL, prev_centroids=NULL WHERE id=?",
+            (ss['id'],)
+        )
         db.commit()
     db.close()
     return jsonify({'ok': True})

@@ -124,6 +124,36 @@
   .stat-savings { color: #10b981 !important; }
   .stat-warn    { color: #f59e0b !important; }
 
+  /* Calibration bar */
+  #calibration-bar { background: #1c1917; border: 2px solid #f59e0b; border-radius: 14px;
+                     padding: 12px 16px; margin-bottom: 14px; display: none; }
+  .cal-header { display: flex; justify-content: space-between; align-items: center;
+                margin-bottom: 8px; }
+  .cal-title   { font-size: 0.85rem; font-weight: 700; color: #f59e0b; }
+  .cal-count   { font-size: 0.8rem; color: #9ca3af; }
+  .cal-track   { background: #374151; border-radius: 999px; height: 6px; overflow: hidden; margin-bottom: 8px; }
+  .cal-fill    { height: 100%; background: #f59e0b; border-radius: 999px; transition: width .4s; }
+  .cal-note    { font-size: 0.75rem; color: #6b7280; }
+  .cal-lock-btn{ float: right; background: #f59e0b; color: #000; border: none;
+                 border-radius: 8px; padding: 4px 12px; font-size: 0.78rem;
+                 font-weight: 700; cursor: pointer; margin-top: -4px; }
+
+  /* Lock celebration */
+  #lock-flash { position: fixed; inset: 0; background: rgba(16,185,129,.92);
+                display: flex; flex-direction: column; align-items: center;
+                justify-content: center; z-index: 1000; display: none; }
+  #lock-flash .lf-icon { font-size: 4rem; }
+  #lock-flash .lf-title { font-size: 1.6rem; font-weight: 900; color: #fff; margin-top: 12px; }
+  #lock-flash .lf-sub   { font-size: 0.95rem; color: #d1fae5; margin-top: 6px; text-align: center; padding: 0 24px; }
+
+  /* Locked badge on sort header */
+  .sort-badge.locked { background: #10b981; }
+
+  /* Hold badge on uncalibrated packages */
+  .hold-badge { background: #f59e0b22; border: 1px solid #f59e0b; color: #f59e0b;
+                font-size: 0.7rem; font-weight: 700; padding: 2px 8px;
+                border-radius: 999px; display: inline-block; margin-top: 4px; }
+
   /* Zip warning */
   .zip-warn-banner { background: #7c2d12; border: 1px solid #f97316; border-radius: 10px;
                      padding: 10px 14px; margin-bottom: 10px; font-size: 0.85rem;
@@ -268,6 +298,23 @@
     </div>
   </div>
 
+  <!-- Lock flash overlay -->
+  <div id="lock-flash">
+    <div class="lf-icon">🔒</div>
+    <div class="lf-title">Zones Locked!</div>
+    <div class="lf-sub" id="lock-flash-sub">Now load your car — zones will never shift again</div>
+  </div>
+
+  <!-- Calibration bar -->
+  <div id="calibration-bar">
+    <div class="cal-header">
+      <span class="cal-title">🟡 Calibrating Zones…</span>
+      <button class="cal-lock-btn" onclick="manualLockZones()">Lock Now</button>
+    </div>
+    <div class="cal-track"><div class="cal-fill" id="cal-fill" style="width:0%"></div></div>
+    <div class="cal-note">📦 <span id="cal-scans-left">20</span> more scans until zones lock — hold these packages, don’t load yet</div>
+  </div>
+
   <!-- Zone Summary Strip -->
   <div id="zone-summary">
     <div class="zone-strip" id="zone-strip"></div>
@@ -331,8 +378,35 @@ let liveMap = null;
 let mapMarkers = [];
 let mapPolyline = null;
 let currentVehicleType = 'suv_midsize';
-let lastScannedZone = null;
-let lastAddedItemId = null;
+let lastScannedZone    = null;
+let lastAddedItemId    = null;
+let zonesLocked        = false;
+
+// ── Manual lock ──
+function manualLockZones() {
+  fetch('/driver/scan/lock-zones', { method: 'POST' })
+    .then(r => r.json())
+    .then(data => {
+      if (!data.ok) { showToast(data.error || 'Could not lock zones', true); return; }
+      zonesLocked = true;
+      triggerLockFlash(data.n_zones);
+      setTimeout(refreshLiveSort, 400);
+    });
+}
+
+function triggerLockFlash(nZones) {
+  const fl = document.getElementById('lock-flash');
+  document.getElementById('lock-flash-sub').textContent =
+    `${nZones} zone${nZones !== 1 ? 's' : ''} locked — now load your car. Zones will never shift again.`;
+  fl.style.display = 'flex';
+  setTimeout(() => fl.style.display = 'none', 2800);
+  // Update sort badge
+  const badge = document.getElementById('sort-status');
+  badge.textContent = '🔒 Locked';
+  badge.className = 'sort-badge locked';
+  // Hide calibration bar
+  document.getElementById('calibration-bar').style.display = 'none';
+}
 
 // ── Vehicle Setup ──
 function loadVehicleType() {
@@ -427,14 +501,25 @@ function refreshLiveSort() {
       // Force Leaflet to recalculate size after container becomes visible
       setTimeout(() => liveMap && liveMap.invalidateSize(), 50);
 
-      // Update sort status badge
+      // Update sort status badge + lock state
       const badge = document.getElementById('sort-status');
-      if (data.sorted) {
-        badge.textContent = 'Sorted ✓';
-        badge.className = 'sort-badge';
+      if (data.zones_locked) {
+        zonesLocked = true;
+        badge.textContent = '🔒 Locked';
+        badge.className = 'sort-badge locked';
+        document.getElementById('calibration-bar').style.display = 'none';
+        // Trigger flash if just locked this scan
+        if (data.just_locked) triggerLockFlash(data.zone_summary ? data.zone_summary.length : 1);
       } else {
-        badge.textContent = 'Sorting...';
-        badge.className = 'sort-badge pending';
+        badge.textContent = data.sorted ? 'Sorted ✓' : 'Sorting...';
+        badge.className   = data.sorted ? 'sort-badge' : 'sort-badge pending';
+        // Show / update calibration bar
+        const calBar = document.getElementById('calibration-bar');
+        calBar.style.display = 'block';
+        const scansLeft = data.scans_until_lock || 0;
+        const pct = Math.min(100, Math.round((1 - scansLeft / 20) * 100));
+        document.getElementById('cal-fill').style.width = pct + '%';
+        document.getElementById('cal-scans-left').textContent = scansLeft;
       }
 
       // ─ Zone summary strip ─
@@ -536,9 +621,10 @@ function refreshLiveSort() {
       }
 
       // ─ Re-render package list grouped by zone ─
-      const listEl = document.getElementById('pkg-list-inner');
+      const listEl  = document.getElementById('pkg-list-inner');
       listEl.innerHTML = '';
       let lastLetter = null;
+      const isLocked = data.zones_locked;
       data.items.forEach((pkg) => {
         const color  = pkg.zone_color || '#3b82f6';
         const letter = pkg.zone_letter || '?';
@@ -547,13 +633,17 @@ function refreshLiveSort() {
         // Zone group header
         if (letter !== lastLetter && letter !== '?') {
           lastLetter = letter;
+          const lockIcon = isLocked ? '🔒 ' : '🟡 ';
           listEl.innerHTML += `
             <div style="padding:8px 4px 4px;font-size:0.72rem;font-weight:800;color:${color};text-transform:uppercase;letter-spacing:.08em;">
-              ${pkg.zone_emoji || ''} Zone ${letter} &nbsp;•&nbsp; ${pkg.vehicle_zone_icon || ''} ${vzone}
+              ${lockIcon}${pkg.zone_emoji || ''} Zone ${letter} &nbsp;•&nbsp; ${vzone}
             </div>`;
         }
+        const holdBadge = !isLocked
+          ? `<span class="hold-badge">⏸ HOLD — don’t load yet</span>`
+          : '';
         listEl.innerHTML += `
-          <div class="pkg-item" id="item-${pkg.id}" style="border-left:3px solid ${color};">
+          <div class="pkg-item" id="item-${pkg.id}" style="border-left:3px solid ${color};${!isLocked?'opacity:0.75;':''}">
             <div class="pkg-info">
               <div class="pkg-name" style="display:flex;align-items:center;gap:8px;">
                 <span style="background:${color};color:#fff;border-radius:6px;padding:1px 7px;font-size:0.8rem;font-weight:800;flex-shrink:0;">${label}</span>
@@ -561,6 +651,7 @@ function refreshLiveSort() {
               </div>
               <div class="pkg-addr">${pkg.address}</div>
               ${pkg.tracking ? `<div class="pkg-tracking">${pkg.tracking}</div>` : ''}
+              ${holdBadge}
             </div>
             <button class="pkg-remove" onclick="removeItem(${pkg.id}, this)">✕</button>
           </div>`;
