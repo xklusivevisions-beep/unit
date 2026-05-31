@@ -124,6 +124,22 @@
   .stat-savings { color: #10b981 !important; }
   .stat-warn    { color: #f59e0b !important; }
 
+  /* Import-first panel */
+  #import-panel { background: #0f172a; border: 2px dashed #3b82f6; border-radius: 16px;
+                  padding: 16px; margin-bottom: 14px; }
+  #import-panel h3 { font-size: 0.9rem; font-weight: 700; color: #60a5fa; margin: 0 0 8px; }
+  #import-panel p  { font-size: 0.78rem; color: #6b7280; margin: 0 0 12px; }
+  .import-btn  { width: 100%; padding: 12px; background: #1e3a5f; color: #60a5fa;
+                 border: 1px solid #3b82f6; border-radius: 10px; font-weight: 700;
+                 font-size: 0.9rem; cursor: pointer; margin-bottom: 8px; }
+  .import-btn:active { background: #1e40af; }
+  #import-progress { display: none; text-align: center; padding: 12px; color: #60a5fa;
+                     font-size: 0.85rem; }
+  #import-result { display: none; background: #052e16; border: 1px solid #10b981;
+                   border-radius: 10px; padding: 10px 14px; font-size: 0.82rem; color: #6ee7b7; }
+  .import-toggle { font-size: 0.78rem; color: #3b82f6; text-align: center;
+                   cursor: pointer; padding: 4px 0; text-decoration: underline; }
+
   /* Calibration bar */
   #calibration-bar { background: #1c1917; border: 2px solid #f59e0b; border-radius: 14px;
                      padding: 12px 16px; margin-bottom: 14px; display: none; }
@@ -298,6 +314,22 @@
     </div>
   </div>
 
+  <!-- Import-first panel -->
+  <div id="import-panel">
+    <h3>📥 Import Route First (Recommended)</h3>
+    <p>Upload Speed X screenshots before scanning — zones lock instantly from scan #1. No zone drift. No holding packages.</p>
+    <input type="file" id="import-input" accept="image/*" multiple style="display:none" onchange="handleImportFiles(this)">
+    <button class="import-btn" onclick="document.getElementById('import-input').click()">
+      📸 Upload Speed X Screenshots
+    </button>
+    <div id="import-progress">
+      <div class="spinner"></div>
+      <div>Extracting stops + locking zones…</div>
+    </div>
+    <div id="import-result"></div>
+    <div class="import-toggle" onclick="toggleImportPanel()">Or just start scanning → auto-locks after 20 scans</div>
+  </div>
+
   <!-- Lock flash overlay -->
   <div id="lock-flash">
     <div class="lf-icon">🔒</div>
@@ -381,6 +413,63 @@ let currentVehicleType = 'suv_midsize';
 let lastScannedZone    = null;
 let lastAddedItemId    = null;
 let zonesLocked        = false;
+
+// ── Import-first ──
+function toggleImportPanel() {
+  const panel = document.getElementById('import-panel');
+  panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+}
+
+function handleImportFiles(input) {
+  const files = Array.from(input.files);
+  if (!files.length) return;
+  document.getElementById('import-progress').style.display = 'block';
+  document.getElementById('import-result').style.display   = 'none';
+
+  const fd = new FormData();
+  files.forEach(f => fd.append('photos', f));
+
+  fetch('/driver/scan/import-route', { method: 'POST', body: fd })
+    .then(r => r.json())
+    .then(data => {
+      document.getElementById('import-progress').style.display = 'none';
+      const res = document.getElementById('import-result');
+      res.style.display = 'block';
+      if (!data.ok) {
+        res.style.borderColor = '#ef4444';
+        res.style.color = '#fca5a5';
+        res.textContent = '❌ ' + (data.error || 'Import failed');
+        return;
+      }
+      const zSummary = Object.entries(data.zone_counts || {})
+        .map(([l,c]) => `Zone ${l}: ${c} stops`).join(' • ');
+      res.innerHTML = `✅ <b>${data.imported} stops imported</b> (${data.geocoded} geocoded)<br>
+        🔒 <b>${data.n_zones} zones locked</b> from scan #1<br>
+        <span style="font-size:0.75rem;opacity:.8;">${zSummary}</span>`;
+      zonesLocked = true;
+      // Hide calibration bar, update badge
+      document.getElementById('calibration-bar').style.display = 'none';
+      const badge = document.getElementById('sort-status');
+      badge.textContent = '🔒 Locked';
+      badge.className = 'sort-badge locked';
+      // Collapse import panel
+      setTimeout(() => {
+        document.getElementById('import-panel').style.display = 'none';
+        triggerLockFlash(data.n_zones);
+        refreshLiveSort();
+      }, 1500);
+    })
+    .catch(() => {
+      document.getElementById('import-progress').style.display = 'none';
+      showToast('Import failed — try again', true);
+    });
+  input.value = '';
+}
+
+// Hide import panel if already locked
+if (pkgCount > 0) {
+  document.getElementById('import-panel').style.display = 'none';
+}
 
 // ── Manual lock ──
 function manualLockZones() {
@@ -508,6 +597,7 @@ function refreshLiveSort() {
         badge.textContent = '🔒 Locked';
         badge.className = 'sort-badge locked';
         document.getElementById('calibration-bar').style.display = 'none';
+        document.getElementById('import-panel').style.display    = 'none';
         // Trigger flash if just locked this scan
         if (data.just_locked) triggerLockFlash(data.zone_summary ? data.zone_summary.length : 1);
       } else {

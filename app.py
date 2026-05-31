@@ -1166,7 +1166,12 @@ def scan_process():
 
 @app.route('/driver/scan/add', methods=['POST'])
 def scan_add():
-    """Add a confirmed package to the scan session — geocodes immediately for live sort."""
+    """
+    Add a confirmed package to the scan session.
+    If zones are already locked (import-first path), match tracking number to
+    pre-loaded stop and return instant zone assignment.
+    Otherwise geocode immediately for live-sort calibration.
+    """
     if 'driver_id' not in session:
         return jsonify({'ok': False, 'error': 'not logged in'}), 401
     data = request.get_json() or {}
@@ -1176,6 +1181,42 @@ def scan_add():
     zip_code = data.get('zip', '').strip()
     if not address:
         return jsonify({'ok': False, 'error': 'Address is required'})
+
+    # ─ Import-first fast path: zones locked, match by tracking ─
+    db0 = get_db()
+    today0 = datetime.now().strftime('%Y-%m-%d')
+    ss0 = db0.execute(
+        "SELECT * FROM scan_sessions WHERE driver_id=? AND date=? AND status='scanning' ORDER BY id DESC LIMIT 1",
+        (session['driver_id'], today0)
+    ).fetchone()
+    if ss0 and ss0['zones_locked'] and tracking:
+        # Look up the tracking number in pre-loaded stops
+        pre = db0.execute(
+            "SELECT * FROM scan_items WHERE session_id=? AND tracking=? LIMIT 1",
+            (ss0['id'], tracking)
+        ).fetchone()
+        if pre:
+            # Mark as confirmed (reuse existing row, just return zone info)
+            stored_cents = json.loads(ss0['zone_centroids']) if ss0['zone_centroids'] else []
+            lat, lng = pre['dest_lat'], pre['dest_lng']
+            pkg = {'lat': lat, 'lng': lng, 'delivery_order': 1}
+            zone_info = {}
+            if stored_cents and lat and lng:
+                nearest = min(stored_cents, key=lambda c: _dsq(pkg, c))
+                zone_info = {
+                    'zone_letter': nearest['letter'],
+                    'zone_color':  nearest['color'],
+                    'zone_emoji':  nearest['emoji'],
+                }
+            count = db0.execute("SELECT COUNT(*) FROM scan_items WHERE session_id=?", (ss0['id'],)).fetchone()[0]
+            db0.close()
+            return jsonify({
+                'ok': True, 'count': count, 'geocoded': bool(lat),
+                'new_item_id': pre['id'], 'zip_warning': None,
+                'zones_locked': True, 'preloaded_match': True,
+                **zone_info
+            })
+    db0.close()
 
     # Geocode immediately so live-sort works right away
     lat, lng = None, None
@@ -1476,6 +1517,137 @@ def scan_remove(item_id):
     db.commit()
     db.close()
     return jsonify({'ok': True})
+
+
+@app.route('/driver/scan/import-route', methods=['POST'])
+def scan_import_route():
+    """
+    Import-first path: driver uploads Speed X screenshots BEFORE scanning.
+    Extracts all stops, geocodes, clusters, locks zones immediately.
+    From scan #1, every barcode scan is an instant lookup — no re-clustering ever.
+    """
+    if 'driver_id' not in session:
+        return jsonify({'ok': False, 'error': 'not logged in'}), 401
+
+    files = request.files.getlist('photos')
+    if not files:
+        return jsonify({'ok': False, 'error': 'No photos received'})
+
+    db = get_db()
+    ss_id = _get_or_create_scan_session(db, session['driver_id'])
+
+    # Clear any existing items so import is a clean slate
+    db.execute("DELETE FROM scan_items WHERE session_id=?", (ss_id,))
+    db.execute(
+        "UPDATE scan_sessions SET zones_locked=0, zone_centroids=NULL, prev_centroids=NULL WHERE id=?",
+        (ss_id,)
+    )
+    db.commit()
+
+    # Extract stops from all uploaded screenshots
+    all_stops = []
+    for f in files:
+        try:
+            img_bytes = f.read()
+            stops = extract_stops_from_image(img_bytes)
+            all_stops.extend(stops)
+        except Exception as e:
+            log.warning(f'import-route extract error: {e}')
+
+    if not all_stops:
+        db.close()
+        return jsonify({'ok': False, 'error': 'Could not extract any stops from screenshots'})
+
+    # Deduplicate by tracking number
+    seen_tracking = set()
+    unique_stops = []
+    for s in all_stops:
+        t = s.get('tracking', '').strip()
+        if t and t not in seen_tracking:
+            seen_tracking.add(t)
+            unique_stops.append(s)
+        elif not t:
+            unique_stops.append(s)
+
+    # Geocode all stops (batch)
+    geocoded_stops = []
+    for s in unique_stops:
+        addr = s.get('address', '').strip()
+        lat, lng = None, None
+        if addr:
+            try:
+                coords = geocode_address(addr)
+                if coords:
+                    lat, lng = coords
+            except Exception as e:
+                log.warning(f'import geocode failed {addr}: {e}')
+        s['lat'] = lat
+        s['lng'] = lng
+        geocoded_stops.append(s)
+
+    # Insert all stops into scan_items
+    for i, s in enumerate(geocoded_stops):
+        db.execute(
+            """INSERT INTO scan_items
+               (session_id, tracking, customer_name, address, zip_code, raw_json, dest_lat, dest_lng)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (
+                ss_id,
+                s.get('tracking', '').strip(),
+                s.get('name', '').strip(),
+                s.get('address', '').strip(),
+                s.get('zip', '').strip(),
+                json.dumps(s),
+                s.get('lat'),
+                s.get('lng'),
+            )
+        )
+    db.commit()
+
+    # Build package list for clustering
+    geo_pkgs = [
+        {'id': i, 'lat': s['lat'], 'lng': s['lng'],
+         'delivery_order': i + 1, 'address': s.get('address', ''),
+         'tracking': s.get('tracking', ''), 'name': s.get('name', '')}
+        for i, s in enumerate(geocoded_stops)
+        if s.get('lat') and s.get('lng')
+    ]
+
+    if len(geo_pkgs) < 2:
+        db.close()
+        return jsonify({
+            'ok': True, 'imported': len(unique_stops),
+            'geocoded': len(geo_pkgs),
+            'zones_locked': False,
+            'message': 'Imported but not enough geocoded stops to cluster zones yet'
+        })
+
+    # Cluster + lock zones immediately
+    clustered = assign_delivery_zones(geo_pkgs)
+    centroids  = compute_centroids(clustered)
+
+    db.execute(
+        "UPDATE scan_sessions SET zones_locked=1, zone_centroids=?, locked_at=? WHERE id=?",
+        (json.dumps(centroids), datetime.now().isoformat(), ss_id)
+    )
+    db.commit()
+
+    # Build zone summary for response
+    zone_counts = {}
+    for p in clustered:
+        l = p.get('zone_letter', '?')
+        zone_counts[l] = zone_counts.get(l, 0) + 1
+
+    db.close()
+    return jsonify({
+        'ok':          True,
+        'imported':    len(unique_stops),
+        'geocoded':    len(geo_pkgs),
+        'zones_locked': True,
+        'n_zones':     len(centroids),
+        'zone_counts': zone_counts,
+        'centroids':   centroids,
+    })
 
 
 @app.route('/driver/scan/lock-zones', methods=['POST'])
