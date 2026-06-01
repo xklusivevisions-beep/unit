@@ -91,21 +91,28 @@ Rules:
             }]
         )
         text = resp.content[0].text.strip()
+        log.info(f'Claude Vision raw response (first 400): {text[:400]}')
         # Extract JSON array from response
         match = re.search(r'\[.*\]', text, re.DOTALL)
         if match:
-            stops = json.loads(match.group())
-            return [{
-                'address':  s.get('address','').strip(),
-                'name':     s.get('name','').strip(),
-                'tracking': s.get('tracking','').strip(),
-                'stop_num': str(s.get('stop_num','')).strip(),
-                'unit':     s.get('unit','').strip(),
-                'phone':    re.sub(r'\D', '', s.get('phone',''))
-            } for s in stops if s.get('address')]
+            try:
+                stops = json.loads(match.group())
+                return [{
+                    'address':  s.get('address','').strip(),
+                    'name':     s.get('name','').strip(),
+                    'tracking': s.get('tracking','').strip(),
+                    'stop_num': str(s.get('stop_num','')).strip(),
+                    'unit':     s.get('unit','').strip(),
+                    'phone':    re.sub(r'\D', '', s.get('phone',''))
+                } for s in stops if s.get('address')]
+            except json.JSONDecodeError as je:
+                log.warning(f'JSON parse failed: {je} | raw: {text[:200]}')
+                return []
+        log.warning(f'No JSON array found in Claude response: {text[:300]}')
+        return []
     except Exception as e:
-        log.error(f'Claude Vision error: {e}')
-    return []
+        log.error(f'Claude Vision API error ({type(e).__name__}): {e}')
+        raise  # bubble up so caller can report the specific error
 
 
 def extract_package_label(img_bytes):
@@ -1660,6 +1667,7 @@ def scan_import_route():
 
     # Extract stops from all uploaded screenshots and PDFs
     all_stops = []
+    api_error = None
     for f in files:
         try:
             fname = (f.filename or '').lower()
@@ -1677,12 +1685,18 @@ def scan_import_route():
                     continue
                 stops = extract_stops_from_image(img_bytes)
                 all_stops.extend(stops)
+        except ValueError as ve:
+            db.close()
+            return jsonify({'ok': False, 'error': str(ve)})
         except Exception as e:
-            log.warning(f'import-route extract error: {e}')
+            api_error = f'{type(e).__name__}: {str(e)}'
+            log.error(f'import-route extract error: {api_error}')
 
     if not all_stops:
         db.close()
-        return jsonify({'ok': False, 'error': 'Could not extract any stops — check that screenshots are clear Speed X images'})
+        if api_error:
+            return jsonify({'ok': False, 'error': f'Vision API error: {api_error}'})
+        return jsonify({'ok': False, 'error': 'No stops found — make sure these are Speed X delivery screenshots showing package cards'})
 
     # Deduplicate by tracking number
     seen_tracking = set()
@@ -1814,6 +1828,24 @@ def scan_lock_zones():
     db.close()
     return jsonify({'ok': True, 'centroids': centroids, 'n_zones': len(centroids)})
 
+
+@app.route('/driver/scan/test-vision', methods=['GET'])
+def test_vision():
+    """Quick API sanity check — confirms model + key are working."""
+    if 'driver_id' not in session:
+        return jsonify({'ok': False, 'error': 'not logged in'}), 401
+    if not ANTHROPIC_KEY:
+        return jsonify({'ok': False, 'error': 'ANTHROPIC_API_KEY not set on server'})
+    try:
+        client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+        resp = client.messages.create(
+            model='claude-3-5-haiku-20241022',
+            max_tokens=50,
+            messages=[{'role': 'user', 'content': 'Reply with exactly: VISION_API_OK'}]
+        )
+        return jsonify({'ok': True, 'response': resp.content[0].text.strip(), 'model': 'claude-3-5-haiku-20241022'})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': f'{type(e).__name__}: {str(e)}'})
 
 @app.route('/driver/scan/screenshots-to-pdf', methods=['POST'])
 def screenshots_to_pdf():
