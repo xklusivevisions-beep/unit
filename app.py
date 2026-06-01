@@ -54,38 +54,40 @@ def extract_stops_from_image(img_bytes):
                         'text': '''This is a Speed X delivery app screenshot. Extract ALL delivery stops visible.
 Return ONLY a JSON array, no other text. No markdown, no code blocks, just the raw array.
 
-SPEED X ADDRESS FORMAT — addresses are split across TWO lines:
-  Line 1: street number + street name (may end with "Apt", "St", "Blvd," or just the street)
-  Line 2: unit/apt number, City, STATE, ZIP, USA — all comma-separated, no spaces
-Example:
-  Line 1: "3439 Woodward Ave Apt"
-  Line 2: "550,Detroit,MI,48201,USA"
-  → Reconstruct as: "3439 Woodward Ave Apt 550, Detroit, MI 48201"
+SPEED X STOP CARD FORMAT:
+Each stop card contains:
+  - ADDRESS (top-left): comma-separated with NO spaces after commas, may wrap across 1-2 lines
+    Format: "{street},{CITY},{STATE},{ZIP},{COUNTRY}"
+    Examples:
+      "317 Elmhurst St,HIGHLAND PARK,MI,48203-3413,USA"
+      "252 Beresford St,HIGHLAND PARK,MI,48203-3334,USA" (may wrap as "252 Beresford St,HIGHLAND" / "PARK,MI,48203-3334,USA")
+      "28 Rhode Island,HIGHLAND PARK,MI,48203,USA"
+  - CUSTOMER NAME (top-right, blue text next to phone icon)
+  - TRACKING NUMBER (blue "SPXDTW..." code below name)
+  - STOP NUMBER (bottom-right: "Stop: 41")
+  - PARCELS (top-right: "1 parcel")
 
-Another example:
-  Line 1: "690 Brainard ST"
-  Line 2: "405,DETROIT,MI,48201-2283,..."
-  → Reconstruct as: "690 Brainard ST Apt 405, Detroit, MI 48201"
+How to reconstruct the address:
+1. Join any wrapped address lines into one string
+2. Split by comma: [street, city, state, zip, country]
+3. Use only the first 5-digit portion of the zip (drop extended zip like "-3413")
+4. Output as: "{street}, {Title Case City}, {STATE} {5-digit-zip}"
+   Example: "317 Elmhurst St, Highland Park, MI 48203"
+   Example: "252 Beresford St, Highland Park, MI 48203"
+   Example: "28 Rhode Island, Highland Park, MI 48203"
 
-Another example:
-  Line 1: "676 Martin Luther King Jr Blvd,"
-  Line 2: "Apt 2c, MI,Detroit,MI,48201,USA"
-  → Reconstruct as: "676 Martin Luther King Jr Blvd Apt 2C, Detroit, MI 48201"
-
-Output format:
-[{"stop_num": "51", "address": "690 Brainard ST Apt 405, Detroit, MI 48201", "name": "Ianita Manning", "tracking": "SPXDTW119702831650", "unit": "405", "phone": "3135550123"}]
+Output format (JSON array):
+[{"stop_num": "41", "address": "317 Elmhurst St, Highland Park, MI 48203", "name": "Rudy Gordon", "tracking": "SPXDTW008922605280005220", "unit": "", "phone": ""}]
 
 Rules:
-- Reconstruct the full address by combining both lines as shown above
-- Remove ",USA" and trailing ",..." from addresses
-- Normalize city to title case (Detroit not DETROIT)
-- stop_num is the number after "Stop:" label (bottom-right of each card)
-- tracking is the full SPXDTW code (blue text) — copy it exactly, it can be 18-24 chars
-- name is the customer name (blue text next to phone icon) — expand truncated names if you can read enough, otherwise use what is visible
-- unit is the apartment/unit number extracted from the address
-- phone is the customer phone number if visible anywhere on the card (digits only, no dashes or spaces). If not visible, use empty string ""
 - Include EVERY stop card visible on screen
-- If address is truncated with "..." reconstruct as much as possible from visible text'''
+- tracking: full SPXDTW... code, copy exactly (18-24 chars)
+- name: customer name in blue — if truncated with "..." use what is visible
+- stop_num: number after "Stop:" label
+- unit: apartment/unit number if present in address, otherwise empty string
+- phone: digits only if visible on card, otherwise empty string
+- Do NOT include ",USA" in the address output
+- Normalize city to Title Case (Highland Park not HIGHLAND PARK)'''
                     }
                 ]
             }]
