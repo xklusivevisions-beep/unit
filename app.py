@@ -1679,8 +1679,25 @@ def scan_import_route():
                     for page in pdf.pages:
                         text = page.extract_text() or ''
                         if text.strip():
+                            # Text-based PDF — parse directly
                             pdf_stops = parse_stops_from_text(text)
                             all_stops.extend(pdf_stops)
+                        else:
+                            # Image-based PDF (e.g. created by our screenshot converter)
+                            # Render the page as an image and send to Claude
+                            try:
+                                pil_img = page.to_image(resolution=150).original
+                                buf = io.BytesIO()
+                                pil_img.save(buf, format='JPEG', quality=85)
+                                page_stops = extract_stops_from_image(buf.getvalue())
+                                all_stops.extend(page_stops)
+                            except Exception as render_err:
+                                log.warning(f'PDF page render failed: {render_err}')
+                                # Can't render — tell user to upload original screenshots
+                                raise ValueError(
+                                    'PDF is image-only and cannot be rendered on this server. '
+                                    'Please upload the original Speed X screenshots directly instead.'
+                                )
             else:
                 img_bytes = f.read()
                 if not img_bytes:

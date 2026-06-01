@@ -2,6 +2,7 @@ gunicorn==21.2.0
 stripe==11.4.1
 pg8000==1.31.2
 pdfplumber==0.11.4
+pypdfium2==5.8.0
 pillow==11.2.1
 anthropic==0.104.0
 aiohappyeyeballs==2.6.1
