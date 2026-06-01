@@ -1257,6 +1257,8 @@ def scan_process():
     if not file:
         return jsonify({'ok': False, 'error': 'No photo received'})
     img_bytes = file.read()
+    if not ANTHROPIC_KEY:
+        return jsonify({'ok': False, 'error': 'Vision AI not configured — ANTHROPIC_API_KEY missing on server'})
     result = extract_package_label(img_bytes)
     if not result:
         return jsonify({'ok': False, 'error': 'Could not read label — try a clearer photo'})
