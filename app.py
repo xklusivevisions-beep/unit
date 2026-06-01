@@ -34,13 +34,13 @@ def compress_for_api(img_bytes, max_bytes=4 * 1024 * 1024):
 def extract_stops_from_image(img_bytes):
     """Use Claude Vision to extract stops from a Speed X screenshot."""
     if not ANTHROPIC_KEY:
-        return []
+        raise ValueError('Vision AI not configured on server — contact admin')
     try:
         img_bytes = compress_for_api(img_bytes)
         client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
         b64    = base64.standard_b64encode(img_bytes).decode('utf-8')
         resp   = client.messages.create(
-            model='claude-haiku-4-5-20251001',
+            model='claude-3-5-haiku-20241022',
             max_tokens=2048,
             messages=[{
                 'role': 'user',
@@ -117,7 +117,7 @@ def extract_package_label(img_bytes):
         client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
         b64 = base64.standard_b64encode(img_bytes).decode('utf-8')
         resp = client.messages.create(
-            model='claude-haiku-4-5-20251001',
+            model='claude-3-5-haiku-20241022',
             max_tokens=512,
             messages=[{
                 'role': 'user',
@@ -1652,19 +1652,35 @@ def scan_import_route():
     )
     db.commit()
 
-    # Extract stops from all uploaded screenshots
+    if not ANTHROPIC_KEY:
+        db.close()
+        return jsonify({'ok': False, 'error': 'Vision AI not configured on server — contact admin'})
+
+    # Extract stops from all uploaded screenshots and PDFs
     all_stops = []
     for f in files:
         try:
-            img_bytes = f.read()
-            stops = extract_stops_from_image(img_bytes)
-            all_stops.extend(stops)
+            fname = (f.filename or '').lower()
+            if fname.endswith('.pdf'):
+                pdf_bytes = f.read()
+                with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+                    for page in pdf.pages:
+                        text = page.extract_text() or ''
+                        if text.strip():
+                            pdf_stops = parse_stops_from_text(text)
+                            all_stops.extend(pdf_stops)
+            else:
+                img_bytes = f.read()
+                if not img_bytes:
+                    continue
+                stops = extract_stops_from_image(img_bytes)
+                all_stops.extend(stops)
         except Exception as e:
             log.warning(f'import-route extract error: {e}')
 
     if not all_stops:
         db.close()
-        return jsonify({'ok': False, 'error': 'Could not extract any stops from screenshots'})
+        return jsonify({'ok': False, 'error': 'Could not extract any stops — check that screenshots are clear Speed X images'})
 
     # Deduplicate by tracking number
     seen_tracking = set()
@@ -1795,6 +1811,100 @@ def scan_lock_zones():
     db.commit()
     db.close()
     return jsonify({'ok': True, 'centroids': centroids, 'n_zones': len(centroids)})
+
+
+@app.route('/driver/scan/screenshots-to-pdf', methods=['POST'])
+def screenshots_to_pdf():
+    """Convert Speed X screenshots into a downloadable PDF address list."""
+    if 'driver_id' not in session:
+        return jsonify({'ok': False, 'error': 'not logged in'}), 401
+
+    files = request.files.getlist('photos')
+    if not files:
+        return jsonify({'ok': False, 'error': 'No screenshots provided'})
+
+    if not ANTHROPIC_KEY:
+        return jsonify({'ok': False, 'error': 'Vision AI not configured on server'})
+
+    # Extract stops from all screenshots
+    all_stops = []
+    for f in files:
+        try:
+            img_bytes = f.read()
+            if not img_bytes:
+                continue
+            stops = extract_stops_from_image(img_bytes)
+            all_stops.extend(stops)
+        except Exception as e:
+            log.warning(f'screenshots-to-pdf extract error: {e}')
+
+    if not all_stops:
+        return jsonify({'ok': False, 'error': 'No addresses found in screenshots'})
+
+    # Deduplicate by tracking or address
+    seen = set()
+    unique_stops = []
+    for s in all_stops:
+        key = s.get('tracking') or s.get('address', '')
+        if key and key not in seen:
+            seen.add(key)
+            unique_stops.append(s)
+
+    # Generate PDF using Pillow
+    try:
+        from PIL import Image, ImageDraw
+        page_w, page_h = 850, 1100
+        margin = 60
+        header_h = 80
+        row_h = 52
+        rows_per_page = (page_h - margin * 2 - header_h) // row_h
+
+        pages = []
+        for page_idx in range(0, len(unique_stops), rows_per_page):
+            img = Image.new('RGB', (page_w, page_h), 'white')
+            draw = ImageDraw.Draw(img)
+
+            # Header bar
+            draw.rectangle([0, 0, page_w, header_h], fill=(15, 23, 42))
+            draw.text((margin, 22), f'Speed X Route  —  {len(unique_stops)} stops  (page {page_idx // rows_per_page + 1})', fill='white')
+
+            y = header_h + margin
+            batch = unique_stops[page_idx:page_idx + rows_per_page]
+            for i, stop in enumerate(batch):
+                num = page_idx + i + 1
+                name = (stop.get('name') or 'Unknown').strip()
+                addr = (stop.get('address') or '').strip()
+                tracking = (stop.get('tracking') or '').strip()
+
+                # Alternating row background
+                if i % 2 == 0:
+                    draw.rectangle([margin - 10, y - 6, page_w - margin + 10, y + row_h - 10], fill=(248, 250, 252))
+
+                draw.text((margin, y), f'{num}. {name}', fill=(15, 23, 42))
+                draw.text((margin + 20, y + 18), addr, fill=(71, 85, 105))
+                if tracking:
+                    draw.text((margin + 20, y + 34), tracking, fill=(148, 163, 184))
+                y += row_h
+
+            pages.append(img)
+
+        buf = io.BytesIO()
+        if len(pages) == 1:
+            pages[0].save(buf, format='PDF')
+        else:
+            pages[0].save(buf, format='PDF', save_all=True, append_images=pages[1:])
+        buf.seek(0)
+
+        from flask import send_file
+        return send_file(
+            buf,
+            mimetype='application/pdf',
+            as_attachment=True,
+            download_name='speedx_route.pdf'
+        )
+    except Exception as e:
+        log.error(f'screenshots-to-pdf PDF gen error: {e}')
+        return jsonify({'ok': False, 'error': f'PDF generation failed: {str(e)}'})
 
 
 @app.route('/driver/scan/clear', methods=['POST'])

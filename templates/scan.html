@@ -331,13 +331,24 @@
     </div>
   </div>
 
+  <!-- Screenshot to PDF Converter -->
+  <div id="pdf-converter-panel" style="background:#0f172a;border:1px solid #374151;border-radius:16px;padding:14px 16px;margin-bottom:14px;">
+    <h3 style="font-size:0.9rem;font-weight:700;color:#e2e8f0;margin:0 0 6px;">📄 Convert Screenshots → PDF</h3>
+    <p style="font-size:0.75rem;color:#6b7280;margin:0 0 10px;">Upload Speed X screenshots to get a clean PDF with all addresses — useful for records or sharing your route.</p>
+    <input type="file" id="pdf-converter-input" accept="image/*,.pdf,application/pdf" multiple style="display:none" onchange="handlePdfConverter(this)">
+    <button style="width:100%;padding:10px;background:#1e293b;color:#94a3b8;border:1px solid #334155;border-radius:10px;font-weight:600;font-size:0.88rem;cursor:pointer;" onclick="document.getElementById('pdf-converter-input').click()">
+      📸 Upload Screenshots → Download PDF
+    </button>
+    <div id="pdf-converter-status" style="display:none;text-align:center;padding:10px;color:#94a3b8;font-size:0.82rem;"></div>
+  </div>
+
   <!-- Import-first panel -->
   <div id="import-panel">
     <h3>📥 Import Route First (Recommended)</h3>
-    <p>Upload Speed X screenshots before scanning — zones lock instantly from scan #1. No zone drift. No holding packages.</p>
-    <input type="file" id="import-input" accept="image/*" multiple style="display:none" onchange="handleImportFiles(this)">
+    <p>Upload Speed X screenshots (or PDF export) before scanning — zones lock instantly from scan #1. No zone drift. No holding packages.</p>
+    <input type="file" id="import-input" accept="image/*,.pdf,application/pdf" multiple style="display:none" onchange="handleImportFiles(this)">
     <button class="import-btn" onclick="document.getElementById('import-input').click()">
-      📸 Upload Speed X Screenshots
+      📸 Upload Screenshots or PDF
     </button>
     <div id="import-progress">
       <div class="spinner"></div>
@@ -1034,6 +1045,41 @@ function clearAll() {
   if (!confirm('Clear all scanned packages?')) return;
   fetch('/driver/scan/clear', { method: 'POST' })
     .then(() => location.reload());
+}
+
+// ── Screenshot → PDF Converter ──
+function handlePdfConverter(input) {
+  const files = Array.from(input.files);
+  if (!files.length) return;
+  const status = document.getElementById('pdf-converter-status');
+  status.style.display = 'block';
+  status.innerHTML = '<div class="spinner" style="margin:0 auto 6px;"></div>Extracting addresses…';
+
+  const fd = new FormData();
+  files.forEach(f => fd.append('photos', f));
+
+  fetch('/driver/scan/screenshots-to-pdf', { method: 'POST', body: fd })
+    .then(r => {
+      if (!r.ok) return r.json().then(d => { throw new Error(d.error || 'Failed'); });
+      const ct = r.headers.get('content-type') || '';
+      if (ct.includes('application/pdf')) {
+        return r.blob().then(blob => {
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = 'speedx_route.pdf';
+          a.click();
+          status.textContent = '✅ PDF downloaded!';
+          setTimeout(() => { status.style.display = 'none'; }, 3000);
+        });
+      } else {
+        return r.json().then(d => { throw new Error(d.error || 'Unknown error'); });
+      }
+    })
+    .catch(e => {
+      status.textContent = '❌ ' + (e.message || 'Failed');
+    });
+  input.value = '';
 }
 </script>
 {% endblock %}
