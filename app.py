@@ -40,7 +40,7 @@ def extract_stops_from_image(img_bytes):
         client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
         b64    = base64.standard_b64encode(img_bytes).decode('utf-8')
         resp   = client.messages.create(
-            model='claude-3-5-haiku-20241022',
+            model='claude-haiku-4-5',
             max_tokens=2048,
             messages=[{
                 'role': 'user',
@@ -126,7 +126,7 @@ def extract_package_label(img_bytes):
         client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
         b64 = base64.standard_b64encode(img_bytes).decode('utf-8')
         resp = client.messages.create(
-            model='claude-3-5-haiku-20241022',
+            model='claude-haiku-4-5',
             max_tokens=512,
             messages=[{
                 'role': 'user',
@@ -1841,11 +1841,11 @@ def test_vision():
     try:
         client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
         resp = client.messages.create(
-            model='claude-3-5-haiku-20241022',
+            model='claude-haiku-4-5',
             max_tokens=50,
             messages=[{'role': 'user', 'content': 'Reply with exactly: VISION_API_OK'}]
         )
-        return jsonify({'ok': True, 'response': resp.content[0].text.strip(), 'model': 'claude-3-5-haiku-20241022'})
+        return jsonify({'ok': True, 'response': resp.content[0].text.strip(), 'model': 'claude-haiku-4-5'})
     except Exception as e:
         return jsonify({'ok': False, 'error': f'{type(e).__name__}: {str(e)}'})
 
@@ -3547,7 +3547,7 @@ def health():
             git_hash = subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD'], cwd=os.path.dirname(__file__) or '.', stderr=subprocess.DEVNULL).decode().strip()
         except Exception:
             git_hash = 'unknown'
-        return jsonify({'status': 'ok', 'time': datetime.now().isoformat(), 'version': git_hash, 'model': 'claude-3-5-haiku-20241022'})
+        return jsonify({'status': 'ok', 'time': datetime.now().isoformat(), 'version': git_hash, 'model': 'claude-haiku-4-5'})
     except Exception as e:
         return jsonify({'status': 'error', 'msg': str(e)}), 500
 
