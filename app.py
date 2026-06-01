@@ -844,6 +844,8 @@ def init_db():
         "ALTER TABLE drivers ADD COLUMN vehicle_type TEXT DEFAULT 'suv_midsize'",
         "ALTER TABLE drivers ADD COLUMN vehicle_capacity INTEGER DEFAULT 100",
         "ALTER TABLE drivers ADD COLUMN assigned_zips TEXT",
+        "ALTER TABLE drivers ADD COLUMN pay_rate REAL DEFAULT 1.50",
+        "ALTER TABLE routes ADD COLUMN route_type TEXT DEFAULT 'standard'",
         "ALTER TABLE scan_sessions ADD COLUMN zones_locked INTEGER DEFAULT 0",
         "ALTER TABLE scan_sessions ADD COLUMN zone_centroids TEXT",
         "ALTER TABLE scan_sessions ADD COLUMN locked_at TEXT",
@@ -1187,6 +1189,9 @@ def driver_dashboard():
         return redirect(url_for('driver_login'))
     db = get_db()
     today = datetime.now().strftime('%Y-%m-%d')
+    driver_row = db.execute("SELECT * FROM drivers WHERE id=?", (session['driver_id'],)).fetchone()
+    pay_rate = float(driver_row['pay_rate']) if driver_row and driver_row['pay_rate'] else 1.50
+
     route = db.execute(
         "SELECT * FROM routes WHERE driver_id=? AND date=? ORDER BY id DESC LIMIT 1",
         (session['driver_id'], today)
@@ -1197,8 +1202,59 @@ def driver_dashboard():
             "SELECT * FROM stops WHERE route_id=? ORDER BY stop_number",
             (route['id'],)
         ).fetchall()
+
+    # Today earnings
+    today_delivered = db.execute(
+        """SELECT COUNT(*) FROM stops s
+           JOIN routes r ON s.route_id = r.id
+           WHERE r.driver_id=? AND r.date=? AND s.status='delivered'""",
+        (session['driver_id'], today)
+    ).fetchone()[0]
+    today_total = db.execute(
+        """SELECT COUNT(*) FROM stops s
+           JOIN routes r ON s.route_id = r.id
+           WHERE r.driver_id=? AND r.date=?""",
+        (session['driver_id'], today)
+    ).fetchone()[0]
+
+    # Week earnings (Mon-Sun of current week)
+    from datetime import date
+    today_date = date.today()
+    week_start = (today_date - timedelta(days=today_date.weekday())).strftime('%Y-%m-%d')
+    week_stop_count = db.execute(
+        """SELECT COUNT(*) FROM stops s
+           JOIN routes r ON s.route_id = r.id
+           WHERE r.driver_id=? AND r.date >= ? AND s.status='delivered'""",
+        (session['driver_id'], week_start)
+    ).fetchone()[0]
+
+    # Weekly route history (last 7 days)
+    week_history = db.execute(
+        """SELECT r.date, COUNT(s.id) as total,
+           SUM(CASE WHEN s.status='delivered' THEN 1 ELSE 0 END) as delivered
+           FROM routes r
+           LEFT JOIN stops s ON s.route_id = r.id
+           WHERE r.driver_id=? AND r.date >= ?
+           GROUP BY r.date ORDER BY r.date DESC""",
+        (session['driver_id'], week_start)
+    ).fetchall()
+
     db.close()
-    return render_template('driver_dashboard.html', route=route, stops=stops, driver=session['driver_name'], gmaps_key=GOOGLE_MAPS_KEY, mapbox_token=MAPBOX_TOKEN)
+
+    today_earnings = round(today_delivered * pay_rate, 2)
+    week_earnings = round(week_stop_count * pay_rate, 2)
+
+    return render_template('driver_dashboard.html',
+        route=route, stops=stops, driver=session['driver_name'],
+        gmaps_key=GOOGLE_MAPS_KEY, mapbox_token=MAPBOX_TOKEN,
+        pay_rate=pay_rate,
+        today_delivered=today_delivered,
+        today_total=today_total,
+        today_earnings=today_earnings,
+        week_stop_count=week_stop_count,
+        week_earnings=week_earnings,
+        week_history=week_history,
+    )
 
 
 # ─── TEMP DEBUG ────────────────────────────────────────

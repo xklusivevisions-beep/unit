@@ -22,6 +22,36 @@
     <a href="/account" class="btn btn-outline-light btn-sm"><i class="fas fa-user"></i></a>
   </div>
 
+  <!-- ── Earnings Panel ── -->
+  <div style="background:#0f172a;border-radius:16px;padding:16px;margin-bottom:16px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+      <span style="font-size:0.8rem;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.05em;">💰 Earnings</span>
+      <span style="font-size:0.72rem;color:#475569;">${{ "%.2f"|format(pay_rate) }}/stop</span>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px;">
+      <div style="background:#1e293b;border-radius:12px;padding:12px;">
+        <div style="font-size:0.7rem;color:#64748b;margin-bottom:4px;">Today</div>
+        <div style="font-size:1.6rem;font-weight:900;color:#10b981;">${{ "%.2f"|format(today_earnings) }}</div>
+        <div style="font-size:0.72rem;color:#475569;margin-top:2px;">{{ today_delivered }} of {{ today_total }} stops</div>
+      </div>
+      <div style="background:#1e293b;border-radius:12px;padding:12px;">
+        <div style="font-size:0.7rem;color:#64748b;margin-bottom:4px;">This Week</div>
+        <div style="font-size:1.6rem;font-weight:900;color:#3b82f6;">${{ "%.2f"|format(week_earnings) }}</div>
+        <div style="font-size:0.72rem;color:#475569;margin-top:2px;">{{ week_stop_count }} stops delivered</div>
+      </div>
+    </div>
+    {% if week_history %}
+    <div style="font-size:0.72rem;color:#64748b;margin-bottom:6px;font-weight:600;">Week Breakdown</div>
+    {% for day in week_history %}
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #1e293b;">
+      <span style="font-size:0.8rem;color:#94a3b8;">{{ day.date }}</span>
+      <span style="font-size:0.8rem;color:#64748b;">{{ day.delivered }}/{{ day.total }} stops</span>
+      <span style="font-size:0.85rem;font-weight:700;color:#e2e8f0;">${{ "%.2f"|format(day.delivered * pay_rate) }}</span>
+    </div>
+    {% endfor %}
+    {% endif %}
+  </div>
+
   {% if route %}
     <!-- Active Route -->
     <div class="access-box mb-4">
