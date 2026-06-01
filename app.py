@@ -3511,7 +3511,7 @@ def health():
             git_hash = subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD'], cwd=os.path.dirname(__file__) or '.', stderr=subprocess.DEVNULL).decode().strip()
         except Exception:
             git_hash = 'unknown'
-        return jsonify({'status': 'ok', 'time': datetime.now().isoformat(), 'version': git_hash, 'model': 'claude-haiku-4-5-20251001'})
+        return jsonify({'status': 'ok', 'time': datetime.now().isoformat(), 'version': git_hash, 'model': 'claude-3-5-haiku-20241022'})
     except Exception as e:
         return jsonify({'status': 'error', 'msg': str(e)}), 500
 
