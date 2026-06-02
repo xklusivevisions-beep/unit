@@ -2230,9 +2230,122 @@ def test_vision():
     except Exception as e:
         return jsonify({'ok': False, 'error': f'{type(e).__name__}: {str(e)}'})
 
+def _extract_loading_scan(img_bytes):
+    """
+    Claude Vision extraction tuned specifically for the Speed X
+    'Loading Scan' screen format. Handles the two-line address
+    layout where unit/apt number appears as the first token on line 2.
+    """
+    if not ANTHROPIC_KEY:
+        raise ValueError('Vision AI not configured')
+    img_bytes = compress_for_api(img_bytes)
+    client    = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+    b64       = base64.standard_b64encode(img_bytes).decode('utf-8')
+    resp = client.messages.create(
+        model='claude-haiku-4-5',
+        max_tokens=4096,
+        messages=[{
+            'role': 'user',
+            'content': [
+                {
+                    'type': 'image',
+                    'source': {'type': 'base64', 'media_type': 'image/jpeg', 'data': b64}
+                },
+                {
+                    'type': 'text',
+                    'text': '''This is a Speed X "Loading Scan" delivery app screenshot.
+Extract EVERY delivery stop visible. Return ONLY a raw JSON array, no markdown, no code blocks.
+
+SCREEN LAYOUT:
+- Each stop card has a blue left border
+- Top-left: ADDRESS (often split across 2 lines due to screen width)
+- Top-right: "1 parcel" label and CUSTOMER NAME in blue
+- Middle: TRACKING NUMBER (starts with SPXDTW or YWORD or similar)
+- Bottom-right: "Stop: ##"
+
+CRITICAL ADDRESS PARSING RULES:
+The address is split across 1 or 2 lines. Examples of how it appears:
+
+  Line 1: "287 Alfred"          Line 2: "St,Detroit,MI,48201-3122,USA"
+  → Street = "287 Alfred St", City = "Detroit", State = "MI", ZIP = "48201"
+
+  Line 1: "124 Alfred St"       Line 2: "206,DETROIT,MI,48201,USA"
+  → Street = "124 Alfred St", Unit = "206", City = "Detroit", State = "MI", ZIP = "48201"
+  NOTE: When line 2 starts with a NUMBER before a city name, that number is the UNIT/APT.
+
+  Line 1: "66 Winder St Apt"    Line 2: "338,Detroit,MI,48201,USA"
+  → Street = "66 Winder St", Unit = "338", City = "Detroit", ZIP = "48201"
+
+  Line 1: "3402 Brush St Apt"   Line 2: "5,Detroit,MI,48201,USA"
+  → Street = "3402 Brush St", Unit = "5", City = "Detroit", ZIP = "48201"
+
+  Line 1: "2900 Brush St"       Line 2: "225,DETROIT,MI,48201-3156,U..."
+  → Street = "2900 Brush St", Unit = "225", City = "Detroit", ZIP = "48201"
+
+  Line 1: "4830 Cass Ave apt"   Line 2: "324,Detroit,MI,48201,USA"
+  → Street = "4830 Cass Ave", Unit = "324", City = "Detroit", ZIP = "48201"
+
+RULE: If line 2 starts with digits followed by a comma and then a city name → those digits = unit number.
+RULE: Use only the 5-digit ZIP (drop anything after a dash, e.g. 48201-3122 → 48201).
+RULE: Normalize city to Title Case (Detroit not DETROIT).
+RULE: Do NOT include "USA" or ",USA" in the address field.
+RULE: Truncated names (ending in "...") — include what is visible.
+RULE: Tracking numbers — copy EXACTLY, full length (e.g. SPXDTW013662605280007185 or YWORD010179392388).
+
+OUTPUT FORMAT — JSON array of objects:
+[
+  {
+    "stop_num": "46",
+    "address": "624 Eliot St, Detroit, MI 48201",
+    "unit": "",
+    "name": "Joann Whern",
+    "tracking": "YWORD010179392388"
+  },
+  {
+    "stop_num": "48",
+    "address": "314 Elliot St, Detroit, MI 48201",
+    "unit": "4",
+    "name": "Abhigail Ash",
+    "tracking": "SPXDTW013662605260017951"
+  }
+]
+
+Include EVERY stop card visible on screen. Do not skip any.'''
+                }
+            ]
+        }]
+    )
+    text = resp.content[0].text.strip()
+    log.info(f'[loading_scan] Claude raw (first 500): {text[:500]}')
+    match = re.search(r'\[.*\]', text, re.DOTALL)
+    if not match:
+        log.warning(f'[loading_scan] No JSON array in response: {text[:300]}')
+        return []
+    try:
+        stops = json.loads(match.group())
+        result = []
+        for s in stops:
+            addr = (s.get('address') or '').strip()
+            if not addr:
+                continue
+            result.append({
+                'address':  addr,
+                'unit':     str(s.get('unit') or '').strip(),
+                'name':     (s.get('name') or '').strip(),
+                'tracking': (s.get('tracking') or '').strip(),
+                'stop_num': str(s.get('stop_num') or '').strip(),
+                'phone':    '',
+            })
+        log.info(f'[loading_scan] Extracted {len(result)} stops')
+        return result
+    except json.JSONDecodeError as je:
+        log.warning(f'[loading_scan] JSON parse failed: {je} | raw: {text[:300]}')
+        return []
+
+
 @app.route('/driver/scan/screenshots-to-pdf', methods=['POST'])
 def screenshots_to_pdf():
-    """Convert Speed X screenshots into a downloadable PDF address list."""
+    """Convert Speed X screenshots into a clean downloadable PDF address list."""
     if 'driver_id' not in session:
         return jsonify({'ok': False, 'error': 'not logged in'}), 401
 
@@ -2243,84 +2356,170 @@ def screenshots_to_pdf():
     if not ANTHROPIC_KEY:
         return jsonify({'ok': False, 'error': 'Vision AI not configured on server'})
 
-    # Extract stops from all screenshots
+    # ── Extract stops from every screenshot with Loading Scan-aware prompt ──
     all_stops = []
     for f in files:
         try:
             img_bytes = f.read()
             if not img_bytes:
                 continue
-            stops = extract_stops_from_image(img_bytes)
+            stops = _extract_loading_scan(img_bytes)
             all_stops.extend(stops)
         except Exception as e:
             log.warning(f'screenshots-to-pdf extract error: {e}')
 
     if not all_stops:
-        return jsonify({'ok': False, 'error': 'No addresses found in screenshots'})
+        return jsonify({'ok': False, 'error': 'No addresses found in screenshots. Make sure these are Speed X Loading Scan screenshots.'})
 
-    # Deduplicate by tracking or address
-    seen = set()
-    unique_stops = []
+    # ── Deduplicate by tracking number (most reliable key), fallback to address ──
+    seen   = {}
     for s in all_stops:
-        key = s.get('tracking') or s.get('address', '')
+        key = (s.get('tracking') or '').strip()
+        if not key:
+            key = (s.get('address') or '').strip().upper()
         if key and key not in seen:
-            seen.add(key)
-            unique_stops.append(s)
+            seen[key] = s
 
-    # Generate PDF using Pillow
+    # Sort by stop number so PDF is in route order
+    unique_stops = sorted(seen.values(), key=lambda s: int(s.get('stop_num') or 0))
+
+    if not unique_stops:
+        return jsonify({'ok': False, 'error': 'No unique stops found after deduplication'})
+
+    # ── Generate PDF with reportlab ──
     try:
-        from PIL import Image, ImageDraw
-        page_w, page_h = 850, 1100
-        margin = 60
-        header_h = 80
-        row_h = 52
-        rows_per_page = (page_h - margin * 2 - header_h) // row_h
-
-        pages = []
-        for page_idx in range(0, len(unique_stops), rows_per_page):
-            img = Image.new('RGB', (page_w, page_h), 'white')
-            draw = ImageDraw.Draw(img)
-
-            # Header bar
-            draw.rectangle([0, 0, page_w, header_h], fill=(15, 23, 42))
-            draw.text((margin, 22), f'Speed X Route  —  {len(unique_stops)} stops  (page {page_idx // rows_per_page + 1})', fill='white')
-
-            y = header_h + margin
-            batch = unique_stops[page_idx:page_idx + rows_per_page]
-            for i, stop in enumerate(batch):
-                num = page_idx + i + 1
-                name = (stop.get('name') or 'Unknown').strip()
-                addr = (stop.get('address') or '').strip()
-                tracking = (stop.get('tracking') or '').strip()
-
-                # Alternating row background
-                if i % 2 == 0:
-                    draw.rectangle([margin - 10, y - 6, page_w - margin + 10, y + row_h - 10], fill=(248, 250, 252))
-
-                draw.text((margin, y), f'{num}. {name}', fill=(15, 23, 42))
-                draw.text((margin + 20, y + 18), addr, fill=(71, 85, 105))
-                if tracking:
-                    draw.text((margin + 20, y + 34), tracking, fill=(148, 163, 184))
-                y += row_h
-
-            pages.append(img)
+        from reportlab.lib.pagesizes import letter
+        from reportlab.lib import colors
+        from reportlab.lib.units import inch
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+        from reportlab.lib.enums import TA_LEFT, TA_CENTER
 
         buf = io.BytesIO()
-        if len(pages) == 1:
-            pages[0].save(buf, format='PDF')
-        else:
-            pages[0].save(buf, format='PDF', save_all=True, append_images=pages[1:])
+        doc = SimpleDocTemplate(
+            buf,
+            pagesize=letter,
+            leftMargin=0.5*inch, rightMargin=0.5*inch,
+            topMargin=0.5*inch, bottomMargin=0.5*inch
+        )
+
+        styles = getSampleStyleSheet()
+        navy   = colors.HexColor('#0f172a')
+        blue   = colors.HexColor('#3b82f6')
+        gray   = colors.HexColor('#64748b')
+        ltgray = colors.HexColor('#f8fafc')
+        green  = colors.HexColor('#10b981')
+        white  = colors.white
+
+        title_style = ParagraphStyle('title', fontSize=16, fontName='Helvetica-Bold',
+                                     textColor=white, alignment=TA_CENTER, leading=20)
+        sub_style   = ParagraphStyle('sub',   fontSize=10, fontName='Helvetica',
+                                     textColor=colors.HexColor('#94a3b8'), alignment=TA_CENTER)
+        addr_style  = ParagraphStyle('addr',  fontSize=10, fontName='Helvetica-Bold',
+                                     textColor=navy, leading=13)
+        name_style  = ParagraphStyle('name',  fontSize=9,  fontName='Helvetica',
+                                     textColor=gray, leading=11)
+        track_style = ParagraphStyle('track', fontSize=8,  fontName='Helvetica',
+                                     textColor=colors.HexColor('#94a3b8'), leading=10)
+        num_style   = ParagraphStyle('num',   fontSize=14, fontName='Helvetica-Bold',
+                                     textColor=navy, alignment=TA_CENTER)
+
+        today_str = datetime.now().strftime('%m/%d/%Y')
+        story = [
+            Paragraph(f'UNIT — Speed X Route', title_style),
+        ]
+
+        # Detect route ID from first stop's tracking prefix if possible
+        route_id = ''
+        for s in unique_stops:
+            t = s.get('tracking', '')
+            if t.startswith('SPXDTW'):
+                route_id = t[:12]
+                break
+
+        story.append(Paragraph(
+            f'{len(unique_stops)} stops  •  {today_str}{("  •  Route: " + route_id) if route_id else ""}',
+            sub_style
+        ))
+        story.append(Spacer(1, 0.2*inch))
+
+        # Build table rows
+        table_data = [[
+            Paragraph('#', ParagraphStyle('hdr', fontSize=9, fontName='Helvetica-Bold',
+                                          textColor=white, alignment=TA_CENTER)),
+            Paragraph('ADDRESS', ParagraphStyle('hdr', fontSize=9, fontName='Helvetica-Bold', textColor=white)),
+            Paragraph('CUSTOMER', ParagraphStyle('hdr', fontSize=9, fontName='Helvetica-Bold', textColor=white)),
+            Paragraph('TRACKING', ParagraphStyle('hdr', fontSize=9, fontName='Helvetica-Bold', textColor=white)),
+        ]]
+
+        for s in unique_stops:
+            stop_num  = str(s.get('stop_num') or '').strip()
+            raw_addr  = (s.get('address') or '').strip()
+            unit      = (s.get('unit') or '').strip()
+            name      = (s.get('name') or '').strip()
+            tracking  = (s.get('tracking') or '').strip()
+
+            # Build clean address: append unit if not already present as standalone token
+            import re as _re
+            unit_already_in = bool(_re.search(r'(?<![\d])' + _re.escape(unit) + r'(?![\d])', raw_addr)) if unit else False
+            if unit and not unit_already_in:
+                addr_display = f'{raw_addr}, Apt {unit}'
+            else:
+                addr_display = raw_addr
+
+            table_data.append([
+                Paragraph(stop_num, num_style),
+                Paragraph(addr_display, addr_style),
+                Paragraph(name, name_style),
+                Paragraph(tracking[:24] if tracking else '', track_style),
+            ])
+
+        col_widths = [0.45*inch, 2.9*inch, 1.5*inch, 2.15*inch]
+        tbl = Table(table_data, colWidths=col_widths, repeatRows=1)
+
+        row_count = len(table_data)
+        row_styles = [
+            # Header row
+            ('BACKGROUND',  (0,0), (-1,0),  navy),
+            ('TEXTCOLOR',   (0,0), (-1,0),  white),
+            ('FONTNAME',    (0,0), (-1,0),  'Helvetica-Bold'),
+            ('FONTSIZE',    (0,0), (-1,0),  9),
+            ('TOPPADDING',  (0,0), (-1,0),  8),
+            ('BOTTOMPADDING',(0,0),(-1,0),  8),
+            # Data rows
+            ('FONTSIZE',    (0,1), (-1,-1), 9),
+            ('TOPPADDING',  (0,1), (-1,-1), 6),
+            ('BOTTOMPADDING',(0,1),(-1,-1), 6),
+            ('VALIGN',      (0,0), (-1,-1), 'MIDDLE'),
+            ('LINEBELOW',   (0,0), (-1,-1), 0.5, colors.HexColor('#e2e8f0')),
+            ('GRID',        (0,0), (-1,-1), 0.3, colors.HexColor('#e2e8f0')),
+        ]
+        # Alternating row shading
+        for row_i in range(1, row_count):
+            if row_i % 2 == 0:
+                row_styles.append(('BACKGROUND', (0,row_i), (-1,row_i), ltgray))
+
+        tbl.setStyle(TableStyle(row_styles))
+        story.append(tbl)
+        story.append(Spacer(1, 0.15*inch))
+        story.append(Paragraph(
+            f'Generated by UNIT — unit-6gxn.onrender.com  •  {today_str}',
+            ParagraphStyle('footer', fontSize=7, textColor=gray, alignment=TA_CENTER)
+        ))
+
+        doc.build(story)
         buf.seek(0)
 
         from flask import send_file
+        today_file = datetime.now().strftime('%Y%m%d')
         return send_file(
             buf,
             mimetype='application/pdf',
             as_attachment=True,
-            download_name='speedx_route.pdf'
+            download_name=f'speedx_route_{today_file}.pdf'
         )
     except Exception as e:
-        log.error(f'screenshots-to-pdf PDF gen error: {e}')
+        log.error(f'screenshots-to-pdf PDF gen error: {traceback.format_exc()}')
         return jsonify({'ok': False, 'error': f'PDF generation failed: {str(e)}'})
 
 
