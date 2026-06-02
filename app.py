@@ -881,27 +881,59 @@ def nearest_intel_zone(lat, lng, radius_miles=0.25):
 
 # ─── DB ────────────────────────────────────────────────────────
 
+# ── PostgreSQL connection pool (one pool per worker process) ──
+_pg_pool      = None
+_pg_pool_lock = None
+
+def _get_pg_pool():
+    """Lazy-init a simple per-worker connection pool for PostgreSQL."""
+    global _pg_pool, _pg_pool_lock
+    import threading
+    if _pg_pool_lock is None:
+        _pg_pool_lock = threading.Lock()
+    with _pg_pool_lock:
+        if _pg_pool is None:
+            import urllib.parse
+            url = DATABASE_URL.replace('postgres://', 'postgresql://', 1)
+            p   = urllib.parse.urlparse(url)
+            # Build a small pool: min 1, max 5 connections per worker
+            _pg_pool = {
+                'host':     p.hostname,
+                'port':     p.port or 5432,
+                'database': p.path.lstrip('/'),
+                'user':     p.username,
+                'password': p.password,
+            }
+    return _pg_pool
+
 def get_db():
     if USE_PG:
-        import urllib.parse
-        url = DATABASE_URL.replace('postgres://', 'postgresql://', 1)
-        p = urllib.parse.urlparse(url)
-        conn = pg8000.connect(
-            host=p.hostname,
-            port=p.port or 5432,
-            database=p.path.lstrip('/'),
-            user=p.username,
-            password=p.password,
-            ssl_context=True
-        )
-        conn.autocommit = False
-        return DBWrapper(conn, pg=True)
+        cfg  = _get_pg_pool()
+        retry = 0
+        while retry < 3:
+            try:
+                conn = pg8000.connect(
+                    host=cfg['host'], port=cfg['port'],
+                    database=cfg['database'], user=cfg['user'],
+                    password=cfg['password'], ssl_context=True,
+                    timeout=10
+                )
+                conn.autocommit = False
+                return DBWrapper(conn, pg=True)
+            except Exception as e:
+                retry += 1
+                if retry >= 3:
+                    log.error(f'DB connect failed after 3 retries: {e}')
+                    raise
+                import time as _t; _t.sleep(0.5 * retry)
     else:
         os.makedirs('data', exist_ok=True)
-        conn = sqlite3.connect(DB, timeout=10, check_same_thread=False)
+        conn = sqlite3.connect(DB, timeout=15, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         conn.execute('PRAGMA journal_mode=WAL')
         conn.execute('PRAGMA synchronous=NORMAL')
+        conn.execute('PRAGMA cache_size=-8000')   # 8MB page cache
+        conn.execute('PRAGMA temp_store=MEMORY')
         return DBWrapper(conn, pg=False)
 
 def init_db():
@@ -1026,6 +1058,22 @@ def init_db():
         "CREATE TABLE IF NOT EXISTS pin_corrections (id INTEGER PRIMARY KEY AUTOINCREMENT, address TEXT UNIQUE NOT NULL, lat REAL NOT NULL, lng REAL NOT NULL, corrected_by TEXT, corrected_at TEXT DEFAULT CURRENT_TIMESTAMP)",
         "CREATE TABLE IF NOT EXISTS login_attempts (id INTEGER PRIMARY KEY AUTOINCREMENT, ip TEXT NOT NULL, attempted_at TEXT NOT NULL)",
         "CREATE INDEX IF NOT EXISTS idx_login_attempts_ip ON login_attempts (ip, attempted_at)",
+        # ── Performance indexes for scale ──
+        "CREATE INDEX IF NOT EXISTS idx_stops_route_id ON stops (route_id)",
+        "CREATE INDEX IF NOT EXISTS idx_stops_status ON stops (status)",
+        "CREATE INDEX IF NOT EXISTS idx_stops_route_status ON stops (route_id, status)",
+        "CREATE INDEX IF NOT EXISTS idx_stops_delivered_at ON stops (delivered_at)",
+        "CREATE INDEX IF NOT EXISTS idx_routes_driver_id ON routes (driver_id)",
+        "CREATE INDEX IF NOT EXISTS idx_routes_driver_date ON routes (driver_id, date)",
+        "CREATE INDEX IF NOT EXISTS idx_routes_date ON routes (date)",
+        "CREATE INDEX IF NOT EXISTS idx_drivers_pin ON drivers (pin)",
+        "CREATE INDEX IF NOT EXISTS idx_scan_sessions_driver_date ON scan_sessions (driver_id, date, status)",
+        "CREATE INDEX IF NOT EXISTS idx_scan_items_session ON scan_items (session_id)",
+        "CREATE INDEX IF NOT EXISTS idx_stops_token ON stops (token)",
+        "CREATE INDEX IF NOT EXISTS idx_live_sessions_token ON live_sessions (token)",
+        "CREATE INDEX IF NOT EXISTS idx_residents_address ON residents (address)",
+        "CREATE INDEX IF NOT EXISTS idx_buildings_address ON buildings (address)",
+        "CREATE INDEX IF NOT EXISTS idx_pin_corrections_address ON pin_corrections (address)",
         """CREATE TABLE IF NOT EXISTS live_sessions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             token TEXT UNIQUE NOT NULL,
@@ -1328,6 +1376,17 @@ def format_phone(phone):
 @app.route('/')
 def index():
     return render_template('index.html')
+
+@app.route('/health')
+def health_check():
+    """Render health check endpoint — confirms app + DB are alive."""
+    try:
+        db  = get_db()
+        db.execute('SELECT 1').fetchone()
+        db.close()
+        return jsonify({'status': 'ok', 'db': 'connected', 'workers': 4}), 200
+    except Exception as e:
+        return jsonify({'status': 'error', 'detail': str(e)}), 500
 
 # ─── DRIVER AUTH ───────────────────────────────────────────────
 

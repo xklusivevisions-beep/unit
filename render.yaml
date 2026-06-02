@@ -1,6 +1,6 @@
 databases:
   - name: unit-db
-    plan: free
+    plan: starter
     region: oregon
 
 services:
@@ -8,8 +8,10 @@ services:
     name: unit
     runtime: python
     region: oregon
+    plan: starter
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app --workers 1 --timeout 300 --bind 0.0.0.0:$PORT
+    startCommand: gunicorn app:app --workers 4 --worker-class sync --timeout 120 --bind 0.0.0.0:$PORT --max-requests 1000 --max-requests-jitter 100
+    healthCheckPath: /health
     envVars:
       - key: FLASK_ENV
         value: production
