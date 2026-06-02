@@ -1377,17 +1377,6 @@ def format_phone(phone):
 def index():
     return render_template('index.html')
 
-@app.route('/health')
-def health_check():
-    """Render health check endpoint — confirms app + DB are alive."""
-    try:
-        db  = get_db()
-        db.execute('SELECT 1').fetchone()
-        db.close()
-        return jsonify({'status': 'ok', 'db': 'connected', 'workers': 4}), 200
-    except Exception as e:
-        return jsonify({'status': 'error', 'detail': str(e)}), 500
-
 # ─── DRIVER AUTH ───────────────────────────────────────────────
 
 @app.route('/driver/login', methods=['GET', 'POST'])
