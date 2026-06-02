@@ -2279,6 +2279,13 @@ The address is split across 1 or 2 lines. Examples of how it appears:
   Line 1: "3402 Brush St Apt"   Line 2: "5,Detroit,MI,48201,USA"
   → Street = "3402 Brush St", Unit = "5", City = "Detroit", ZIP = "48201"
 
+  Line 1: "3439 woodward ave apt"  Line 2: "409,DETROIT,MI,48201-2791,USA"
+  → Street = "3439 Woodward Ave", Unit = "409", City = "Detroit", ZIP = "48201"
+  NOTE: "apt" / "Apt" / "Apartment" is a LABEL, not the unit. The number after it is the unit.
+
+  Line 1: "3501 woodward ave Apartment"  Line 2: "531,detroit,MI,48201,USA"
+  → Street = "3501 Woodward Ave", Unit = "531", City = "Detroit", ZIP = "48201"
+
   Line 1: "2900 Brush St"       Line 2: "225,DETROIT,MI,48201-3156,U..."
   → Street = "2900 Brush St", Unit = "225", City = "Detroit", ZIP = "48201"
 
@@ -2323,14 +2330,19 @@ Include EVERY stop card visible on screen. Do not skip any.'''
         return []
     try:
         stops = json.loads(match.group())
+        # Words that are NOT valid unit values (keywords, not numbers)
+        _UNIT_WORDS = {'apt', 'apartment', 'unit', 'suite', 'ste', 'floor', 'fl', '#', 'no', 'num', 'usa', 'u'}
         result = []
         for s in stops:
             addr = (s.get('address') or '').strip()
             if not addr:
                 continue
+            raw_unit = str(s.get('unit') or '').strip()
+            # Clean unit: reject words that aren't real unit identifiers
+            unit = raw_unit if raw_unit.lower() not in _UNIT_WORDS and raw_unit != '' else ''
             result.append({
                 'address':  addr,
-                'unit':     str(s.get('unit') or '').strip(),
+                'unit':     unit,
                 'name':     (s.get('name') or '').strip(),
                 'tracking': (s.get('tracking') or '').strip(),
                 'stop_num': str(s.get('stop_num') or '').strip(),
