@@ -2820,9 +2820,19 @@ def route_new():
                 if building['interior_directions']: parts.append(building['interior_directions'])
                 access_note = ' | '.join(parts)
             notes     = ' | '.join(filter(None, [door_notes, access_note]))
+            # Coord priority: 1) pin_corrections (human-verified), 2) address_intel cache, 3) geocode now
             correction = db.execute("SELECT lat, lng FROM pin_corrections WHERE address=?", (full_addr,)).fetchone()
-            saved_lat  = correction['lat'] if correction else None
-            saved_lng  = correction['lng'] if correction else None
+            if correction:
+                saved_lat, saved_lng = correction['lat'], correction['lng']
+            else:
+                # Check address_intel for previously geocoded coords
+                intel_row = db.execute("SELECT lat, lng FROM address_intel WHERE address=?", (_normalize_addr_key(full_addr),)).fetchone()
+                if intel_row and intel_row['lat']:
+                    saved_lat, saved_lng = intel_row['lat'], intel_row['lng']
+                else:
+                    # Geocode immediately so address_intel gets populated at import time
+                    _lat, _lng = geocode_address(full_addr)
+                    saved_lat, saved_lng = _lat, _lng
             stop_num   = s.get('stop_num') or idx + 1
             token      = secrets.token_urlsafe(12)
             db.execute(
@@ -3028,29 +3038,72 @@ def stop_edit(stop_id):
         return redirect(url_for('driver_dashboard'))
 
     if request.method == 'POST':
-        address  = request.form.get('address', '').strip()
-        unit     = request.form.get('unit', '').strip()
-        name     = request.form.get('name', '').strip()
-        phone    = format_phone(request.form.get('phone', '').strip()) if request.form.get('phone', '').strip() else ''
-        notes    = request.form.get('notes', '').strip()
+        address   = request.form.get('address', '').strip()
+        unit      = request.form.get('unit', '').strip()
+        name      = request.form.get('name', '').strip()
+        phone     = format_phone(request.form.get('phone', '').strip()) if request.form.get('phone', '').strip() else ''
+        notes     = request.form.get('notes', '').strip()
+        drop_spot = request.form.get('drop_spot', '').strip()
+        pin_lat   = request.form.get('pin_lat', '').strip()
+        pin_lng   = request.form.get('pin_lng', '').strip()
 
         # Re-geocode if address changed
         lat, lng = stop['dest_lat'], stop['dest_lng']
         if address != stop['address']:
             lat, lng = geocode_address(address)
+        # Override with manually dragged pin if provided
+        if pin_lat and pin_lng:
+            try:
+                lat, lng = float(pin_lat), float(pin_lng)
+                # Save pin correction permanently
+                db.execute('''
+                    INSERT INTO pin_corrections (address, lat, lng, corrected_by, corrected_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(address) DO UPDATE SET
+                        lat=excluded.lat, lng=excluded.lng,
+                        corrected_by=excluded.corrected_by,
+                        corrected_at=excluded.corrected_at
+                ''', (address, lat, lng, session.get('driver_name','driver'), datetime.now().isoformat()))
+                upsert_address_intel(address, lat, lng)
+            except (ValueError, TypeError):
+                pass
 
         db.execute(
-            "UPDATE stops SET address=?, unit=?, customer_name=?, phone=?, notes=?, dest_lat=?, dest_lng=?, status='pending', approach_sms_sent=0 WHERE id=?",
-            (address, unit, name, phone, notes, lat, lng, stop_id)
+            "UPDATE stops SET address=?, unit=?, customer_name=?, phone=?, notes=?, drop_spot=?, dest_lat=?, dest_lng=?, status='pending', approach_sms_sent=0 WHERE id=?",
+            (address, unit, name, phone, notes, drop_spot, lat, lng, stop_id)
         )
+
+        # Persist customer preferences to residents table for future routes
+        if phone or drop_spot or notes:
+            street = address.split(',')[0].strip()
+            existing_res = db.execute(
+                "SELECT id FROM residents WHERE LOWER(address) LIKE LOWER(?)", (f'%{street}%',)
+            ).fetchone()
+            if existing_res:
+                db.execute(
+                    "UPDATE residents SET customer_name=?, phone=COALESCE(NULLIF(?,\'\'),phone), drop_spot=COALESCE(NULLIF(?,\'\'),drop_spot), door_notes=COALESCE(NULLIF(?,\'\'),door_notes) WHERE id=?",
+                    (name or None, phone or None, drop_spot or None, notes or None, existing_res['id'])
+                )
+            elif phone and address:
+                db.execute(
+                    "INSERT OR IGNORE INTO residents (address, unit, phone, customer_name, drop_spot, door_notes) VALUES (?,?,?,?,?,?)",
+                    (address, unit, phone, name, drop_spot, notes)
+                )
+
         db.commit()
         route_id = stop['route_id']
         db.close()
         return redirect(url_for('route_detail', route_id=route_id))
 
     route_id = stop['route_id']
+    # Load existing resident preferences for this address
+    street = (stop['address'] or '').split(',')[0].strip()
+    resident = db.execute(
+        "SELECT * FROM residents WHERE LOWER(address) LIKE LOWER(?)", (f'%{street}%',)
+    ).fetchone() if street else None
     db.close()
-    return render_template('stop_edit.html', stop=stop, route_id=route_id)
+    return render_template('stop_edit.html', stop=stop, route_id=route_id,
+                           resident=resident, mapbox_token=MAPBOX_TOKEN)
 
 @app.route('/driver/route/<int:route_id>/blast', methods=['POST'])
 def route_blast(route_id):
@@ -3134,21 +3187,27 @@ def stop_pin(stop_id):
         return jsonify({'error': 'unauthorized'}), 401
     data = request.get_json()
     lat, lng = data.get('lat'), data.get('lng')
+    if not lat or not lng:
+        return jsonify({'error': 'missing coords'}), 400
     db = get_db()
-    # Save to this stop
     stop = db.execute("SELECT address FROM stops WHERE id=?", (stop_id,)).fetchone()
     db.execute("UPDATE stops SET dest_lat=?, dest_lng=?, approach_sms_sent=0 WHERE id=?", (lat, lng, stop_id))
-    # Save permanently to pin_corrections — survives future routes
     if stop:
+        # Save to pin_corrections (survives future routes)
         db.execute('''
             INSERT INTO pin_corrections (address, lat, lng, corrected_by, corrected_at)
             VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(address) DO UPDATE SET
-                lat=excluded.lat,
-                lng=excluded.lng,
+                lat=excluded.lat, lng=excluded.lng,
                 corrected_by=excluded.corrected_by,
                 corrected_at=excluded.corrected_at
         ''', (stop['address'], lat, lng, session.get('driver_name', 'driver'), datetime.now().isoformat()))
+        # Sync human-verified coords to address_intel (highest quality signal)
+        try:
+            upsert_address_intel(stop['address'], lat, lng)
+            log.info(f'[address_intel] Pin correction saved: {stop["address"]} -> {lat:.5f},{lng:.5f}')
+        except Exception as _e:
+            log.warning(f'[address_intel] pin sync failed: {_e}')
     db.commit()
     db.close()
     return jsonify({'ok': True})

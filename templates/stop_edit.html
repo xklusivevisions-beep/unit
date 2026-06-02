@@ -1,5 +1,13 @@
 {% extends 'base.html' %}
 {% block title %}UNIT — Edit Stop{% endblock %}
+{% block extra_css %}
+<link href='https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.css' rel='stylesheet' />
+<style>
+#pin-map { height: 220px; border-radius: 14px; overflow: hidden; border: 2px solid #1e293b; margin-bottom: 6px; }
+.pin-hint { font-size: 0.72rem; color: #64748b; text-align: center; margin-bottom: 14px; }
+.pref-badge { background: #10b98118; color: #10b981; font-size: 0.72rem; padding: 2px 8px; border-radius: 6px; font-weight: 700; }
+</style>
+{% endblock %}
 {% block content %}
 <div class="container-fluid p-4 pb-nav">
 
@@ -7,46 +15,86 @@
     <a href="/driver/route/{{ route_id }}" class="text-decoration-none me-3" style="color:#555;">
       <i class="fas fa-chevron-left"></i>
     </a>
-    <div class="unit-logo" style="font-size:1.4rem;">UNIT<span>.</span></div>
+    <div>
+      <div class="unit-logo" style="font-size:1.4rem;">UNIT<span>.</span></div>
+      <small class="text-secondary">Stop #{{ stop.stop_number }}</small>
+    </div>
   </div>
 
-  <h5 class="fw-bold mb-1">Edit Stop #{{ stop.stop_number }}</h5>
-  <p class="text-secondary small mb-4">Fix the address and it'll re-geocode automatically.</p>
+  <form method="POST" id="edit-form">
+    <input type="hidden" name="pin_lat" id="pin_lat" value="{{ stop.dest_lat or '' }}">
+    <input type="hidden" name="pin_lng" id="pin_lng" value="{{ stop.dest_lng or '' }}">
 
-  <form method="POST">
+    <!-- ── Pin Map ── -->
+    <div style="background:#0f172a;border-radius:16px;padding:14px;margin-bottom:16px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+        <span style="font-size:0.8rem;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.05em;">📍 Pin Location</span>
+        <span id="pin-saved-badge" style="display:none;" class="pref-badge">✓ Pin moved</span>
+      </div>
+      {% if stop.dest_lat and stop.dest_lng %}
+      <div id="pin-map"></div>
+      <div class="pin-hint">Drag the pin to correct the exact drop location — saves permanently</div>
+      {% else %}
+      <div style="background:#1e293b;border-radius:10px;padding:14px;text-align:center;color:#475569;font-size:0.82rem;">
+        No pin yet — save the address below and it will auto-geocode
+      </div>
+      {% endif %}
+    </div>
+
+    <!-- ── Address ── -->
     <div class="card p-4 mb-3">
+      <div class="fw-bold mb-3" style="font-size:0.9rem;">Address</div>
 
       <div class="mb-3" style="position:relative;">
-        <label>Address *</label>
-        <input type="text" id="address-input" name="address" class="form-control"
+        <label class="text-secondary small">Street Address *</label>
+        <input type="text" id="address-input" name="address" class="form-control mt-1"
                value="{{ stop.address }}" required>
-        <ul id="address-suggestions" style="position:absolute;z-index:1000;width:100%;background:#1a1a2e;border:1px solid #333;border-radius:8px;list-style:none;padding:0;margin:0;display:none;"></ul>
+        <ul id="address-suggestions" style="position:absolute;z-index:1000;width:100%;background:#1a1a2e;border:1px solid #333;border-radius:8px;list-style:none;padding:0;margin:0;display:none;max-height:200px;overflow-y:auto;"></ul>
       </div>
 
       <div class="row g-2 mb-3">
         <div class="col-6">
-          <label>Unit / Suite</label>
-          <input type="text" name="unit" class="form-control" value="{{ stop.unit or '' }}" placeholder="Apt 4B (optional)">
+          <label class="text-secondary small">Unit / Apt</label>
+          <input type="text" name="unit" class="form-control mt-1" value="{{ stop.unit or '' }}" placeholder="4B">
         </div>
         <div class="col-6">
-          <label>Customer Name</label>
-          <input type="text" name="name" class="form-control" value="{{ stop.customer_name or '' }}" placeholder="John D.">
+          <label class="text-secondary small">Customer Name</label>
+          <input type="text" name="name" class="form-control mt-1" value="{{ stop.customer_name or '' }}" placeholder="John D.">
         </div>
       </div>
 
       <div class="mb-3">
-        <label>Phone Number</label>
-        <input type="tel" name="phone" class="form-control" value="{{ stop.phone or '' }}" placeholder="+1 313 555 0000">
+        <label class="text-secondary small">Phone</label>
+        <input type="tel" name="phone" class="form-control mt-1" value="{{ stop.phone or '' }}" placeholder="+1 313 555 0000">
+      </div>
+    </div>
+
+    <!-- ── Delivery Preferences ── -->
+    <div class="card p-4 mb-3">
+      <div class="d-flex justify-content-between align-items-center mb-3">
+        <div class="fw-bold" style="font-size:0.9rem;">Delivery Preferences</div>
+        {% if resident %}
+        <span class="pref-badge">Saved profile</span>
+        {% endif %}
+      </div>
+      <p style="font-size:0.75rem;color:#64748b;margin-bottom:12px;">Saved permanently — auto-loads every time you deliver here.</p>
+
+      <div class="mb-3">
+        <label class="text-secondary small">Drop Spot</label>
+        <input type="text" name="drop_spot" class="form-control mt-1"
+               value="{{ stop.drop_spot or (resident.drop_spot if resident else '') }}"
+               placeholder="Front door, mailroom, leasing office…">
       </div>
 
       <div class="mb-1">
-        <label>Delivery Notes</label>
-        <input type="text" name="notes" class="form-control" value="{{ stop.notes or '' }}" placeholder="Gate code, leave at door, etc.">
+        <label class="text-secondary small">Notes / Gate Code / Door Instructions</label>
+        <input type="text" name="notes" class="form-control mt-1"
+               value="{{ stop.notes or (resident.door_notes if resident else '') }}"
+               placeholder="Gate code 1234, ring buzzer 2B, leave in lobby…">
       </div>
-
     </div>
 
-    <button type="submit" class="btn btn-primary w-100 py-3 fs-6">
+    <button type="submit" class="btn w-100 py-3 fw-bold mb-3" style="background:#00ff88;color:#000;border-radius:14px;font-size:1rem;">
       <i class="fas fa-check me-2"></i>Save Changes
     </button>
   </form>
@@ -57,52 +105,107 @@
   <div class="d-flex justify-content-around">
     <a href="/driver"><i class="fas fa-home"></i>Home</a>
     <a href="/driver/route/{{ route_id }}"><i class="fas fa-list"></i>Route</a>
-    <a href="/driver/route/new"><i class="fas fa-upload"></i>New Route</a>
+    <a href="/driver/scan"><i class="fas fa-camera"></i>Scan</a>
+    <a href="/account"><i class="fas fa-user"></i>Account</a>
   </div>
 </div>
 {% endblock %}
 
 {% block scripts %}
+<script src='https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.js'></script>
 <script>
-const input = document.getElementById('address-input');
+// ── Address Autocomplete ──
+const addrInput   = document.getElementById('address-input');
 const suggestions = document.getElementById('address-suggestions');
-let timer;
-
-input.addEventListener('input', function() {
-  clearTimeout(timer);
+let acTimer;
+addrInput.addEventListener('input', function() {
+  clearTimeout(acTimer);
   const q = this.value.trim();
   if (q.length < 3) { suggestions.style.display = 'none'; return; }
-  timer = setTimeout(() => {
+  acTimer = setTimeout(() => {
     fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=json&addressdetails=1&limit=6&countrycodes=us`)
       .then(r => r.json())
       .then(data => {
         suggestions.innerHTML = '';
-        if (!data.length) { suggestions.style.display = 'none'; return; }
         data.forEach(item => {
-          const addr = item.address;
-          const street = [addr.house_number, addr.road].filter(Boolean).join(' ');
-          const city = addr.city || addr.town || addr.village || '';
-          const state = addr.state || '';
-          const zip = addr.postcode || '';
-          const full = [street, city, state, zip].filter(Boolean).join(', ');
+          const a = item.address;
+          const street = [a.house_number, a.road].filter(Boolean).join(' ');
+          const city   = a.city || a.town || a.village || '';
+          const state  = a.state || '';
+          const zip    = a.postcode || '';
+          const full   = [street, city, state, zip].filter(Boolean).join(', ');
           if (!full) return;
           const li = document.createElement('li');
           li.innerHTML = `<div style="font-size:0.9rem;color:#fff;">${full}</div>`;
-          li.style.cssText = 'padding:12px 16px;cursor:pointer;border-bottom:1px solid #222;min-height:48px;display:flex;align-items:center;';
+          li.style.cssText = 'padding:12px 16px;cursor:pointer;border-bottom:1px solid #222;';
           li.addEventListener('click', () => {
-            input.value = full;
+            addrInput.value = full;
             suggestions.style.display = 'none';
+            // Re-geocode on map
+            geocodeAndMovePin(full);
           });
           suggestions.appendChild(li);
         });
         suggestions.style.display = suggestions.innerHTML ? 'block' : 'none';
-      })
-      .catch(() => { suggestions.style.display = 'none'; });
+      }).catch(() => {});
   }, 300);
 });
-
 document.addEventListener('click', e => {
-  if (!input.contains(e.target) && !suggestions.contains(e.target)) suggestions.style.display = 'none';
+  if (!addrInput.contains(e.target) && !suggestions.contains(e.target))
+    suggestions.style.display = 'none';
 });
+
+// ── Draggable Pin Map ──
+{% if stop.dest_lat and stop.dest_lng %}
+mapboxgl.accessToken = '{{ mapbox_token }}';
+const map = new mapboxgl.Map({
+  container: 'pin-map',
+  style: 'mapbox://styles/mapbox/dark-v11',
+  center: [{{ stop.dest_lng }}, {{ stop.dest_lat }}],
+  zoom: 17,
+  attributionControl: false,
+});
+
+// Draggable marker
+const marker = new mapboxgl.Marker({ color: '#00ff88', draggable: true })
+  .setLngLat([{{ stop.dest_lng }}, {{ stop.dest_lat }}])
+  .addTo(map);
+
+const pinLatInput = document.getElementById('pin_lat');
+const pinLngInput = document.getElementById('pin_lng');
+const savedBadge  = document.getElementById('pin-saved-badge');
+
+marker.on('dragend', () => {
+  const lngLat = marker.getLngLat();
+  pinLatInput.value = lngLat.lat.toFixed(6);
+  pinLngInput.value = lngLat.lng.toFixed(6);
+  savedBadge.style.display = 'inline-block';
+});
+
+// Tap map to move pin
+map.on('click', e => {
+  marker.setLngLat([e.lngLat.lng, e.lngLat.lat]);
+  pinLatInput.value = e.lngLat.lat.toFixed(6);
+  pinLngInput.value = e.lngLat.lng.toFixed(6);
+  savedBadge.style.display = 'inline-block';
+});
+
+function geocodeAndMovePin(address) {
+  fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(address)}&format=json&limit=1&countrycodes=us`)
+    .then(r => r.json())
+    .then(data => {
+      if (data.length) {
+        const lat = parseFloat(data[0].lat);
+        const lng = parseFloat(data[0].lon);
+        marker.setLngLat([lng, lat]);
+        map.flyTo({ center: [lng, lat], zoom: 17 });
+        pinLatInput.value = lat.toFixed(6);
+        pinLngInput.value = lng.toFixed(6);
+      }
+    }).catch(() => {});
+}
+{% else %}
+function geocodeAndMovePin(address) {}
+{% endif %}
 </script>
 {% endblock %}
