@@ -1228,6 +1228,15 @@ def driver_dashboard():
         (session['driver_id'], week_start)
     ).fetchone()[0]
 
+    # Month earnings (1st of current month → today)
+    month_start = today_date.replace(day=1).strftime('%Y-%m-%d')
+    month_stop_count = db.execute(
+        """SELECT COUNT(*) FROM stops s
+           JOIN routes r ON s.route_id = r.id
+           WHERE r.driver_id=? AND r.date >= ? AND s.status='delivered'""",
+        (session['driver_id'], month_start)
+    ).fetchone()[0]
+
     # Weekly route history (last 7 days)
     week_history = db.execute(
         """SELECT r.date, COUNT(s.id) as total,
@@ -1241,8 +1250,9 @@ def driver_dashboard():
 
     db.close()
 
-    today_earnings = round(today_delivered * pay_rate, 2)
-    week_earnings = round(week_stop_count * pay_rate, 2)
+    today_earnings  = round(today_delivered  * pay_rate, 2)
+    week_earnings   = round(week_stop_count  * pay_rate, 2)
+    month_earnings  = round(month_stop_count * pay_rate, 2)
 
     return render_template('driver_dashboard.html',
         route=route, stops=stops, driver=session['driver_name'],
@@ -1253,9 +1263,54 @@ def driver_dashboard():
         today_earnings=today_earnings,
         week_stop_count=week_stop_count,
         week_earnings=week_earnings,
+        month_stop_count=month_stop_count,
+        month_earnings=month_earnings,
         week_history=week_history,
     )
 
+
+# ─── LIVE EARNINGS API ─────────────────────────────────
+@app.route('/api/driver/earnings')
+def api_driver_earnings():
+    """Returns current driver earnings — called live from dashboard."""
+    if 'driver_id' not in session:
+        return jsonify({'error': 'unauthorized'}), 401
+    from datetime import date
+    db       = get_db()
+    driver   = db.execute("SELECT pay_rate FROM drivers WHERE id=?", (session['driver_id'],)).fetchone()
+    pay_rate = float(driver['pay_rate']) if driver and driver['pay_rate'] else 1.50
+    today    = date.today().strftime('%Y-%m-%d')
+    today_delivered = db.execute(
+        """SELECT COUNT(*) FROM stops s JOIN routes r ON s.route_id=r.id
+           WHERE r.driver_id=? AND r.date=? AND s.status='delivered'""",
+        (session['driver_id'], today)
+    ).fetchone()[0]
+    today_total = db.execute(
+        """SELECT COUNT(*) FROM stops s JOIN routes r ON s.route_id=r.id
+           WHERE r.driver_id=? AND r.date=?""",
+        (session['driver_id'], today)
+    ).fetchone()[0]
+    week_start = (date.today() - timedelta(days=date.today().weekday())).strftime('%Y-%m-%d')
+    week_delivered = db.execute(
+        """SELECT COUNT(*) FROM stops s JOIN routes r ON s.route_id=r.id
+           WHERE r.driver_id=? AND r.date>=? AND s.status='delivered'""",
+        (session['driver_id'], week_start)
+    ).fetchone()[0]
+    month_start = date.today().replace(day=1).strftime('%Y-%m-%d')
+    month_delivered = db.execute(
+        """SELECT COUNT(*) FROM stops s JOIN routes r ON s.route_id=r.id
+           WHERE r.driver_id=? AND r.date>=? AND s.status='delivered'""",
+        (session['driver_id'], month_start)
+    ).fetchone()[0]
+    db.close()
+    return jsonify({
+        'pay_rate':        pay_rate,
+        'today_delivered': today_delivered,
+        'today_total':     today_total,
+        'today_earnings':  round(today_delivered  * pay_rate, 2),
+        'week_earnings':   round(week_delivered   * pay_rate, 2),
+        'month_earnings':  round(month_delivered  * pay_rate, 2),
+    })
 
 # ─── TEMP DEBUG ────────────────────────────────────────
 @app.route('/driver/debug-dashboard')
@@ -3491,18 +3546,32 @@ def account():
     db = get_db()
     driver = db.execute("SELECT * FROM drivers WHERE id=?", (session['driver_id'],)).fetchone()
     db.close()
-    return render_template('account.html', driver=session['driver_name'], phone=driver['phone'] or '')
+    pay_rate = float(driver['pay_rate']) if driver and driver['pay_rate'] else 1.50
+    return render_template('account.html', driver=session['driver_name'], phone=driver['phone'] or '', pay_rate=pay_rate)
 
 @app.route('/account/edit', methods=['POST'])
 def account_edit():
     if 'driver_id' not in session:
         return redirect(url_for('driver_login'))
-    name  = request.form.get('name', '').strip()
-    phone = request.form.get('phone', '').strip()
+    name     = request.form.get('name', '').strip()
+    phone    = request.form.get('phone', '').strip()
+    pay_rate_str = request.form.get('pay_rate', '').strip()
     db = get_db()
     if name and phone:
-        db.execute("UPDATE drivers SET name=?, phone=? WHERE id=?",
-                   (name, format_phone(phone), session['driver_id']))
+        # Validate pay rate
+        try:
+            new_pay_rate = float(pay_rate_str)
+            if new_pay_rate <= 0 or new_pay_rate > 99:
+                new_pay_rate = None
+        except (ValueError, TypeError):
+            new_pay_rate = None
+
+        if new_pay_rate:
+            db.execute("UPDATE drivers SET name=?, phone=?, pay_rate=? WHERE id=?",
+                       (name, format_phone(phone), new_pay_rate, session['driver_id']))
+        else:
+            db.execute("UPDATE drivers SET name=?, phone=? WHERE id=?",
+                       (name, format_phone(phone), session['driver_id']))
         db.commit()
         session['driver_name'] = name
     db.close()

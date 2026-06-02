@@ -24,22 +24,37 @@
 
   <!-- ── Earnings Panel ── -->
   <div style="background:#0f172a;border-radius:16px;padding:16px;margin-bottom:16px;">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
       <span style="font-size:0.8rem;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.05em;">💰 Earnings</span>
-      <span style="font-size:0.72rem;color:#475569;">${{ "%.2f"|format(pay_rate) }}/stop</span>
+      <a href="/account" style="font-size:0.75rem;color:#10b981;text-decoration:none;font-weight:700;background:#10b98118;padding:3px 10px;border-radius:8px;"><span id="live-pay-rate">${{ "%.2f"|format(pay_rate) }}</span>/stop ✏️</a>
     </div>
+
+    <!-- Today — big motivational number -->
+    <div style="background:linear-gradient(135deg,#0d2818,#0f2a1a);border-radius:14px;padding:16px;margin-bottom:10px;border:1px solid #10b98133;">
+      <div style="font-size:0.7rem;color:#6ee7b7;font-weight:700;letter-spacing:.08em;text-transform:uppercase;margin-bottom:4px;">Today</div>
+      <div id="today-earnings" style="font-size:2.6rem;font-weight:900;color:#10b981;line-height:1;">${{ "%.2f"|format(today_earnings) }}</div>
+      <div style="display:flex;align-items:center;gap:8px;margin-top:8px;">
+        <div style="flex:1;background:#0a1a10;border-radius:6px;height:6px;overflow:hidden;">
+          <div id="today-progress-bar" style="background:#10b981;height:100%;width:{{ (today_delivered/today_total*100)|int if today_total else 0 }}%;transition:width 0.6s;"></div>
+        </div>
+        <span id="today-stops" style="font-size:0.72rem;color:#6ee7b7;font-weight:700;white-space:nowrap;">{{ today_delivered }}/{{ today_total }} stops</span>
+      </div>
+    </div>
+
+    <!-- Week + Month side by side -->
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px;">
       <div style="background:#1e293b;border-radius:12px;padding:12px;">
-        <div style="font-size:0.7rem;color:#64748b;margin-bottom:4px;">Today</div>
-        <div style="font-size:1.6rem;font-weight:900;color:#10b981;">${{ "%.2f"|format(today_earnings) }}</div>
-        <div style="font-size:0.72rem;color:#475569;margin-top:2px;">{{ today_delivered }} of {{ today_total }} stops</div>
+        <div style="font-size:0.7rem;color:#64748b;margin-bottom:4px;">This Week</div>
+        <div id="week-earnings" style="font-size:1.5rem;font-weight:900;color:#3b82f6;">${{ "%.2f"|format(week_earnings) }}</div>
+        <div style="font-size:0.7rem;color:#475569;margin-top:2px;">{{ week_stop_count }} stops</div>
       </div>
       <div style="background:#1e293b;border-radius:12px;padding:12px;">
-        <div style="font-size:0.7rem;color:#64748b;margin-bottom:4px;">This Week</div>
-        <div style="font-size:1.6rem;font-weight:900;color:#3b82f6;">${{ "%.2f"|format(week_earnings) }}</div>
-        <div style="font-size:0.72rem;color:#475569;margin-top:2px;">{{ week_stop_count }} stops delivered</div>
+        <div style="font-size:0.7rem;color:#64748b;margin-bottom:4px;">This Month</div>
+        <div id="month-earnings" style="font-size:1.5rem;font-weight:900;color:#a855f7;">${{ "%.2f"|format(month_earnings) }}</div>
+        <div style="font-size:0.7rem;color:#475569;margin-top:2px;">{{ month_stop_count }} stops</div>
       </div>
     </div>
+
     {% if week_history %}
     <div style="font-size:0.72rem;color:#64748b;margin-bottom:6px;font-weight:600;">Week Breakdown</div>
     {% for day in week_history %}
@@ -434,8 +449,45 @@ function endLiveShare(outcome) {
         document.getElementById('live-share-btn').style.border = 'none';
       }
       if (miniMap) { miniMap.remove(); miniMap = null; miniMarker = null; }
+      // Refresh earnings immediately after deliver/fail
+      refreshEarnings();
     }).catch(() => {});
 }
+
+// ── LIVE EARNINGS POLL ──
+function fmt(n) { return '$' + n.toFixed(2); }
+function animateValue(el, newText) {
+  if (!el) return;
+  const old = el.textContent;
+  if (old === newText) return;
+  el.style.transform = 'scale(1.12)';
+  el.style.transition = 'transform 0.25s';
+  setTimeout(() => {
+    el.textContent = newText;
+    el.style.transform = 'scale(1)';
+  }, 120);
+}
+
+function refreshEarnings() {
+  fetch('/api/driver/earnings')
+    .then(r => r.json())
+    .then(d => {
+      if (d.error) return;
+      animateValue(document.getElementById('today-earnings'),  fmt(d.today_earnings));
+      animateValue(document.getElementById('week-earnings'),   fmt(d.week_earnings));
+      animateValue(document.getElementById('month-earnings'),  fmt(d.month_earnings));
+      const stopsEl = document.getElementById('today-stops');
+      if (stopsEl) stopsEl.textContent = d.today_delivered + '/' + d.today_total + ' stops';
+      const bar = document.getElementById('today-progress-bar');
+      if (bar && d.today_total > 0) bar.style.width = Math.round(d.today_delivered / d.today_total * 100) + '%';
+    })
+    .catch(() => {});
+}
+
+// Poll every 30s if an active route exists
+{% if route %}
+setInterval(refreshEarnings, 30000);
+{% endif %}
 </script>
 {% endblock %}
 {% endblock %}

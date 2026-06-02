@@ -24,6 +24,17 @@
         <label class="text-secondary small">Phone Number <span style="color:#555;font-size:0.75rem;">(used for manual tracking link)</span></label>
         <input type="tel" name="phone" class="form-control mt-1" value="{{ phone }}" placeholder="+13135550000" required>
       </div>
+      <div class="mb-3">
+        <label class="text-secondary small">Pay Rate per Stop <span style="color:#555;font-size:0.75rem;">(your actual rate from Speed X)</span></label>
+        <div style="position:relative;">
+          <span style="position:absolute;left:14px;top:50%;transform:translateY(-50%);color:#10b981;font-weight:700;font-size:1rem;">$</span>
+          <input type="number" name="pay_rate" class="form-control mt-1" step="0.01" min="0.01" max="99"
+            value="{{ '%.2f'|format(pay_rate) }}"
+            style="padding-left:28px;font-size:1.1rem;font-weight:700;color:#10b981;"
+            required>
+        </div>
+        <small class="text-muted d-block mt-1">Default is $1.50. Set your actual rate so earnings track correctly.</small>
+      </div>
       <button type="submit" class="btn w-100 py-3" style="background:#00ff88;color:#000;font-weight:700;border-radius:12px;">
         <i class="fas fa-save me-2"></i>Save Changes
       </button>
