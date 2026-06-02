@@ -407,17 +407,37 @@ def _dsq(a, b):
     """Squared Euclidean distance on lat/lng (fast, good enough for city scale)."""
     return (a['lat'] - b['lat'])**2 + (a['lng'] - b['lng'])**2
 
-def kmeans_geo(points, k, max_iter=40):
-    """K-means clustering on lat/lng dicts. Returns list of cluster indices."""
+def kmeans_geo(points, k, max_iter=40, seed_centroids=None):
+    """
+    K-means clustering on lat/lng dicts. Returns list of cluster indices.
+    seed_centroids: optional list of {lat, lng} dicts from address_intel history.
+    When provided and count >= k, uses historical cluster positions as starting
+    points instead of random k-means++ init — produces more consistent zones.
+    """
     n = len(points)
     if k > n:  return list(range(n))   # more clusters than points — 1 each
     if k <= 1: return [0] * n
-    # k-means++ style init: pick point furthest from existing centroids each time
-    centroids = [{'lat': points[0]['lat'], 'lng': points[0]['lng']}]
-    for _ in range(k - 1):
-        dists = [min(_dsq(p, c) for c in centroids) for p in points]
-        best  = max(range(n), key=lambda i: dists[i])
-        centroids.append({'lat': points[best]['lat'], 'lng': points[best]['lng']})
+
+    # ── Centroid initialization ──
+    if seed_centroids and len(seed_centroids) >= k:
+        # Derive k representative seeds from historical points using mini k-means++
+        # Pick k spread-out points from the seed pool as starting centroids
+        seeds    = list(seed_centroids)
+        chosen   = [seeds[0]]
+        for _ in range(k - 1):
+            dists  = [min(_dsq(s, c) for c in chosen) for s in seeds]
+            best_i = max(range(len(seeds)), key=lambda i: dists[i])
+            chosen.append(seeds[best_i])
+        centroids = [{'lat': c['lat'], 'lng': c['lng']} for c in chosen]
+        log.info(f'[address_intel] k-means seeded from {len(seed_centroids)} historical points')
+    else:
+        # Standard k-means++ init from current route points
+        centroids = [{'lat': points[0]['lat'], 'lng': points[0]['lng']}]
+        for _ in range(k - 1):
+            dists = [min(_dsq(p, c) for c in centroids) for p in points]
+            best  = max(range(n), key=lambda i: dists[i])
+            centroids.append({'lat': points[best]['lat'], 'lng': points[best]['lng']})
+
     assignments = [0] * n
     for _ in range(max_iter):
         new_asgn = [min(range(k), key=lambda j: _dsq(p, centroids[j])) for p in points]
@@ -443,6 +463,8 @@ def _mark_unknown(pkgs):
 def cluster_packages_geo(geocoded):
     """
     Step 1 of optimized routing: cluster packages into geographic zones by k-means.
+    Pulls historical address_intel seeds for the route's zip codes to stabilize
+    zone boundaries across routes — gets smarter with every delivery.
     Returns dict: {cluster_index: [pkg, ...]} and cluster_letter map.
     """
     n = len(geocoded)
@@ -451,7 +473,12 @@ def cluster_packages_geo(geocoded):
     k = calc_num_zones_adaptive(geocoded)
     if k <= 1 or n < 2:
         return {0: geocoded}, {0: 'A'}
-    assignments = kmeans_geo(geocoded, k)
+
+    # Pull historical centroids for this route's zip codes
+    zips = set(filter(None, (_extract_zip(p.get('address', '')) for p in geocoded)))
+    hist_seeds = get_historical_centroids_for_zips(zips) if zips else []
+
+    assignments = kmeans_geo(geocoded, k, seed_centroids=hist_seeds if len(hist_seeds) >= k else None)
     groups = {}
     for i, p in enumerate(geocoded):
         groups.setdefault(assignments[i], []).append(p)
@@ -709,7 +736,148 @@ STRIPE_PRICE_ID    = os.environ.get('STRIPE_PRICE_ID', 'price_1TZeWUEQpiT0nKEdHs
 stripe.api_key     = STRIPE_SECRET
 APPROACH_RADIUS_MILES = 0.5
 GEOFENCE_RADIUS_MILES  = 0.028
-_geocache = {}
+_geocache = {}   # in-memory: address -> (lat, lng)  — pre-seeded from address_intel on startup
+
+# ─── ADDRESS INTELLIGENCE ─────────────────────────────────────
+
+def _table_exists(db, name):
+    """Check if a SQLite table exists (safe for migrations)."""
+    try:
+        return db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone() is not None
+    except Exception:
+        return False
+
+def _normalize_addr_key(address):
+    """Consistent lookup key for address_intel."""
+    return re.sub(r'\s+', ' ', address.strip().upper())
+
+def _extract_zip(address):
+    m = re.search(r'\b(\d{5})\b', address)
+    return m.group(1) if m else None
+
+def upsert_address_intel(address, lat, lng, zone_letter=None):
+    """
+    Persist a geocoded address to the address_intel table.
+    Also updates _geocache immediately so the current session benefits.
+    """
+    if not address or not lat or not lng:
+        return
+    key      = _normalize_addr_key(address)
+    zip_code = _extract_zip(address)
+    now      = datetime.now().isoformat()
+    _geocache[key]     = (lat, lng)
+    _geocache[address] = (lat, lng)
+    try:
+        db       = get_db()
+        existing = db.execute("SELECT id, zone_history FROM address_intel WHERE address=?", (key,)).fetchone()
+        if existing:
+            try:
+                hist = json.loads(existing['zone_history'] or '[]')
+            except Exception:
+                hist = []
+            if zone_letter and zone_letter not in ('?', None):
+                hist.append(zone_letter)
+                hist = hist[-30:]
+            db.execute(
+                """UPDATE address_intel
+                   SET lat=?, lng=?, zip_code=COALESCE(?,zip_code), zone_history=?, updated_at=?
+                   WHERE address=?""",
+                (lat, lng, zip_code, json.dumps(hist), now, key)
+            )
+        else:
+            zone_history = json.dumps([zone_letter]) if zone_letter and zone_letter != '?' else '[]'
+            db.execute(
+                """INSERT INTO address_intel (address, lat, lng, zip_code, zone_history, created_at, updated_at)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (key, lat, lng, zip_code, zone_history, now, now)
+            )
+        db.commit()
+        db.close()
+    except Exception as e:
+        log.warning(f'[address_intel] upsert error: {e}')
+
+def record_address_delivery(address, zone_letter=None):
+    """
+    Increment delivery count and record zone assignment for a confirmed delivery.
+    Builds the zone intelligence used for future route clustering.
+    """
+    if not address:
+        return
+    key = _normalize_addr_key(address)
+    now = datetime.now().isoformat()
+    try:
+        db  = get_db()
+        row = db.execute(
+            "SELECT delivery_count, zone_history FROM address_intel WHERE address=?", (key,)
+        ).fetchone()
+        if row:
+            count = (row['delivery_count'] or 0) + 1
+            try:
+                hist = json.loads(row['zone_history'] or '[]')
+            except Exception:
+                hist = []
+            if zone_letter and zone_letter not in ('?', None):
+                hist.append(zone_letter)
+                hist = hist[-30:]
+            db.execute(
+                """UPDATE address_intel
+                   SET delivery_count=?, zone_history=?, last_delivered=?, updated_at=?
+                   WHERE address=?""",
+                (count, json.dumps(hist), now, now, key)
+            )
+            db.commit()
+        db.close()
+    except Exception as e:
+        log.warning(f'[address_intel] record_delivery error: {e}')
+
+def get_historical_centroids_for_zips(zip_codes):
+    """
+    Pull all historically-delivered lat/lng points for a set of zip codes.
+    Returns [{lat, lng}, ...] — used as k-means seed candidates for new routes.
+    Only includes addresses actually delivered at least once (verified ground truth).
+    """
+    if not zip_codes:
+        return []
+    try:
+        db  = get_db()
+        ph  = ','.join('?' * len(zip_codes))
+        rows = db.execute(
+            f"SELECT lat, lng FROM address_intel WHERE zip_code IN ({ph}) AND delivery_count > 0",
+            list(zip_codes)
+        ).fetchall()
+        db.close()
+        return [{'lat': r['lat'], 'lng': r['lng']} for r in rows if r['lat'] and r['lng']]
+    except Exception as e:
+        log.warning(f'[address_intel] centroid query error: {e}')
+        return []
+
+def nearest_intel_zone(lat, lng, radius_miles=0.25):
+    """
+    Given a lat/lng, return the most common historical zone letter among
+    nearby addresses in address_intel (within radius_miles, min 3 deliveries total).
+    Returns zone_letter string or None.
+    """
+    try:
+        db   = get_db()
+        rows = db.execute(
+            "SELECT lat, lng, zone_history FROM address_intel WHERE delivery_count >= 2"
+        ).fetchall()
+        db.close()
+        nearby_zones = []
+        for r in rows:
+            if r['lat'] and r['lng']:
+                if geodesic((lat, lng), (r['lat'], r['lng'])).miles <= radius_miles:
+                    try:
+                        hist = json.loads(r['zone_history'] or '[]')
+                        nearby_zones.extend(hist)
+                    except Exception:
+                        pass
+        if len(nearby_zones) >= 2:
+            from collections import Counter
+            return Counter(nearby_zones).most_common(1)[0][0]
+    except Exception as e:
+        log.warning(f'[address_intel] nearest_intel_zone error: {e}')
+    return None
 
 # ─── DB ────────────────────────────────────────────────────────
 
@@ -892,6 +1060,21 @@ def init_db():
             raw_json TEXT,
             added_at TEXT DEFAULT CURRENT_TIMESTAMP
         )""",
+        # ── Address Intelligence: persistent spatial memory ──
+        """CREATE TABLE IF NOT EXISTS address_intel (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            address TEXT UNIQUE NOT NULL,
+            lat REAL NOT NULL,
+            lng REAL NOT NULL,
+            zip_code TEXT,
+            delivery_count INTEGER DEFAULT 0,
+            last_delivered TEXT,
+            zone_history TEXT DEFAULT '[]',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_address_intel_zip ON address_intel (zip_code)",
+        "CREATE INDEX IF NOT EXISTS idx_address_intel_latng ON address_intel (lat, lng)",
     ]:
         try:
             db.execute(migration)
@@ -899,6 +1082,17 @@ def init_db():
         except:
             try: db._conn.rollback()
             except: pass
+
+    # ── Seed in-memory geocache from address_intel on startup ──
+    try:
+        rows = db.execute("SELECT address, lat, lng FROM address_intel WHERE lat IS NOT NULL AND lng IS NOT NULL").fetchall()
+        for r in rows:
+            _geocache[r['address']] = (r['lat'], r['lng'])
+        if rows:
+            log.info(f'[address_intel] Seeded geocache with {len(rows)} known addresses')
+    except Exception as e:
+        log.warning(f'[address_intel] Failed to seed geocache: {e}')
+
     db.close()
 
 # ─── HELPERS ───────────────────────────────────────────────────
@@ -932,7 +1126,16 @@ def _census_geocode(address):
     return None, None
 
 def geocode_address(address):
-    if address in _geocache: return _geocache[address]
+    # 0. Check in-memory cache first (already loaded from address_intel on startup)
+    if address in _geocache:
+        cached = _geocache[address]
+        if cached[0]:   # valid hit
+            return cached
+    key = _normalize_addr_key(address)
+    if key in _geocache and _geocache[key][0]:
+        _geocache[address] = _geocache[key]   # alias for future hits
+        return _geocache[key]
+
     # Normalize spelled-out numbers (Eight Mile -> 8 Mile)
     normalized = _normalize_street_numbers(address)
     # Strip apt/unit suffixes before geocoding
@@ -943,6 +1146,7 @@ def geocode_address(address):
     if lat and lng:
         log.info(f'Census geocode hit: {address} -> {lat:.5f}, {lng:.5f}')
         _geocache[address] = (lat, lng)
+        upsert_address_intel(address, lat, lng)   # persist for future routes
         return lat, lng
 
     # 2. Fall back to Nominatim
@@ -952,6 +1156,7 @@ def geocode_address(address):
         if loc:
             log.info(f'Nominatim fallback hit: {address} -> {loc.latitude:.5f}, {loc.longitude:.5f}')
             _geocache[address] = (loc.latitude, loc.longitude)
+            upsert_address_intel(address, loc.latitude, loc.longitude)   # persist
             return loc.latitude, loc.longitude
     except Exception as e:
         log.warning(f'Nominatim geocode failed for {address}: {e}')
@@ -2700,6 +2905,13 @@ def stop_delivered(stop_id):
     db.commit()
     route_id = stop['route_id'] if stop else None
 
+    # Record delivery in address intelligence (builds spatial memory over time)
+    if stop and stop['address']:
+        try:
+            record_address_delivery(stop['address'])
+        except Exception as _ae:
+            log.warning(f'[address_intel] delivery record failed: {_ae}')
+
     if route_id:
         route = db.execute("SELECT * FROM routes WHERE id=?", (route_id,)).fetchone()
         # Record first delivery time on the route
@@ -3467,6 +3679,10 @@ def admin():
         'sms_sent':         db.execute("SELECT COUNT(*) FROM stops WHERE approach_sms_sent=1").fetchone()[0],
         'buildings':        db.execute("SELECT COUNT(*) FROM buildings").fetchone()[0],
         'residents':        db.execute("SELECT COUNT(*) FROM residents").fetchone()[0],
+        # Address intelligence stats
+        'intel_addresses':  db.execute("SELECT COUNT(*) FROM address_intel").fetchone()[0] if _table_exists(db, 'address_intel') else 0,
+        'intel_delivered':  db.execute("SELECT COUNT(*) FROM address_intel WHERE delivery_count > 0").fetchone()[0] if _table_exists(db, 'address_intel') else 0,
+        'intel_top_zips':   db.execute("SELECT zip_code, COUNT(*) as cnt FROM address_intel WHERE zip_code IS NOT NULL GROUP BY zip_code ORDER BY cnt DESC LIMIT 5").fetchall() if _table_exists(db, 'address_intel') else [],
     }
     db.close()
     return render_template('admin.html', routes=routes, buildings=buildings, deliveries=deliveries, stats=stats, drivers_list=drivers_list)
