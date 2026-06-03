@@ -2057,7 +2057,7 @@ def scan_import_route():
     # Clear any existing items so import is a clean slate
     db.execute("DELETE FROM scan_items WHERE session_id=?", (ss_id,))
     db.execute(
-        "UPDATE scan_sessions SET zones_locked=0, zone_centroids=NULL, prev_centroids=NULL WHERE id=?",
+        "UPDATE scan_sessions SET zones_locked=0, zone_centroids=NULL, prev_centroids=NULL, status='scanning' WHERE id=?",
         (ss_id,)
     )
     db.commit()

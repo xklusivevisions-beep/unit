@@ -82,7 +82,7 @@
 
   <!-- Stop Info -->
   <div class="card p-3 mb-3">
-    <div class="fw-bold fs-5 mb-1">{{ stop.customer_name or 'Customer' }}</div>
+    <div class="fw-bold fs-5 mb-1">{{ (stop.customer_name or 'Customer')|name_short }}</div>
     <div class="text-secondary">{{ stop.address }}</div>
     {% if stop.unit %}
       <div class="mt-1"><span style="background:#00ff8822;color:#00ff88;border-radius:6px;padding:2px 8px;font-size:0.8rem;font-weight:700;">Unit {{ stop.unit }}</span></div>
@@ -195,7 +195,7 @@
   <!-- Speed X Copy Message -->
   {% set track_url = 'https://unit-6gxn.onrender.com/track/' + stop.token %}
   {% set speedx_msg = 'Your driver is on the way! Track your delivery live 📍 ' + track_url %}
-  {% set sms_body = "Hi " + (stop.customer_name or 'there') + "! Your driver is nearby. Track your delivery live here: " + track_url %}
+  {% set sms_body = "Hi " + ((stop.customer_name or 'there').split(' ')[0]) + "! Your driver is nearby. Track your delivery live here: " + track_url %}
   {% set sms_recipient = stop.phone if stop.phone else '' %}
 
   <button id="copy-speedx-btn" onclick="copySpeedXMsg()"
