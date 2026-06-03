@@ -32,7 +32,9 @@ def compress_for_api(img_bytes, max_bytes=4 * 1024 * 1024):
 
 
 def extract_stops_from_image(img_bytes):
-    """Use Claude Vision to extract stops from a Speed X screenshot."""
+    """Universal carrier-agnostic stop extraction from any delivery app screenshot.
+    Supports: Speed X, FedEx, Veho, GoFor, Amazon Flex, OnTrac, and similar apps.
+    """
     if not ANTHROPIC_KEY:
         raise ValueError('Vision AI not configured on server — contact admin')
     try:
@@ -41,7 +43,7 @@ def extract_stops_from_image(img_bytes):
         b64    = base64.standard_b64encode(img_bytes).decode('utf-8')
         resp   = client.messages.create(
             model='claude-haiku-4-5',
-            max_tokens=2048,
+            max_tokens=4096,
             messages=[{
                 'role': 'user',
                 'content': [
@@ -51,50 +53,70 @@ def extract_stops_from_image(img_bytes):
                     },
                     {
                         'type': 'text',
-                        'text': '''This is a Speed X delivery app screenshot. Extract ALL delivery stops visible.
-Return ONLY a JSON array, no other text. No markdown, no code blocks, just the raw array.
+                        'text': """This is a delivery driver app screenshot. It may be from ANY carrier:
+Speed X, FedEx, Veho, GoFor, Amazon Flex, OnTrac, DoorDash, Roadie, or similar.
 
-SPEED X STOP CARD FORMAT:
-Each stop card contains:
-  - ADDRESS (top-left): comma-separated with NO spaces after commas, may wrap across 1-2 lines
-    Format: "{street},{CITY},{STATE},{ZIP},{COUNTRY}"
-    Examples:
-      "317 Elmhurst St,HIGHLAND PARK,MI,48203-3413,USA"
-      "252 Beresford St,HIGHLAND PARK,MI,48203-3334,USA" (may wrap as "252 Beresford St,HIGHLAND" / "PARK,MI,48203-3334,USA")
-      "28 Rhode Island,HIGHLAND PARK,MI,48203,USA"
-  - CUSTOMER NAME (top-right, blue text next to phone icon)
-  - TRACKING NUMBER (blue "SPXDTW..." code below name)
-  - STOP NUMBER (bottom-right: "Stop: 41")
-  - PARCELS (top-right: "1 parcel")
+Extract EVERY delivery stop visible on screen.
+Return ONLY a raw JSON array - no markdown, no code blocks, no explanation.
 
-How to reconstruct the address:
-1. Join any wrapped address lines into one string
-2. Split by comma: [street, city, state, zip, country]
-3. Use only the first 5-digit portion of the zip (drop extended zip like "-3413")
-4. Output as: "{street}, {Title Case City}, {STATE} {5-digit-zip}"
-   Example: "317 Elmhurst St, Highland Park, MI 48203"
-   Example: "252 Beresford St, Highland Park, MI 48203"
-   Example: "28 Rhode Island, Highland Park, MI 48203"
+=== HOW TO FIND STOPS ===
+Look for repeating card/row patterns that contain an address. Each stop typically has:
+  - A delivery address (street, city, state, zip)
+  - A customer or recipient name
+  - A tracking or barcode number (any format: SPXDTW..., FX..., 1Z..., VEHO..., etc.)
+  - A stop number or sequence number
+  - A parcel/package count
 
-Output format (JSON array):
-[{"stop_num": "41", "address": "317 Elmhurst St, Highland Park, MI 48203", "name": "Rudy Gordon", "tracking": "SPXDTW008922605280005220", "unit": "", "phone": ""}]
+=== ADDRESS PARSING RULES ===
+Addresses may appear in different formats depending on the carrier app:
 
-Rules:
-- Include EVERY stop card visible on screen
-- tracking: full SPXDTW... code, copy exactly (18-24 chars)
-- name: customer name in blue — if truncated with "..." use what is visible
-- stop_num: number after "Stop:" label
-- unit: apartment/unit number if present in address, otherwise empty string
-- phone: digits only if visible on card, otherwise empty string
-- Do NOT include ",USA" in the address output
-- Normalize city to Title Case (Highland Park not HIGHLAND PARK)'''
+Format A - Comma-separated (Speed X, some others):
+  "287 Alfred St,Detroit,MI,48201-3122,USA"
+  "124 Alfred St 206,DETROIT,MI,48201,USA"  -> unit is 206
+  "66 Winder St Apt 338,Detroit,MI,48201,USA"  -> unit is 338
+  RULE: If a number appears between street and city with no label -> that is the unit/apt
+  RULE: "Apt", "Apartment", "Unit", "#", "Suite", "Ste" before a number = unit label, number = unit
+
+Format B - Multi-line (FedEx, Veho, Amazon):
+  Line 1: "320 Edmund Pl"
+  Line 2: "Suite 210"  or  "Apt 4B"
+  Line 3: "Detroit, MI 48201"
+
+Format C - Single line:
+  "87 East Canfield Street, Storefront, Detroit, MI 48201"
+
+=== OUTPUT RULES ===
+- address: Full clean address. Format: "{street}, {City}, {STATE} {5-digit-zip}"
+  - Drop ",USA" or "United States" from output
+  - Use Title Case for city (Detroit not DETROIT)
+  - Use only 5-digit zip (drop "-3193" from "48201-3193")
+  - Do NOT include apt/unit in the address field - put it in the "unit" field
+- unit: Apartment, unit, suite, floor, or storefront identifier. Empty string if none.
+- name: Recipient name. If truncated ("Jaleeza Anz...") include what is visible.
+- tracking: Full tracking number - copy exactly, any format (SPXDTW..., YWORD..., 1Z..., etc.)
+- stop_num: Stop or sequence number shown on card. Empty string if not visible.
+- carrier: Detected carrier name if visible ("Speed X", "FedEx", "Veho", "GoFor", etc.). "Unknown" if not clear.
+
+JSON array format:
+[
+  {
+    "stop_num": "52",
+    "address": "287 Alfred St, Detroit, MI 48201",
+    "unit": "",
+    "name": "Jaleeza Anz...",
+    "tracking": "SPXDTW138600193720",
+    "carrier": "Speed X"
+  }
+]
+
+Include EVERY stop card visible. Do not skip any.
+If a field is not visible, use empty string - never null.
+Return ONLY the JSON array."""
                     }
                 ]
-            }]
-        )
+            }])
         text = resp.content[0].text.strip()
-        log.info(f'Claude Vision raw response (first 400): {text[:400]}')
-        # Extract JSON array from response
+        log.info(f'[extract_stops] Claude raw (first 400): {text[:400]}')
         match = re.search(r'\[.*\]', text, re.DOTALL)
         if match:
             try:
@@ -105,7 +127,8 @@ Rules:
                     'tracking': s.get('tracking','').strip(),
                     'stop_num': str(s.get('stop_num','')).strip(),
                     'unit':     s.get('unit','').strip(),
-                    'phone':    re.sub(r'\D', '', s.get('phone',''))
+                    'phone':    re.sub(r'\D', '', s.get('phone', '')),
+                    'carrier':  s.get('carrier', '').strip(),
                 } for s in stops if s.get('address')]
             except json.JSONDecodeError as je:
                 log.warning(f'JSON parse failed: {je} | raw: {text[:200]}')
@@ -2445,9 +2468,12 @@ def screenshots_to_pdf():
                                      textColor=navy, alignment=TA_CENTER)
 
         today_str = datetime.now().strftime('%m/%d/%Y')
-        story = [
-            Paragraph(f'UNIT — Speed X Route', title_style),
-        ]
+
+        # Detect carrier(s) from stop data
+        carrier_names = list(dict.fromkeys(
+            s.get('carrier', '').strip()
+            for s in unique_stops if s.get('carrier', '').strip())) or ['Speed X']
+        carrier_label = ' / '.join(carrier_names[:3])
 
         # Detect route ID from first stop's tracking prefix if possible
         route_id = ''
@@ -2457,8 +2483,11 @@ def screenshots_to_pdf():
                 route_id = t[:12]
                 break
 
+        story = [
+            Paragraph(f'UNIT — Route Address Export', title_style),
+        ]
         story.append(Paragraph(
-            f'{len(unique_stops)} stops  •  {today_str}{("  •  Route: " + route_id) if route_id else ""}',
+            f'{len(unique_stops)} stops  •  {today_str}  •  {carrier_label}{("  •  " + route_id) if route_id else ""}',
             sub_style
         ))
         story.append(Spacer(1, 0.2*inch))
