@@ -272,9 +272,18 @@
 
   <!-- Zone flash banner (appears right after scan) -->
   <div class="zone-banner" id="zone-banner">
-    <div class="zone-banner-title">📦 Put this package in →</div>
-    <div class="zone-banner-main" id="zone-banner-main"></div>
-    <div class="zone-banner-sub" id="zone-banner-sub"></div>
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;">
+      <div>
+        <div class="zone-banner-title">📦 Put this package in →</div>
+        <div class="zone-banner-main" id="zone-banner-main"></div>
+        <div class="zone-banner-sub" id="zone-banner-sub"></div>
+      </div>
+      <button id="zone-nav-btn" onclick="navigateFromZone()" style="
+        background:linear-gradient(135deg,#3b82f6,#1d4ed8);color:#fff;
+        border:none;border-radius:10px;padding:8px 14px;
+        font-size:0.8rem;font-weight:800;cursor:pointer;flex-shrink:0;margin-left:10px;margin-top:2px;
+      ">🗺️ Go</button>
+    </div>
   </div>
 
   <!-- Camera zone -->
@@ -307,7 +316,13 @@
     <div class="lookup-zone-label" id="lookup-zone-label"></div>
     <div class="lookup-zone-sub"  id="lookup-zone-sub"></div>
     <div class="lookup-addr"      id="lookup-addr"></div>
-    <button class="lookup-dismiss" onclick="dismissLookup()">Got it ✓</button>
+    <button onclick="navigateFromLookup()" style="
+      width:100%;padding:14px;margin-top:10px;
+      background:linear-gradient(135deg,#3b82f6,#1d4ed8);
+      color:#fff;border:none;border-radius:12px;
+      font-size:1rem;font-weight:800;cursor:pointer;
+    ">🗺️ Navigate Now</button>
+    <button class="lookup-dismiss" onclick="dismissLookup()" style="margin-top:8px;">Got it ✓</button>
   </div>
 
   <!-- Preview card -->
@@ -325,9 +340,17 @@
       <label>Tracking Number</label>
       <input type="text" id="p-tracking" placeholder="Tracking #">
     </div>
+    <!-- Navigate Now — primary action, works even without a built route -->
+    <button id="nav-now-btn" onclick="navigateNow()" style="
+      width:100%;padding:16px;margin-bottom:10px;
+      background:linear-gradient(135deg,#3b82f6,#1d4ed8);
+      color:#fff;border:none;border-radius:12px;
+      font-size:1.05rem;font-weight:800;cursor:pointer;
+      display:flex;align-items:center;justify-content:center;gap:8px;
+    ">🗺️ Navigate Now</button>
     <div class="preview-actions">
       <button class="btn-discard" onclick="discardPreview()">✕ Discard</button>
-      <button class="btn-confirm" onclick="confirmPackage()">✓ Add Package</button>
+      <button class="btn-confirm" onclick="confirmPackage()">+ Add to List</button>
     </div>
   </div>
 
@@ -622,18 +645,32 @@ function closeVehicleModal(e) {
     document.getElementById('vehicle-modal-bg').classList.remove('open');
 }
 
+let _zoneBannerAddress = '';
 function showZoneBanner(zone) {
   if (!zone) return;
   const banner = document.getElementById('zone-banner');
   const color  = zone.color || '#3b82f6';
+  // Extract address from desc field if present
+  _zoneBannerAddress = (zone.desc || '').split('•').pop().trim();
   banner.style.borderColor = color;
   banner.style.background  = color + '18';
   document.getElementById('zone-banner-main').textContent = zone.icon + '  ' + zone.label;
   document.getElementById('zone-banner-main').style.color = color;
   document.getElementById('zone-banner-sub').textContent  = zone.desc;
+  const navBtn = document.getElementById('zone-nav-btn');
+  if (navBtn) navBtn.style.display = _zoneBannerAddress ? 'block' : 'none';
   banner.classList.add('show');
-  // Stay up 8s when zones locked (no confirm tap), 5s otherwise
   setTimeout(() => banner.classList.remove('show'), zonesLocked ? 8000 : 5000);
+}
+function navigateFromZone() {
+  const address = _zoneBannerAddress;
+  if (!address) return;
+  const encoded = encodeURIComponent(address);
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+                (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  window.location.href = isIOS
+    ? `maps://maps.apple.com/?daddr=${encoded}&dirflg=d`
+    : `https://www.google.com/maps/dir/?api=1&destination=${encoded}&travelmode=driving`;
 }
 
 // Load vehicle on page start
@@ -995,23 +1032,62 @@ function processBlob(blob) {
     });
 }
 
+// ── Navigate Now — scan to turn-by-turn, no route needed ──
+function navigateNow() {
+  const address = document.getElementById('p-address').value.trim();
+  if (!address) { showToast('No address to navigate to', true); return; }
+  const encoded = encodeURIComponent(address);
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || 
+                (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  // Apple Maps on iOS, Google Maps everywhere else
+  const url = isIOS
+    ? `maps://maps.apple.com/?daddr=${encoded}&dirflg=d`
+    : `https://www.google.com/maps/dir/?api=1&destination=${encoded}&travelmode=driving`;
+  window.location.href = url;
+  // Also add to list in background so it's tracked
+  const tracking = document.getElementById('p-tracking').value.trim();
+  const name     = document.getElementById('p-name').value.trim();
+  if (tracking || address) {
+    fetch('/driver/scan/add', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, address, tracking, zip: '' })
+    }).then(r => r.json()).then(d => {
+      if (d.ok) { pkgCount = d.count; updateCount(); }
+    }).catch(() => {});
+  }
+  discardPreview();
+}
+
 function discardPreview() {
   document.getElementById('preview-card').style.display = 'none';
 }
 
+let _lookupAddress = '';
 function showLookupCard(data) {
   const card   = document.getElementById('lookup-card');
   const color  = data.zone_color  || '#3b82f6';
   const emoji  = data.zone_emoji  || '📦';
   const letter = data.zone_letter || '?';
+  _lookupAddress = data.address || '';
   card.style.borderColor = color;
   card.style.background  = color + '15';
   document.getElementById('lookup-zone-label').textContent = `${emoji} Zone ${letter}`;
   document.getElementById('lookup-zone-label').style.color = color;
   document.getElementById('lookup-zone-sub').textContent   =
     data.zone_letter ? `Already sorted — load in ${letter}-zone spot` : 'Already in session';
-  document.getElementById('lookup-addr').textContent = data.address || '';
+  document.getElementById('lookup-addr').textContent = _lookupAddress;
   card.style.display = 'block';
+}
+function navigateFromLookup() {
+  if (!_lookupAddress) { showToast('No address', true); return; }
+  const encoded = encodeURIComponent(_lookupAddress);
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+                (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  window.location.href = isIOS
+    ? `maps://maps.apple.com/?daddr=${encoded}&dirflg=d`
+    : `https://www.google.com/maps/dir/?api=1&destination=${encoded}&travelmode=driving`;
+  dismissLookup();
 }
 
 function dismissLookup() {
