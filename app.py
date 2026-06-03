@@ -2368,20 +2368,28 @@ def screenshots_to_pdf():
     if not ANTHROPIC_KEY:
         return jsonify({'ok': False, 'error': 'Vision AI not configured on server'})
 
-    # ── Extract stops from every screenshot with Loading Scan-aware prompt ──
+    # ── Extract stops from every screenshot — try Loading Scan format first, fall back to standard format ──
     all_stops = []
     for f in files:
         try:
             img_bytes = f.read()
             if not img_bytes:
                 continue
+            # Try Loading Scan format first
             stops = _extract_loading_scan(img_bytes)
+            if not stops:
+                # Fall back to standard stop-card format
+                log.info('screenshots-to-pdf: loading scan returned 0 stops, trying standard format')
+                try:
+                    stops = extract_stops_from_image(img_bytes)
+                except Exception:
+                    stops = []
             all_stops.extend(stops)
         except Exception as e:
             log.warning(f'screenshots-to-pdf extract error: {e}')
 
     if not all_stops:
-        return jsonify({'ok': False, 'error': 'No addresses found in screenshots. Make sure these are Speed X Loading Scan screenshots.'})
+        return jsonify({'ok': False, 'error': 'No addresses found in screenshots. Upload Speed X Loading Scan or Stop Card screenshots.'})
 
     # ── Deduplicate by tracking number (most reliable key), fallback to address ──
     seen   = {}
@@ -2678,6 +2686,9 @@ def scan_build_route():
 def route_new():
     if 'driver_id' not in session:
         return redirect(url_for('driver_login'))
+    # Redirect GET requests to the scan page — it has the full import flow built in
+    if request.method == 'GET':
+        return redirect(url_for('scan_packages'))
 
     if request.method == 'POST':
         db = get_db()
