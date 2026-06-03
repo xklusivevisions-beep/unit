@@ -426,7 +426,10 @@
 <!-- Vehicle modal -->
 <div class="vehicle-modal-bg" id="vehicle-modal-bg" onclick="closeVehicleModal(event)">
   <div class="vehicle-modal">
-    <h3>🚗 Select Your Vehicle</h3>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+      <h3 style="margin:0;">🚗 Select Your Vehicle</h3>
+      <button onclick="closeVehicleModal()" style="background:#374151;border:none;color:#9ca3af;border-radius:8px;padding:6px 12px;font-size:0.85rem;font-weight:700;cursor:pointer;">Done</button>
+    </div>
     <div id="vehicle-options-list"></div>
   </div>
 </div>
@@ -544,23 +547,35 @@ function triggerLockFlash(nZones) {
 }
 
 // ── Vehicle Setup ──
+// Fallback vehicle list — always available even if server fetch fails
+const VEHICLE_DEFAULTS = [
+  { value: 'small_car',    label: '🚗 Small Car' },
+  { value: 'sedan',        label: '🚗 Sedan' },
+  { value: 'suv_midsize',  label: '🚙 SUV — Midsize (No 3rd Row)' },
+  { value: 'suv_fullsize', label: '🚙 SUV — Full Size (3rd Row)' },
+  { value: 'minivan',      label: '🚐 Minivan' },
+  { value: 'pickup',       label: '🚚 Pickup Truck' },
+  { value: 'cargo_van',    label: '🚐 Cargo Van' },
+  { value: 'box_truck',    label: '🚚 Box Truck' },
+];
+
 function loadVehicleType() {
+  // Render defaults immediately so modal always has content
+  renderVehicleOptions(VEHICLE_DEFAULTS, currentVehicleType);
+
   fetch('/driver/vehicle-setup')
     .then(r => {
       if (!r.ok) throw new Error('status ' + r.status);
       return r.json();
     })
     .then(data => {
-      if (!data.ok) {
-        document.getElementById('vehicle-label').textContent = 'Tap to set vehicle →';
-        return;
-      }
+      if (!data.ok) return;
       currentVehicleType = data.current;
       document.getElementById('vehicle-label').textContent = data.label || data.current || 'Tap to set →';
-      renderVehicleOptions(data.options || [], data.current);
+      renderVehicleOptions(data.options || VEHICLE_DEFAULTS, data.current);
     })
     .catch(() => {
-      // Server error or offline — show fallback instead of Loading...
+      // Server error — defaults already rendered, just fix label
       document.getElementById('vehicle-label').textContent = 'Tap to set vehicle →';
     });
 }
@@ -600,6 +615,7 @@ function selectVehicle(vehicleType, el) {
 
 function openVehicleModal()  { document.getElementById('vehicle-modal-bg').classList.add('open'); }
 function closeVehicleModal(e) {
+  // Close on Done button click (no event) or backdrop tap
   if (!e || e.target === document.getElementById('vehicle-modal-bg'))
     document.getElementById('vehicle-modal-bg').classList.remove('open');
 }
