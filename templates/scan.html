@@ -292,9 +292,9 @@
 
   <button class="capture-btn" id="capture-btn" onclick="capturePhoto()">📸 Capture Label</button>
 
-  <!-- File fallback -->
-  <input type="file" accept="image/*" capture="environment" id="file-input" style="display:none" onchange="handleFile(this)">
-  <button class="file-btn" onclick="document.getElementById('file-input').click()">📁 Upload Label Photo</button>
+  <!-- File fallback — label wrapper is iOS-safe, no programmatic .click() needed -->
+  <label for="file-input" class="file-btn" style="display:block;text-align:center;cursor:pointer;">📁 Upload Label Photo</label>
+  <input type="file" accept="image/*" id="file-input" style="display:none" onchange="handleFile(this)">
 
   <!-- Loading -->
   <div id="loading">
@@ -336,9 +336,9 @@
     <h3 style="font-size:0.9rem;font-weight:700;color:#e2e8f0;margin:0 0 6px;">📄 Convert Screenshots → PDF</h3>
     <p style="font-size:0.75rem;color:#6b7280;margin:0 0 10px;">Upload Speed X screenshots to get a clean PDF with all addresses — useful for records or sharing your route.</p>
     <input type="file" id="pdf-converter-input" accept="image/*,.pdf,application/pdf" multiple style="display:none" onchange="handlePdfConverter(this)">
-    <button style="width:100%;padding:10px;background:#1e293b;color:#94a3b8;border:1px solid #334155;border-radius:10px;font-weight:600;font-size:0.88rem;cursor:pointer;" onclick="document.getElementById('pdf-converter-input').click()">
+    <label for="pdf-converter-input" style="display:block;width:100%;padding:10px;background:#1e293b;color:#94a3b8;border:1px solid #334155;border-radius:10px;font-weight:600;font-size:0.88rem;cursor:pointer;text-align:center;box-sizing:border-box;">
       📸 Upload Screenshots → Download PDF
-    </button>
+    </label>
     <div id="pdf-converter-status" style="display:none;text-align:center;padding:10px;color:#94a3b8;font-size:0.82rem;"></div>
   </div>
 
@@ -347,9 +347,9 @@
     <h3>📥 Import Route First (Recommended)</h3>
     <p>Upload Speed X screenshots (or PDF export) before scanning — zones lock instantly from scan #1. No zone drift. No holding packages.</p>
     <input type="file" id="import-input" accept="image/*,.pdf,application/pdf" multiple style="display:none" onchange="handleImportFiles(this)">
-    <button class="import-btn" onclick="document.getElementById('import-input').click()">
+    <label for="import-input" class="import-btn" style="display:block;text-align:center;cursor:pointer;">
       📸 Upload Screenshots or PDF
-    </button>
+    </label>
     <div id="import-progress">
       <div class="spinner"></div>
       <div>Extracting stops + locking zones…</div>
@@ -887,11 +887,16 @@ async function startCamera() {
 
 function capturePhoto() {
   const video = document.getElementById('camera-feed');
+  if (!video.videoWidth || !video.videoHeight) {
+    showToast('Camera not ready — wait a moment and try again', true);
+    return;
+  }
   const canvas = document.getElementById('canvas');
   canvas.width = video.videoWidth;
   canvas.height = video.videoHeight;
   canvas.getContext('2d').drawImage(video, 0, 0);
   canvas.toBlob(blob => {
+    if (!blob) { showToast('Capture failed — try again', true); return; }
     stopCamera();
     processBlob(blob);
   }, 'image/jpeg', 0.92);
@@ -913,6 +918,7 @@ function handleFile(input) {
 
 // ── Process label ──
 function processBlob(blob) {
+  if (!blob) { showToast('No image captured — try again', true); return; }
   document.getElementById('loading').style.display = 'block';
   document.getElementById('preview-card').style.display = 'none';
   const fd = new FormData();
@@ -921,7 +927,17 @@ function processBlob(blob) {
     .then(r => r.json())
     .then(data => {
       document.getElementById('loading').style.display = 'none';
-      if (!data.ok) { showToast(data.error || 'Could not read label', true); return; }
+      if (!data.ok) {
+        // Show error prominently — not just a brief toast
+        const errMsg = data.error || 'Could not read label';
+        showToast(errMsg, true);
+        // If it’s a config error, show it in the preview card too so it’s not missed
+        if (errMsg.includes('configured') || errMsg.includes('API')) {
+          document.getElementById('preview-card').style.display = 'block';
+          document.getElementById('preview-card').innerHTML = `<div style="color:#ef4444;font-size:0.9rem;font-weight:700;">⚠️ ${errMsg}</div><div style="color:#9ca3af;font-size:0.8rem;margin-top:6px;">Contact support — server needs ANTHROPIC_API_KEY configured.</div>`;
+        }
+        return;
+      }
 
       // ─ Lookup mode: package already in session ─
       if (data.mode === 'lookup') {
@@ -1130,7 +1146,9 @@ function handlePdfConverter(input) {
       }
     })
     .catch(e => {
-      status.textContent = '❌ ' + (e.message || 'Failed');
+      const msg = e.message || 'Failed';
+      status.style.color = '#ef4444';
+      status.textContent = '⚠️ ' + msg;
     });
   input.value = '';
 }
