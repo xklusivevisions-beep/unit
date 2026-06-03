@@ -46,7 +46,7 @@
   </div>
 
   <!-- Stats Bar -->
-  <div class="row g-2 mb-4">
+  <div class="row g-2 mb-3">
     <div class="col-4">
       <div class="stat-card">
         <div class="stat-number">{{ total }}</div>
@@ -55,15 +55,41 @@
     </div>
     <div class="col-4">
       <div class="stat-card">
-        <div class="stat-number" style="color:#00ff88;">{{ with_phone }}</div>
-        <small class="text-secondary">Have Phone</small>
+        <div class="stat-number" style="color:#00ff88;" data-stat="done">{{ delivered }}</div>
+        <small class="text-secondary">Done</small>
       </div>
     </div>
     <div class="col-4">
       <div class="stat-card">
-        <div class="stat-number" style="color:#ffaa00;">{{ total - with_phone }}</div>
-        <small class="text-secondary">Missing</small>
+        <div class="stat-number" style="color:#f59e0b;">{{ total - delivered }}</div>
+        <small class="text-secondary">Left</small>
       </div>
+    </div>
+  </div>
+
+  <!-- Earnings Bar -->
+  <div id="earnings-bar" style="background:#0f172a;border:1px solid #1e293b;border-radius:14px;padding:14px 16px;margin-bottom:16px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+      <span style="font-size:0.75rem;color:#6b7280;text-transform:uppercase;letter-spacing:.06em;font-weight:700;">Today's Earnings</span>
+      <span style="font-size:0.7rem;color:#6b7280;">${{ '%.2f'|format(pay_rate) }}/stop</span>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+      <div style="background:#052e16;border:1px solid #10b981;border-radius:10px;padding:10px 14px;">
+        <div id="earned-val" style="font-size:1.5rem;font-weight:900;color:#10b981;">${{ '%.2f'|format(earned) }}</div>
+        <div style="font-size:0.7rem;color:#6ee7b7;margin-top:2px;">Earned ({{ delivered }} delivered)</div>
+      </div>
+      <div style="background:#1c1917;border:1px solid #374151;border-radius:10px;padding:10px 14px;">
+        <div id="potential-val" style="font-size:1.5rem;font-weight:900;color:#f59e0b;">${{ '%.2f'|format(potential) }}</div>
+        <div style="font-size:0.7rem;color:#fbbf24;margin-top:2px;">Potential ({{ total }} stops)</div>
+      </div>
+    </div>
+    <!-- Progress bar -->
+    <div style="margin-top:10px;background:#1e293b;border-radius:999px;height:6px;overflow:hidden;">
+      <div id="earnings-progress" style="height:100%;background:linear-gradient(90deg,#10b981,#34d399);border-radius:999px;transition:width .5s;
+        width:{{ ((delivered / total * 100) if total > 0 else 0)|round(1) }}%;"></div>
+    </div>
+    <div id="earnings-label" style="font-size:0.7rem;color:#6b7280;text-align:center;margin-top:5px;">
+      {{ delivered }}/{{ total }} stops complete
     </div>
   </div>
 
@@ -170,7 +196,7 @@
     <div class="d-flex align-items-start gap-2">
       <span style="background:#1a1a1a;color:#aaa;border-radius:8px;padding:4px 8px;font-size:0.8rem;font-weight:700;min-width:32px;text-align:center;flex-shrink:0;">{{ stop.stop_number }}</span>
       <div style="flex:1;min-width:0;">
-        <div class="fw-bold" style="font-size:0.9rem;">{{ stop.customer_name or 'Unknown' }}</div>
+        <div class="fw-bold" style="font-size:0.9rem;">{{ (stop.customer_name or 'Unknown')|name_short }}</div>
         <div class="text-secondary small text-truncate">{{ stop.address }}</div>
         {% if stop.unit %}<small class="text-secondary">Unit {{ stop.unit }}</small>{% endif %}
 
@@ -520,6 +546,33 @@ function refreshEta() {
 // Poll every 60 seconds while on this page
 refreshEta();
 setInterval(refreshEta, 60000);
+
+// ── Live Earnings ──
+const PAY_RATE     = {{ pay_rate }};
+const TOTAL_STOPS  = {{ total }};
+let   earnedCount  = {{ delivered }};
+
+function refreshEarnings() {
+  fetch('/api/driver/earnings')
+    .then(r => r.json())
+    .then(data => {
+      if (!data) return;
+      const newDelivered = data.today_delivered || 0;
+      if (newDelivered === earnedCount) return;  // no change
+      earnedCount = newDelivered;
+      const earned    = (newDelivered * PAY_RATE).toFixed(2);
+      const pct       = TOTAL_STOPS > 0 ? Math.min(100, (newDelivered / TOTAL_STOPS * 100)).toFixed(1) : 0;
+      document.getElementById('earned-val').textContent      = '$' + earned;
+      document.getElementById('earnings-progress').style.width = pct + '%';
+      document.getElementById('earnings-label').textContent  = `${newDelivered}/${TOTAL_STOPS} stops complete`;
+      // Update stats bar too
+      const doneEl = document.querySelector('[data-stat="done"]');
+      if (doneEl) doneEl.textContent = newDelivered;
+    })
+    .catch(() => {});
+}
+refreshEarnings();
+setInterval(refreshEarnings, 15000);
 </script>
 <script src='https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.js'></script>
 {% endblock %}

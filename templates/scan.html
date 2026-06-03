@@ -396,7 +396,7 @@
         {% for item in items %}
         <div class="pkg-item" id="item-{{ item.id }}">
           <div class="pkg-info">
-            <div class="pkg-name">{{ item.customer_name or 'Unknown' }}</div>
+            <div class="pkg-name">{{ (item.customer_name or 'Unknown')|name_short }}</div>
             <div class="pkg-addr">{{ item.address }}</div>
             {% if item.tracking %}
             <div class="pkg-tracking">{{ item.tracking }}</div>
@@ -480,12 +480,30 @@ function handleImportFiles(input) {
       const badge = document.getElementById('sort-status');
       badge.textContent = '🔒 Locked';
       badge.className = 'sort-badge locked';
-      // Collapse import panel
-      setTimeout(() => {
-        document.getElementById('import-panel').style.display = 'none';
-        triggerLockFlash(data.n_zones);
-        refreshLiveSort();
-      }, 1500);
+      // Auto-build route immediately and redirect
+      const res = document.getElementById('import-result');
+      res.style.display = 'block';
+      res.innerHTML = `✅ <b>${data.imported} stops imported</b> — building your route…`;
+      fetch('/driver/scan/build-route', { method: 'POST' })
+        .then(r => r.json())
+        .then(built => {
+          if (built.ok && built.redirect) {
+            res.innerHTML = `✅ Route built! Redirecting…`;
+            setTimeout(() => { window.location.href = built.redirect; }, 800);
+          } else {
+            // Build failed but import worked — let user build manually
+            document.getElementById('import-panel').style.display = 'none';
+            triggerLockFlash(data.n_zones);
+            refreshLiveSort();
+            res.innerHTML = `✅ <b>${data.imported} stops imported</b> (${data.geocoded} geocoded)<br>
+              🔒 <b>${data.n_zones} zones locked</b> — tap Build Route when ready`;
+          }
+        })
+        .catch(() => {
+          document.getElementById('import-panel').style.display = 'none';
+          triggerLockFlash(data.n_zones);
+          refreshLiveSort();
+        });
     })
     .catch(() => {
       document.getElementById('import-progress').style.display = 'none';
@@ -785,7 +803,7 @@ function refreshLiveSort() {
             <div class="pkg-info">
               <div class="pkg-name" style="display:flex;align-items:center;gap:8px;">
                 <span style="background:${color};color:#fff;border-radius:6px;padding:1px 7px;font-size:0.8rem;font-weight:800;flex-shrink:0;">${label}</span>
-                ${pkg.name || 'Unknown'}
+                ${nameShort(pkg.name)}
               </div>
               <div class="pkg-addr">${pkg.address}</div>
               ${pkg.tracking ? `<div class="pkg-tracking">${pkg.tracking}</div>` : ''}
@@ -800,6 +818,14 @@ function refreshLiveSort() {
 
 // Auto-refresh map if packages already exist
 if (pkgCount > 0) setTimeout(refreshLiveSort, 500);
+
+// ── Name formatter: 'Ebony Helton' → 'Ebony H.' ──
+function nameShort(name) {
+  if (!name) return 'Unknown';
+  const parts = name.trim().split(/\s+/);
+  if (parts.length === 1) return parts[0];
+  return parts[0] + ' ' + parts[parts.length - 1][0].toUpperCase() + '.';
+}
 
 function showToast(msg, isErr) {
   const t = document.getElementById('toast');
@@ -994,7 +1020,7 @@ function appendPackageToList(pkg) {
   el.id = 'item-' + pkg.id;
   el.innerHTML = `
     <div class="pkg-info">
-      <div class="pkg-name">${pkg.name || 'Unknown'}</div>
+      <div class="pkg-name">${nameShort(pkg.name)}</div>
       <div class="pkg-addr">${pkg.address}</div>
       ${pkg.tracking ? `<div class="pkg-tracking">${pkg.tracking}</div>` : ''}
       <span class="pkg-num">#${pkgCount}</span>

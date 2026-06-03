@@ -283,6 +283,18 @@ log = logging.getLogger(__name__)
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'unit-secret-2025')
 
+@app.template_filter('name_short')
+def name_short_filter(name):
+    """Format name as 'First L.' — e.g. 'Ebony Helton' -> 'Ebony H.' """
+    if not name:
+        return ''
+    parts = name.strip().split()
+    if len(parts) == 1:
+        return parts[0]
+    first = parts[0]
+    last_initial = parts[-1][0].upper() + '.'
+    return f'{first} {last_initial}'
+
 @app.errorhandler(404)
 def not_found(e):
     if request.path.startswith('/api/'): return jsonify({'error': 'Not found'}), 404
@@ -3018,10 +3030,18 @@ def route_detail(route_id):
     db = get_db()
     route = db.execute("SELECT * FROM routes WHERE id=?", (route_id,)).fetchone()
     stops = db.execute("SELECT * FROM stops WHERE route_id=? ORDER BY stop_number", (route_id,)).fetchall()
+    driver_row = db.execute("SELECT pay_rate FROM drivers WHERE id=?", (session['driver_id'],)).fetchone()
     db.close()
-    total    = len(stops)
+    pay_rate   = float(driver_row['pay_rate']) if driver_row and driver_row['pay_rate'] else 1.50
+    total      = len(stops)
     with_phone = sum(1 for s in stops if s['phone'])
-    return render_template('route_detail.html', route=route, stops=stops, total=total, with_phone=with_phone, mapbox_token=MAPBOX_TOKEN)
+    delivered  = sum(1 for s in stops if s['status'] == 'delivered')
+    potential  = round(total * pay_rate, 2)
+    earned     = round(delivered * pay_rate, 2)
+    return render_template('route_detail.html', route=route, stops=stops, total=total,
+                           with_phone=with_phone, mapbox_token=MAPBOX_TOKEN,
+                           pay_rate=pay_rate, potential=potential, earned=earned,
+                           delivered=delivered)
 
 @app.route('/driver/route/<int:route_id>/add-stop', methods=['POST'])
 def route_add_stop(route_id):
