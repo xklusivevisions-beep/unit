@@ -546,14 +546,23 @@ function triggerLockFlash(nZones) {
 // ── Vehicle Setup ──
 function loadVehicleType() {
   fetch('/driver/vehicle-setup')
-    .then(r => r.json())
-    .then(data => {
-      if (!data.ok) return;
-      currentVehicleType = data.current;
-      document.getElementById('vehicle-label').textContent = data.label || data.current;
-      renderVehicleOptions(data.options, data.current);
+    .then(r => {
+      if (!r.ok) throw new Error('status ' + r.status);
+      return r.json();
     })
-    .catch(() => {});
+    .then(data => {
+      if (!data.ok) {
+        document.getElementById('vehicle-label').textContent = 'Tap to set vehicle →';
+        return;
+      }
+      currentVehicleType = data.current;
+      document.getElementById('vehicle-label').textContent = data.label || data.current || 'Tap to set →';
+      renderVehicleOptions(data.options || [], data.current);
+    })
+    .catch(() => {
+      // Server error or offline — show fallback instead of Loading...
+      document.getElementById('vehicle-label').textContent = 'Tap to set vehicle →';
+    });
 }
 
 function renderVehicleOptions(options, current) {

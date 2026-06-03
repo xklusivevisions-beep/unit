@@ -2016,11 +2016,14 @@ def vehicle_setup_get():
     db = get_db()
     driver = db.execute("SELECT vehicle_type FROM drivers WHERE id=?", (session['driver_id'],)).fetchone()
     db.close()
-    vehicle_type = driver['vehicle_type'] if driver and driver['vehicle_type'] else 'suv'
+    vehicle_type = (driver['vehicle_type'] if driver and driver['vehicle_type'] else 'suv_midsize')
+    # Fallback to suv_midsize if stored value is no longer a valid key
+    if vehicle_type not in VEHICLE_LABELS:
+        vehicle_type = 'suv_midsize'
     return jsonify({
-        'ok': True,
+        'ok':     True,
         'current': vehicle_type,
-        'label':   VEHICLE_LABELS.get(vehicle_type),
+        'label':   VEHICLE_LABELS.get(vehicle_type, 'SUV'),
         'options': [{'value': k, 'label': v} for k, v in VEHICLE_LABELS.items()],
         'zones':   VEHICLE_ZONES.get(vehicle_type, VEHICLE_ZONES['suv_midsize']),
     })
