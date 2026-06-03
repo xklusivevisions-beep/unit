@@ -597,22 +597,22 @@ function renderVehicleOptions(options, current) {
 }
 
 function selectVehicle(vehicleType, el) {
+  // Update UI immediately — don't wait on server
+  currentVehicleType = vehicleType;
+  const opt = VEHICLE_DEFAULTS.find(v => v.value === vehicleType);
+  document.getElementById('vehicle-label').textContent = opt ? opt.label : vehicleType;
+  document.querySelectorAll('.vehicle-option').forEach(o => o.classList.remove('selected'));
+  el.classList.add('selected');
+  closeVehicleModal();
+  showToast('Vehicle updated ✓');
+  if (pkgCount > 0) setTimeout(refreshLiveSort, 300);
+
+  // Save to server in background
   fetch('/driver/vehicle-setup', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ vehicle_type: vehicleType })
-  })
-  .then(r => r.json())
-  .then(data => {
-    if (!data.ok) return;
-    currentVehicleType = vehicleType;
-    document.getElementById('vehicle-label').textContent = data.label;
-    document.querySelectorAll('.vehicle-option').forEach(o => o.classList.remove('selected'));
-    el.classList.add('selected');
-    closeVehicleModal();
-    showToast('Vehicle updated ✓');
-    if (pkgCount > 0) setTimeout(refreshLiveSort, 300);
-  });
+  }).catch(() => {}); // silent fail — UI already updated
 }
 
 function openVehicleModal()  { document.getElementById('vehicle-modal-bg').classList.add('open'); }
