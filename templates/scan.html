@@ -507,7 +507,6 @@ function handleImportFiles(input) {
       badge.textContent = '🔒 Locked';
       badge.className = 'sort-badge locked';
       // Auto-build route immediately and redirect
-      const res = document.getElementById('import-result');
       res.style.display = 'block';
       res.innerHTML = `✅ <b>${data.imported} stops imported</b> — building your route…`;
       fetch('/driver/scan/build-route', { method: 'POST' })
