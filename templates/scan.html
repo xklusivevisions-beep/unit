@@ -238,7 +238,7 @@
   <div class="vehicle-bar" onclick="openVehicleModal()">
     <div>
       <div class="vehicle-bar-left">Your Vehicle</div>
-      <div class="vehicle-bar-val" id="vehicle-label">Loading...</div>
+      <div class="vehicle-bar-val" id="vehicle-label">🚙 SUV — Midsize</div>
     </div>
     <span class="vehicle-bar-arrow">⚙️</span>
   </div>
@@ -560,7 +560,9 @@ const VEHICLE_DEFAULTS = [
 ];
 
 function loadVehicleType() {
-  // Render defaults immediately so modal always has content
+  // Set label + options immediately — no server dependency
+  const defaultOption = VEHICLE_DEFAULTS.find(v => v.value === currentVehicleType) || VEHICLE_DEFAULTS[2];
+  document.getElementById('vehicle-label').textContent = defaultOption.label;
   renderVehicleOptions(VEHICLE_DEFAULTS, currentVehicleType);
 
   fetch('/driver/vehicle-setup')
