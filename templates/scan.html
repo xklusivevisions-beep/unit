@@ -665,12 +665,14 @@ function showZoneBanner(zone) {
 function navigateFromZone() {
   const address = _zoneBannerAddress;
   if (!address) return;
-  const encoded = encodeURIComponent(address);
-  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
-                (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-  window.location.href = isIOS
-    ? `maps://maps.apple.com/?daddr=${encoded}&dirflg=d`
-    : `https://www.google.com/maps/dir/?api=1&destination=${encoded}&travelmode=driving`;
+  fetch('/driver/scan/quick-navigate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ address, tracking: '', name: '' })
+  })
+  .then(r => r.json())
+  .then(d => { if (d.ok) window.location.href = d.redirect; else showToast(d.error || 'Error', true); })
+  .catch(() => showToast('Error', true));
 }
 
 // Load vehicle on page start
@@ -1032,31 +1034,40 @@ function processBlob(blob) {
     });
 }
 
-// ── Navigate Now — scan to turn-by-turn, no route needed ──
+// ── Navigate Now — scan → geocode → in-app Mapbox navigation → address intel recorded ──
 function navigateNow() {
-  const address = document.getElementById('p-address').value.trim();
-  if (!address) { showToast('No address to navigate to', true); return; }
-  const encoded = encodeURIComponent(address);
-  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || 
-                (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-  // Apple Maps on iOS, Google Maps everywhere else
-  const url = isIOS
-    ? `maps://maps.apple.com/?daddr=${encoded}&dirflg=d`
-    : `https://www.google.com/maps/dir/?api=1&destination=${encoded}&travelmode=driving`;
-  window.location.href = url;
-  // Also add to list in background so it's tracked
+  const address  = document.getElementById('p-address').value.trim();
   const tracking = document.getElementById('p-tracking').value.trim();
   const name     = document.getElementById('p-name').value.trim();
-  if (tracking || address) {
-    fetch('/driver/scan/add', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, address, tracking, zip: '' })
-    }).then(r => r.json()).then(d => {
-      if (d.ok) { pkgCount = d.count; updateCount(); }
-    }).catch(() => {});
-  }
-  discardPreview();
+  if (!address) { showToast('No address to navigate to', true); return; }
+
+  // Show loading state on the button
+  const btn = document.getElementById('nav-now-btn');
+  btn.textContent = '⏳ Geocoding…';
+  btn.disabled = true;
+
+  // Hit the in-app endpoint: geocodes, creates stop, writes to address_intel
+  fetch('/driver/scan/quick-navigate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ address, tracking, name })
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (!data.ok) {
+      btn.textContent = '🗺️ Navigate Now';
+      btn.disabled = false;
+      showToast(data.error || 'Could not create stop', true);
+      return;
+    }
+    // Redirect to in-app stop_active: Mapbox turn-by-turn + live GPS + address intel
+    window.location.href = data.redirect;
+  })
+  .catch(() => {
+    btn.textContent = '🗺️ Navigate Now';
+    btn.disabled = false;
+    showToast('Server error — try again', true);
+  });
 }
 
 function discardPreview() {
@@ -1081,12 +1092,14 @@ function showLookupCard(data) {
 }
 function navigateFromLookup() {
   if (!_lookupAddress) { showToast('No address', true); return; }
-  const encoded = encodeURIComponent(_lookupAddress);
-  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
-                (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-  window.location.href = isIOS
-    ? `maps://maps.apple.com/?daddr=${encoded}&dirflg=d`
-    : `https://www.google.com/maps/dir/?api=1&destination=${encoded}&travelmode=driving`;
+  fetch('/driver/scan/quick-navigate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ address: _lookupAddress, tracking: '', name: '' })
+  })
+  .then(r => r.json())
+  .then(d => { if (d.ok) window.location.href = d.redirect; else showToast(d.error || 'Error', true); })
+  .catch(() => showToast('Error', true));
   dismissLookup();
 }
 

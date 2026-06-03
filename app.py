@@ -2608,6 +2608,94 @@ def scan_clear():
     return jsonify({'ok': True})
 
 
+
+@app.route('/driver/scan/quick-navigate', methods=['POST'])
+def scan_quick_navigate():
+    """
+    Scan a package label -> geocode -> create stop -> drop into in-app navigation.
+    Keeps ALL data inside UNIT: precise coords, delivery tracking, address intel.
+    No Apple Maps. No handing off. Everything stays in the pipeline.
+    """
+    if 'driver_id' not in session:
+        return jsonify({'ok': False, 'error': 'not logged in'}), 401
+    data    = request.get_json() or {}
+    address  = (data.get('address') or '').strip()
+    tracking = (data.get('tracking') or '').strip()
+    name     = (data.get('name') or '').strip()
+    if not address:
+        return jsonify({'ok': False, 'error': 'No address provided'})
+
+    db   = get_db()
+    today = datetime.now().strftime('%Y-%m-%d')
+
+    # Geocode immediately — this is what captures the precise coord for address_intel
+    lat, lng = None, None
+    try:
+        coords = geocode_address(address)
+        if coords:
+            lat, lng = coords
+            # Write to address_intel now — even before delivery is confirmed
+            upsert_address_intel(address, lat, lng)
+    except Exception as ge:
+        log.warning(f'quick-navigate geocode failed: {ge}')
+
+    # Use or create today's route for this driver
+    route = db.execute(
+        "SELECT * FROM routes WHERE driver_id=? AND date=? ORDER BY id DESC LIMIT 1",
+        (session['driver_id'], today)
+    ).fetchone()
+
+    if not route:
+        route_name = f"Quick Route {today}"
+        if USE_PG:
+            route_id = db.execute(
+                "INSERT INTO routes (driver_id, driver_name, name, date) VALUES (%s,%s,%s,%s) RETURNING id",
+                (session['driver_id'], session['driver_name'], route_name, today)
+            ).fetchone()['id']
+        else:
+            db.execute(
+                "INSERT INTO routes (driver_id, driver_name, name, date) VALUES (?,?,?,?)",
+                (session['driver_id'], session['driver_name'], route_name, today)
+            )
+            db.commit()
+            route_id = db.execute(
+                "SELECT id FROM routes WHERE driver_id=? AND date=? ORDER BY id DESC LIMIT 1",
+                (session['driver_id'], today)
+            ).fetchone()['id']
+    else:
+        route_id = route['id']
+    db.commit()
+
+    # Get next stop number
+    last = db.execute(
+        "SELECT MAX(stop_number) as mx FROM stops WHERE route_id=?", (route_id,)
+    ).fetchone()
+    stop_num = (last['mx'] or 0) + 1
+
+    import secrets as _sec
+    token = _sec.token_urlsafe(12)
+
+    db.execute(
+        """INSERT INTO stops
+           (route_id, stop_number, address, customer_name, tracking, dest_lat, dest_lng, status, token)
+           VALUES (?,?,?,?,?,?,?,?,?)""",
+        (route_id, stop_num, address, name, tracking, lat, lng, 'en_route', token)
+    )
+    db.commit()
+
+    stop_id = db.execute(
+        "SELECT id FROM stops WHERE route_id=? AND stop_number=? LIMIT 1",
+        (route_id, stop_num)
+    ).fetchone()['id']
+    db.close()
+
+    return jsonify({
+        'ok':      True,
+        'stop_id': stop_id,
+        'redirect': url_for('stop_active', stop_id=stop_id),
+        'geocoded': bool(lat and lng),
+    })
+
 @app.route('/driver/scan/build-route', methods=['POST'])
 def scan_build_route():
     """Geocode all scanned packages and create an optimized route."""
