@@ -2395,186 +2395,43 @@ Include EVERY stop card visible on screen. Do not skip any.'''
 
 @app.route('/driver/scan/screenshots-to-pdf', methods=['POST'])
 def screenshots_to_pdf():
-    """Convert Speed X screenshots into a clean downloadable PDF address list."""
+    """Convert uploaded images directly into a multi-page PDF — one image per page."""
     if 'driver_id' not in session:
         return jsonify({'ok': False, 'error': 'not logged in'}), 401
 
     files = request.files.getlist('photos')
     if not files:
-        return jsonify({'ok': False, 'error': 'No screenshots provided'})
+        return jsonify({'ok': False, 'error': 'No images provided'})
 
-    if not ANTHROPIC_KEY:
-        return jsonify({'ok': False, 'error': 'Vision AI not configured on server'})
+    from PIL import Image as _PilImage
+    import io as _io
 
-    # ── Extract stops from every screenshot — try Loading Scan format first, fall back to standard format ──
-    all_stops = []
+    images = []
     for f in files:
         try:
-            img_bytes = f.read()
-            if not img_bytes:
+            raw = f.read()
+            if not raw:
                 continue
-            # Try Loading Scan format first
-            stops = _extract_loading_scan(img_bytes)
-            if not stops:
-                # Fall back to standard stop-card format
-                log.info('screenshots-to-pdf: loading scan returned 0 stops, trying standard format')
-                try:
-                    stops = extract_stops_from_image(img_bytes)
-                except Exception:
-                    stops = []
-            all_stops.extend(stops)
+            img = _PilImage.open(_io.BytesIO(raw))
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            images.append(img)
         except Exception as e:
-            log.warning(f'screenshots-to-pdf extract error: {e}')
+            log.warning(f'screenshots-to-pdf: skipping unreadable image: {e}')
 
-    if not all_stops:
-        return jsonify({'ok': False, 'error': 'No addresses found in screenshots. Upload Speed X Loading Scan or Stop Card screenshots.'})
+    if not images:
+        return jsonify({'ok': False, 'error': 'No valid images found — make sure you uploaded JPG or PNG files'})
 
-    # ── Deduplicate by tracking number (most reliable key), fallback to address ──
-    seen   = {}
-    for s in all_stops:
-        key = (s.get('tracking') or '').strip()
-        if not key:
-            key = (s.get('address') or '').strip().upper()
-        if key and key not in seen:
-            seen[key] = s
-
-    # Sort by stop number so PDF is in route order
-    unique_stops = sorted(seen.values(), key=lambda s: int(s.get('stop_num') or 0))
-
-    if not unique_stops:
-        return jsonify({'ok': False, 'error': 'No unique stops found after deduplication'})
-
-    # ── Generate PDF with reportlab ──
     try:
-        from reportlab.lib.pagesizes import letter
-        from reportlab.lib import colors
-        from reportlab.lib.units import inch
-        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-        from reportlab.lib.enums import TA_LEFT, TA_CENTER
-
-        buf = io.BytesIO()
-        doc = SimpleDocTemplate(
+        buf = _io.BytesIO()
+        images[0].save(
             buf,
-            pagesize=letter,
-            leftMargin=0.5*inch, rightMargin=0.5*inch,
-            topMargin=0.5*inch, bottomMargin=0.5*inch
+            format='PDF',
+            save_all=True,
+            append_images=images[1:],
+            resolution=150
         )
-
-        styles = getSampleStyleSheet()
-        navy   = colors.HexColor('#0f172a')
-        blue   = colors.HexColor('#3b82f6')
-        gray   = colors.HexColor('#64748b')
-        ltgray = colors.HexColor('#f8fafc')
-        green  = colors.HexColor('#10b981')
-        white  = colors.white
-
-        title_style = ParagraphStyle('title', fontSize=16, fontName='Helvetica-Bold',
-                                     textColor=white, alignment=TA_CENTER, leading=20)
-        sub_style   = ParagraphStyle('sub',   fontSize=10, fontName='Helvetica',
-                                     textColor=colors.HexColor('#94a3b8'), alignment=TA_CENTER)
-        addr_style  = ParagraphStyle('addr',  fontSize=10, fontName='Helvetica-Bold',
-                                     textColor=navy, leading=13)
-        name_style  = ParagraphStyle('name',  fontSize=9,  fontName='Helvetica',
-                                     textColor=gray, leading=11)
-        track_style = ParagraphStyle('track', fontSize=8,  fontName='Helvetica',
-                                     textColor=colors.HexColor('#94a3b8'), leading=10)
-        num_style   = ParagraphStyle('num',   fontSize=14, fontName='Helvetica-Bold',
-                                     textColor=navy, alignment=TA_CENTER)
-
-        today_str = datetime.now().strftime('%m/%d/%Y')
-
-        # Detect carrier(s) from stop data
-        carrier_names = list(dict.fromkeys(
-            s.get('carrier', '').strip()
-            for s in unique_stops if s.get('carrier', '').strip())) or ['Speed X']
-        carrier_label = ' / '.join(carrier_names[:3])
-
-        # Detect route ID from first stop's tracking prefix if possible
-        route_id = ''
-        for s in unique_stops:
-            t = s.get('tracking', '')
-            if t.startswith('SPXDTW'):
-                route_id = t[:12]
-                break
-
-        story = [
-            Paragraph(f'UNIT — Route Address Export', title_style),
-        ]
-        story.append(Paragraph(
-            f'{len(unique_stops)} stops  •  {today_str}  •  {carrier_label}{("  •  " + route_id) if route_id else ""}',
-            sub_style
-        ))
-        story.append(Spacer(1, 0.2*inch))
-
-        # Build table rows
-        table_data = [[
-            Paragraph('#', ParagraphStyle('hdr', fontSize=9, fontName='Helvetica-Bold',
-                                          textColor=white, alignment=TA_CENTER)),
-            Paragraph('ADDRESS', ParagraphStyle('hdr', fontSize=9, fontName='Helvetica-Bold', textColor=white)),
-            Paragraph('CUSTOMER', ParagraphStyle('hdr', fontSize=9, fontName='Helvetica-Bold', textColor=white)),
-            Paragraph('TRACKING', ParagraphStyle('hdr', fontSize=9, fontName='Helvetica-Bold', textColor=white)),
-        ]]
-
-        for s in unique_stops:
-            stop_num  = str(s.get('stop_num') or '').strip()
-            raw_addr  = (s.get('address') or '').strip()
-            unit      = (s.get('unit') or '').strip()
-            name      = (s.get('name') or '').strip()
-            tracking  = (s.get('tracking') or '').strip()
-
-            # Build clean address: append unit if not already present as standalone token
-            import re as _re
-            unit_already_in = bool(_re.search(r'(?<![\d])' + _re.escape(unit) + r'(?![\d])', raw_addr)) if unit else False
-            if unit and not unit_already_in:
-                addr_display = f'{raw_addr}, Apt {unit}'
-            else:
-                addr_display = raw_addr
-
-            table_data.append([
-                Paragraph(stop_num, num_style),
-                Paragraph(addr_display, addr_style),
-                Paragraph(name, name_style),
-                Paragraph(tracking[:24] if tracking else '', track_style),
-            ])
-
-        col_widths = [0.45*inch, 2.9*inch, 1.5*inch, 2.15*inch]
-        tbl = Table(table_data, colWidths=col_widths, repeatRows=1)
-
-        row_count = len(table_data)
-        row_styles = [
-            # Header row
-            ('BACKGROUND',  (0,0), (-1,0),  navy),
-            ('TEXTCOLOR',   (0,0), (-1,0),  white),
-            ('FONTNAME',    (0,0), (-1,0),  'Helvetica-Bold'),
-            ('FONTSIZE',    (0,0), (-1,0),  9),
-            ('TOPPADDING',  (0,0), (-1,0),  8),
-            ('BOTTOMPADDING',(0,0),(-1,0),  8),
-            # Data rows
-            ('FONTSIZE',    (0,1), (-1,-1), 9),
-            ('TOPPADDING',  (0,1), (-1,-1), 6),
-            ('BOTTOMPADDING',(0,1),(-1,-1), 6),
-            ('VALIGN',      (0,0), (-1,-1), 'MIDDLE'),
-            ('LINEBELOW',   (0,0), (-1,-1), 0.5, colors.HexColor('#e2e8f0')),
-            ('GRID',        (0,0), (-1,-1), 0.3, colors.HexColor('#e2e8f0')),
-        ]
-        # Alternating row shading
-        for row_i in range(1, row_count):
-            if row_i % 2 == 0:
-                row_styles.append(('BACKGROUND', (0,row_i), (-1,row_i), ltgray))
-
-        tbl.setStyle(TableStyle(row_styles))
-        story.append(tbl)
-        story.append(Spacer(1, 0.15*inch))
-        story.append(Paragraph(
-            f'Generated by UNIT — unit-6gxn.onrender.com  •  {today_str}',
-            ParagraphStyle('footer', fontSize=7, textColor=gray, alignment=TA_CENTER)
-        ))
-
-        doc.build(story)
         buf.seek(0)
-
-        from flask import send_file
         today_file = datetime.now().strftime('%Y%m%d')
         return send_file(
             buf,
@@ -2583,8 +2440,8 @@ def screenshots_to_pdf():
             download_name=f'speedx_route_{today_file}.pdf'
         )
     except Exception as e:
-        log.error(f'screenshots-to-pdf PDF gen error: {traceback.format_exc()}')
-        return jsonify({'ok': False, 'error': f'PDF generation failed: {str(e)}'})
+        log.error(f'screenshots-to-pdf error: {traceback.format_exc()}')
+        return jsonify({'ok': False, 'error': f'PDF build failed: {str(e)}'})
 
 
 @app.route('/driver/scan/clear', methods=['POST'])

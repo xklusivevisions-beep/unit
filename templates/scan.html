@@ -356,11 +356,11 @@
 
   <!-- Screenshot to PDF Converter -->
   <div id="pdf-converter-panel" style="background:#0f172a;border:1px solid #374151;border-radius:16px;padding:14px 16px;margin-bottom:14px;">
-    <h3 style="font-size:0.9rem;font-weight:700;color:#e2e8f0;margin:0 0 6px;">📄 Convert Screenshots → PDF</h3>
-    <p style="font-size:0.75rem;color:#6b7280;margin:0 0 10px;">Upload Speed X screenshots to get a clean PDF with all addresses — useful for records or sharing your route.</p>
-    <input type="file" id="pdf-converter-input" accept="image/*,.pdf,application/pdf" multiple style="display:none" onchange="handlePdfConverter(this)">
+    <h3 style="font-size:0.9rem;font-weight:700;color:#e2e8f0;margin:0 0 6px;">📄 Screenshots → PDF</h3>
+    <p style="font-size:0.75rem;color:#6b7280;margin:0 0 10px;">Upload any screenshots — they get packed into a single PDF instantly. One image per page, no processing required.</p>
+    <input type="file" id="pdf-converter-input" accept="image/*" multiple style="display:none" onchange="handlePdfConverter(this)">
     <label for="pdf-converter-input" style="display:block;width:100%;padding:10px;background:#1e293b;color:#94a3b8;border:1px solid #334155;border-radius:10px;font-weight:600;font-size:0.88rem;cursor:pointer;text-align:center;box-sizing:border-box;">
-      📸 Upload Screenshots → Download PDF
+      📸 Select Screenshots → Build PDF
     </label>
     <div id="pdf-converter-status" style="display:none;text-align:center;padding:10px;color:#94a3b8;font-size:0.82rem;"></div>
   </div>
