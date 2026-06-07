@@ -4235,6 +4235,153 @@ def health():
     except Exception as e:
         return jsonify({'status': 'error', 'msg': str(e)}), 500
 
+# ─── ROUTE LOG / PAYROLL ───────────────────────────────────────────────────
+
+@app.route('/driver/route-log')
+def route_log():
+    """Daily route log — payroll tracker. No screenshots needed."""
+    if 'driver_id' not in session:
+        return redirect(url_for('driver_login'))
+
+    db        = get_db()
+    driver_id = session['driver_id']
+    driver    = db.execute("SELECT * FROM drivers WHERE id=?", (driver_id,)).fetchone()
+    pay_rate  = float(driver['pay_rate']) if driver and driver['pay_rate'] else 1.50
+
+    # Daily breakdown — last 30 days
+    days = db.execute("""
+        SELECT
+            r.date,
+            COUNT(s.id)                                              AS total,
+            SUM(CASE WHEN s.status='delivered' THEN 1 ELSE 0 END)   AS delivered,
+            SUM(CASE WHEN s.status='failed'    THEN 1 ELSE 0 END)   AS failed,
+            SUM(CASE WHEN s.status='pending'   THEN 1 ELSE 0 END)   AS pending,
+            r.id AS route_id,
+            r.name AS route_name
+        FROM routes r
+        LEFT JOIN stops s ON s.route_id = r.id
+        WHERE r.driver_id = ?
+        GROUP BY r.date
+        ORDER BY r.date DESC
+        LIMIT 30
+    """, (driver_id,)).fetchall()
+
+    # Manual log entries (for days without scan data)
+    try:
+        manual = db.execute("""
+            SELECT * FROM route_manual_log
+            WHERE driver_id=?
+            ORDER BY date DESC LIMIT 30
+        """, (driver_id,)).fetchall()
+    except Exception:
+        manual = []
+
+    # This week totals (Mon–today)
+    from datetime import date as _date, timedelta
+    today      = _date.today()
+    week_start = (today - timedelta(days=today.weekday())).strftime('%Y-%m-%d')
+    week_row   = db.execute("""
+        SELECT
+            SUM(CASE WHEN s.status='delivered' THEN 1 ELSE 0 END) AS week_delivered,
+            COUNT(s.id) AS week_total
+        FROM routes r
+        LEFT JOIN stops s ON s.route_id = r.id
+        WHERE r.driver_id=? AND r.date >= ?
+    """, (driver_id, week_start)).fetchone()
+
+    db.close()
+
+    week_delivered = week_row['week_delivered'] or 0
+    week_total     = week_row['week_total']     or 0
+    week_earnings  = round(week_delivered * pay_rate, 2)
+
+    # Build combined day list with earnings
+    log_days = []
+    for d in days:
+        delivered = d['delivered'] or 0
+        log_days.append({
+            'date':       d['date'],
+            'total':      d['total'] or 0,
+            'delivered':  delivered,
+            'failed':     d['failed'] or 0,
+            'pending':    d['pending'] or 0,
+            'earnings':   round(delivered * pay_rate, 2),
+            'route_name': d['route_name'] or '',
+            'source':     'scan'
+        })
+
+    for m in manual:
+        log_days.append({
+            'date':      m['date'],
+            'total':     m['packages'] or 0,
+            'delivered': m['packages'] or 0,
+            'failed':    0,
+            'pending':   0,
+            'earnings':  round((m['packages'] or 0) * pay_rate, 2),
+            'route_name': m['notes'] or 'Manual entry',
+            'source':    'manual'
+        })
+
+    # Sort combined by date desc
+    log_days.sort(key=lambda x: x['date'], reverse=True)
+
+    return render_template('route_log.html',
+                           log_days=log_days,
+                           pay_rate=pay_rate,
+                           week_delivered=week_delivered,
+                           week_total=week_total,
+                           week_earnings=week_earnings,
+                           week_start=week_start,
+                           today=today.strftime('%Y-%m-%d'))
+
+
+@app.route('/driver/route-log/manual', methods=['POST'])
+def route_log_manual():
+    """Add a manual day entry when scan data wasn't captured."""
+    if 'driver_id' not in session:
+        return redirect(url_for('driver_login'))
+
+    date_val = request.form.get('date', '').strip()
+    packages = request.form.get('packages', '0').strip()
+    notes    = request.form.get('notes', '').strip()
+
+    if not date_val or not packages.isdigit():
+        return redirect(url_for('route_log'))
+
+    db = get_db()
+    # Create the table if first time
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS route_manual_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            driver_id INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            packages INTEGER DEFAULT 0,
+            notes TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    db.execute(
+        "INSERT INTO route_manual_log (driver_id, date, packages, notes) VALUES (?,?,?,?)",
+        (session['driver_id'], date_val, int(packages), notes)
+    )
+    db.commit()
+    db.close()
+    return redirect(url_for('route_log'))
+
+
+@app.route('/driver/route-log/manual/<int:entry_id>/delete', methods=['POST'])
+def route_log_manual_delete(entry_id):
+    """Delete a manual entry."""
+    if 'driver_id' not in session:
+        return redirect(url_for('driver_login'))
+    db = get_db()
+    db.execute("DELETE FROM route_manual_log WHERE id=? AND driver_id=?",
+               (entry_id, session['driver_id']))
+    db.commit()
+    db.close()
+    return redirect(url_for('route_log'))
+
+
 # Run init_db in a background thread so gunicorn binds to the port immediately.
 # On free-tier Render, cold PostgreSQL wakes slowly and blocks gunicorn startup
 # causing Render's port scan to time out and roll back the deploy.
