@@ -415,27 +415,35 @@ ZONE_COLORS = {
     'D': {'hex': '#f59e0b', 'name': 'Yellow', 'emoji': '🟡'},
     'E': {'hex': '#8b5cf6', 'name': 'Purple', 'emoji': '🟣'},
     'F': {'hex': '#f97316', 'name': 'Orange', 'emoji': '🟠'},
+    'G': {'hex': '#06b6d4', 'name': 'Cyan',   'emoji': '🩵'},
+    'H': {'hex': '#ec4899', 'name': 'Pink',   'emoji': '🩷'},
 }
 
 def calc_num_zones_adaptive(geocoded):
     """
-    Determine zone count from actual geographic spread of stops — NOT package count.
-    Two stops 3 miles apart = 2 zones regardless of whether there are 2 or 200 packages.
+    Determine zone count from geographic spread + package count.
     Calibrated for Detroit ZIP code scale (~3-4 mile diameter per zip).
+    Also scales up zone count for large routes so no single zone is overwhelming.
     """
     n = len(geocoded)
     if n < 2: return 1
     lats = [p['lat'] for p in geocoded]
     lngs = [p['lng'] for p in geocoded]
-    # Diagonal of bounding box = worst-case geographic spread
     span = geodesic((min(lats), min(lngs)), (max(lats), max(lngs))).miles
-    if span < 0.5:   k = 1   # tight cluster, same neighborhood block
-    elif span < 1.2: k = 2   # across a neighborhood
-    elif span < 2.5: k = 3   # half a zip code
-    elif span < 4.0: k = 4   # full zip like 48202 (~3.5mi diagonal)
-    elif span < 6.0: k = 5   # multi-zip
-    else:            k = 6   # large multi-zip route
-    return min(k, n)          # never more zones than packages
+    # Base zone count from geographic spread
+    if span < 0.5:   k = 1
+    elif span < 1.2: k = 2
+    elif span < 2.5: k = 3
+    elif span < 4.0: k = 4
+    elif span < 6.0: k = 5
+    elif span < 9.0: k = 6
+    elif span < 12.0:k = 7
+    else:            k = 8
+    # Scale up if route is large — no zone should exceed ~20 stops
+    # (keeps each zone manageable and evenly distributed)
+    min_by_count = math.ceil(n / 20)
+    k = max(k, min_by_count)
+    return min(k, n, 8)    # never more than 8 zones or more than packages
 
 
 def _dsq(a, b):
@@ -497,9 +505,16 @@ def _mark_unknown(pkgs):
 
 def cluster_packages_geo(geocoded):
     """
-    Step 1 of optimized routing: cluster packages into geographic zones by k-means.
-    Pulls historical address_intel seeds for the route's zip codes to stabilize
-    zone boundaries across routes — gets smarter with every delivery.
+    Smart adaptive zone clustering.
+
+    Day 1  — pure geographic k-means (best guess).
+    Day 3+ — high-confidence addresses are PINNED to their historical zone;
+             floating addresses cluster around the pinned anchors.
+             A balance pass then evens out zone sizes so no zone is overloaded.
+
+    Gets smarter with every delivery. By day 4-5 of the same route,
+    zone boundaries are essentially locked in.
+
     Returns dict: {cluster_index: [pkg, ...]} and cluster_letter map.
     """
     n = len(geocoded)
@@ -509,25 +524,112 @@ def cluster_packages_geo(geocoded):
     if k <= 1 or n < 2:
         return {0: geocoded}, {0: 'A'}
 
-    # Pull historical centroids for this route's zip codes
-    zips = set(filter(None, (_extract_zip(p.get('address', '')) for p in geocoded)))
-    hist_seeds = get_historical_centroids_for_zips(zips) if zips else []
+    # ── Step 1: Get address-level confidence ───────────────────────────
+    addresses  = [p.get('address', '') for p in geocoded]
+    confidence = get_address_zone_confidence(addresses)
 
-    assignments = kmeans_geo(geocoded, k, seed_centroids=hist_seeds if len(hist_seeds) >= k else None)
-    groups = {}
-    for i, p in enumerate(geocoded):
-        groups.setdefault(assignments[i], []).append(p)
-    # Zone order: nearest-neighbor on centroids starting from first geocoded pkg
-    centroids = [
+    pinned_pkgs   = []   # high-confidence: zone known
+    floating_pkgs = []   # new/inconsistent: needs clustering
+    for p in geocoded:
+        key = _normalize_addr_key(p.get('address', ''))
+        info = confidence.get(key)
+        if info and info['pinned']:
+            p['_pinned_zone']      = info['zone']
+            p['_zone_confidence']  = info['confidence']
+            p['_zone_count']       = info['count']
+            pinned_pkgs.append(p)
+        else:
+            p['_pinned_zone']      = None
+            p['_zone_confidence']  = info['confidence'] if info else 0.0
+            p['_zone_count']       = info['count'] if info else 0
+            floating_pkgs.append(p)
+
+    pinned_ratio = len(pinned_pkgs) / n
+    log.info(f'[zone_learn] {len(pinned_pkgs)}/{n} pinned ({pinned_ratio:.0%}), '
+             f'{len(floating_pkgs)} floating, k={k}')
+
+    # ── Step 2: Build initial groups ───────────────────────────────
+    # Build zone-letter → cluster-index map from pinned packages
+    zone_to_cluster = {}   # historical zone letter → cluster int
+    cluster_to_pkgs = {}   # cluster int → [pkg, ...]
+    next_cluster    = [0]
+
+    def _get_or_create_cluster(zone_letter):
+        if zone_letter not in zone_to_cluster:
+            zone_to_cluster[zone_letter] = next_cluster[0]
+            cluster_to_pkgs[next_cluster[0]] = []
+            next_cluster[0] += 1
+        return zone_to_cluster[zone_letter]
+
+    for p in pinned_pkgs:
+        c = _get_or_create_cluster(p['_pinned_zone'])
+        cluster_to_pkgs[c].append(p)
+
+    # ── Step 3: Cluster floating packages ───────────────────────────
+    if floating_pkgs:
+        if pinned_pkgs and pinned_ratio >= 0.4:
+            # Enough anchors: cluster floaters around pinned centroids
+            pinned_centroids = [
+                {'lat': sum(p['lat'] for p in pkgs) / len(pkgs),
+                 'lng': sum(p['lng'] for p in pkgs) / len(pkgs)}
+                for pkgs in cluster_to_pkgs.values() if pkgs
+            ]
+            # Create extra clusters if needed to reach target k
+            extra_k = max(0, k - len(cluster_to_pkgs))
+            if extra_k > 0 and len(floating_pkgs) >= extra_k:
+                # Add new clusters for geographic areas not yet covered by pinned anchors
+                extra_assignments = kmeans_geo(floating_pkgs, extra_k)
+                extra_groups = {}
+                for i, p in enumerate(floating_pkgs):
+                    extra_groups.setdefault(extra_assignments[i], []).append(p)
+                for eg in extra_groups.values():
+                    if eg:
+                        c = next_cluster[0]
+                        cluster_to_pkgs[c] = eg
+                        next_cluster[0] += 1
+            else:
+                # Assign each floater to nearest pinned centroid
+                existing_clusters = [cid for cid, pkgs in cluster_to_pkgs.items() if pkgs]
+                existing_centroids = [
+                    {'cluster': cid,
+                     'lat': sum(p['lat'] for p in cluster_to_pkgs[cid]) / len(cluster_to_pkgs[cid]),
+                     'lng': sum(p['lng'] for p in cluster_to_pkgs[cid]) / len(cluster_to_pkgs[cid])}
+                    for cid in existing_clusters
+                ]
+                for p in floating_pkgs:
+                    nearest_c = min(existing_centroids, key=lambda c: _dsq(p, c))
+                    cluster_to_pkgs[nearest_c['cluster']].append(p)
+        else:
+            # Not enough pinned history — pure k-means on all packages
+            zips       = set(filter(None, (_extract_zip(p.get('address', '')) for p in geocoded)))
+            hist_seeds = get_historical_centroids_for_zips(zips) if zips else []
+            assignments = kmeans_geo(
+                geocoded, k,
+                seed_centroids=hist_seeds if len(hist_seeds) >= k else None
+            )
+            cluster_to_pkgs = {}
+            for i, p in enumerate(geocoded):
+                cluster_to_pkgs.setdefault(assignments[i], []).append(p)
+
+    # Remove empty clusters
+    groups = {k: v for k, v in cluster_to_pkgs.items() if v}
+
+    # ── Step 4: Balance pass ───────────────────────────────────
+    # Only balance floating packages (don't move pinned anchors)
+    if len(groups) > 1 and floating_pkgs:
+        groups = _balance_zones(groups, max_ratio=1.4)
+
+    # ── Step 5: Order zones by route geography ─────────────────────
+    centroids_list = [
         {'cluster': c,
          'lat': sum(p['lat'] for p in pts) / len(pts),
          'lng': sum(p['lng'] for p in pts) / len(pts)}
         for c, pts in groups.items()
     ]
-    start = {'lat': geocoded[0]['lat'], 'lng': geocoded[0]['lng']}
-    ordered = []
-    remaining = list(centroids)
-    cur = start
+    start     = {'lat': geocoded[0]['lat'], 'lng': geocoded[0]['lng']}
+    ordered   = []
+    remaining = list(centroids_list)
+    cur       = start
     while remaining:
         nearest = min(remaining, key=lambda c: _dsq(cur, c))
         ordered.append(nearest['cluster'])
@@ -603,6 +705,16 @@ def build_optimized_route(geocoded):
         total_dist += dist_m
         total_dur  += dur_s
         for local_num, p in enumerate(ordered, 1):
+            # Confidence badge: locked (pinned) vs estimated
+            conf        = p.get('_zone_confidence', 0.0)
+            zone_count  = p.get('_zone_count', 0)
+            is_pinned   = p.get('_pinned_zone') is not None
+            if is_pinned:
+                zone_status = 'locked'      # 3+ consistent deliveries
+            elif zone_count >= 1:
+                zone_status = 'learning'    # seen before, building confidence
+            else:
+                zone_status = 'new'         # first time at this address
             p.update({
                 'zone_letter':    letter,
                 'zone_num':       local_num,
@@ -612,7 +724,10 @@ def build_optimized_route(geocoded):
                 'bag_num':        math.ceil(local_num / BAG_SIZE),
                 'bag_label':      f'{letter}-Bag{math.ceil(local_num / BAG_SIZE)}',
                 'delivery_order': delivery_counter,
-                'load_position':  0,  # filled in below
+                'load_position':  0,
+                'zone_confidence':round(conf * 100),
+                'zone_status':    zone_status,
+                'zone_deliveries':zone_count,
             })
             result.append(p)
             delivery_counter += 1
@@ -885,6 +1000,108 @@ def get_historical_centroids_for_zips(zip_codes):
     except Exception as e:
         log.warning(f'[address_intel] centroid query error: {e}')
         return []
+
+def get_address_zone_confidence(addresses):
+    """
+    For a list of raw address strings, return a confidence map:
+      { normalized_addr: { 'zone': 'B', 'confidence': 0.85, 'count': 6,
+                           'pinned': True, 'lat': x, 'lng': y } }
+
+    Pinned = delivered 3+ times AND top zone appears >= 60% of the time.
+    These addresses act as anchors for the clustering step —
+    they don't move; floating addresses cluster around them.
+    """
+    if not addresses:
+        return {}
+    from collections import Counter
+    keys = [_normalize_addr_key(a) for a in addresses if a]
+    if not keys:
+        return {}
+    try:
+        db  = get_db()
+        ph  = ','.join('?' * len(keys))
+        rows = db.execute(
+            f"""SELECT address, lat, lng, delivery_count, zone_history
+                FROM address_intel WHERE address IN ({ph})""",
+            keys
+        ).fetchall()
+        db.close()
+    except Exception as e:
+        log.warning(f'[zone_confidence] query error: {e}')
+        return {}
+
+    result = {}
+    for r in rows:
+        try:
+            hist  = json.loads(r['zone_history'] or '[]')
+        except Exception:
+            hist  = []
+        count = r['delivery_count'] or 0
+        if not hist:
+            continue
+        counter      = Counter(hist)
+        top_zone, top_freq = counter.most_common(1)[0]
+        confidence   = top_freq / len(hist)
+        pinned       = count >= 3 and confidence >= 0.60
+        result[r['address']] = {
+            'zone':       top_zone,
+            'confidence': round(confidence, 2),
+            'count':      count,
+            'pinned':     pinned,
+            'lat':        r['lat'],
+            'lng':        r['lng'],
+        }
+    return result
+
+
+def _balance_zones(groups, max_ratio=1.5):
+    """
+    After k-means, redistribute packages from over-full zones to under-full ones.
+    A zone is over-full if it has more than (avg * max_ratio) packages.
+    Moves border packages (furthest from their zone centroid) to the nearest
+    under-full zone. Produces more even load distribution.
+    """
+    if len(groups) <= 1:
+        return groups
+
+    total = sum(len(v) for v in groups.values())
+    avg   = total / len(groups)
+    target_max = math.ceil(avg * max_ratio)
+
+    # Compute current centroids
+    def centroid(pkgs):
+        if not pkgs: return {'lat': 0, 'lng': 0}
+        return {'lat': sum(p['lat'] for p in pkgs) / len(pkgs),
+                'lng': sum(p['lng'] for p in pkgs) / len(pkgs)}
+
+    max_passes = 5
+    for _ in range(max_passes):
+        changed = False
+        centroids = {k: centroid(v) for k, v in groups.items()}
+        over_full = [k for k, v in groups.items() if len(v) > target_max]
+        if not over_full:
+            break
+        for big_k in over_full:
+            pkgs  = groups[big_k]
+            c     = centroids[big_k]
+            # Sort by distance from centroid desc (border packages first)
+            pkgs.sort(key=lambda p: _dsq(p, c), reverse=True)
+            under_keys = [k for k, v in groups.items() if k != big_k and len(v) < avg]
+            if not under_keys:
+                break
+            while len(groups[big_k]) > target_max and under_keys:
+                pkg = groups[big_k][0]  # furthest from centroid
+                # Find nearest under-full zone
+                target_k = min(under_keys, key=lambda k: _dsq(pkg, centroids[k]))
+                groups[big_k].remove(pkg)
+                groups[target_k].append(pkg)
+                changed = True
+                if len(groups[target_k]) >= avg:
+                    under_keys = [k for k, v in groups.items() if k != big_k and len(v) < avg]
+        if not changed:
+            break
+    return groups
+
 
 def nearest_intel_zone(lat, lng, radius_miles=0.25):
     """
