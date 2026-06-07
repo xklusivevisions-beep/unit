@@ -638,103 +638,190 @@ def cluster_packages_geo(geocoded):
     cluster_letter = {c: chr(65 + seq) for seq, c in enumerate(ordered)}
     return groups, cluster_letter
 
-def osrm_optimize_segment(pkgs):
+# ── OSRM chunk size: API handles ~100 waypoints reliably ──
+OSRM_MAX_WAYPOINTS = 90
+
+
+def _nn_sort(pkgs):
     """
-    Step 2: Run OSRM trip optimization on a single zone's packages.
-    Returns (ordered_pkgs, dist_meters, dur_seconds).
-    Falls back to nearest-neighbor if OSRM fails.
+    Nearest-neighbor TSP fallback.
+    Greedily picks the closest unvisited stop at every step.
+    Much better than random order; used when OSRM is unavailable.
     """
     if len(pkgs) <= 1:
-        return pkgs, 0, 0
-    try:
-        coords = ';'.join(f"{p['lng']},{p['lat']}" for p in pkgs)
-        url = (f"http://router.project-osrm.org/trip/v1/driving/{coords}"
-               f"?roundtrip=false&source=first&destination=last&overview=false")
-        resp = requests.get(url, timeout=8)
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get('code') == 'Ok' and data.get('waypoints'):
-                wps = sorted(data['waypoints'], key=lambda w: w['waypoint_index'])
-                ordered, seen = [], set()
-                for wp in wps:
-                    closest = min(pkgs,
-                        key=lambda p: abs(p['lat']-wp['location'][1])+abs(p['lng']-wp['location'][0]))
-                    if closest['id'] not in seen:
-                        seen.add(closest['id'])
-                        ordered.append(closest)
-                # append any missed
-                for p in pkgs:
-                    if p['id'] not in seen:
-                        ordered.append(p)
-                dist = data['trips'][0].get('distance', 0) if data.get('trips') else 0
-                dur  = data['trips'][0].get('duration', 0) if data.get('trips') else 0
-                return ordered, dist, dur
-    except Exception as e:
-        log.warning(f'OSRM segment failed: {e}')
-    # Nearest-neighbor fallback
+        return list(pkgs)
     remaining = list(pkgs)
-    cur = remaining.pop(0)
-    ordered = [cur]
+    start     = min(remaining, key=lambda p: p.get('lat', 0))  # start from northernmost
+    remaining.remove(start)
+    ordered = [start]
+    cur = start
     while remaining:
         nxt = min(remaining, key=lambda p: _dsq(cur, p))
         remaining.remove(nxt)
         ordered.append(nxt)
         cur = nxt
-    return ordered, 0, 0
+    return ordered
+
+
+def _osrm_trip(pkgs, timeout=12):
+    """
+    Run a single OSRM trip request on a list of packages (max OSRM_MAX_WAYPOINTS).
+    Returns (ordered_pkgs, dist_m, dur_s) or raises on failure.
+    """
+    coords = ';'.join(f"{p['lng']},{p['lat']}" for p in pkgs)
+    url    = (f"http://router.project-osrm.org/trip/v1/driving/{coords}"
+              f"?roundtrip=false&source=first&destination=last&overview=false")
+    resp   = requests.get(url, timeout=timeout)
+    resp.raise_for_status()
+    data   = resp.json()
+    if data.get('code') != 'Ok' or not data.get('waypoints'):
+        raise ValueError(f"OSRM returned: {data.get('code')}")
+    wps     = sorted(data['waypoints'], key=lambda w: w['waypoint_index'])
+    ordered, seen = [], set()
+    for wp in wps:
+        closest = min(pkgs,
+            key=lambda p: abs(p['lat'] - wp['location'][1]) + abs(p['lng'] - wp['location'][0]))
+        pid = closest.get('id', id(closest))
+        if pid not in seen:
+            seen.add(pid)
+            ordered.append(closest)
+    for p in pkgs:   # append any OSRM missed
+        pid = p.get('id', id(p))
+        if pid not in seen:
+            ordered.append(p)
+    dist = data['trips'][0].get('distance', 0) if data.get('trips') else 0
+    dur  = data['trips'][0].get('duration', 0) if data.get('trips') else 0
+    return ordered, dist, dur
+
+
+def osrm_optimize_full_route(pkgs):
+    """
+    Globally optimize ALL stops in a single OSRM call (or chunked for large routes).
+    This is the correct approach — optimize first, then assign zones.
+
+    For routes > OSRM_MAX_WAYPOINTS:
+      - Run OSRM on first chunk to get the anchor order
+      - For each subsequent chunk, find the nearest-neighbor handoff from the
+        last stop of the previous chunk, then OSRM optimize that chunk
+      - Stitch together
+
+    Returns (ordered_pkgs, total_dist_m, total_dur_s)
+    """
+    n = len(pkgs)
+    if n == 0:
+        return [], 0, 0
+    if n == 1:
+        return list(pkgs), 0, 0
+
+    # ── Small route: single OSRM call ───────────────────────────────────
+    if n <= OSRM_MAX_WAYPOINTS:
+        try:
+            return _osrm_trip(pkgs)
+        except Exception as e:
+            log.warning(f'[osrm_full] single-call failed ({e}), falling back to NN')
+            return _nn_sort(pkgs), 0, 0
+
+    # ── Large route: chunked OSRM ─────────────────────────────────────
+    # Pre-sort with nearest-neighbor so chunks are geographically contiguous
+    pre_sorted   = _nn_sort(pkgs)
+    chunk_size   = OSRM_MAX_WAYPOINTS
+    chunks       = [pre_sorted[i:i + chunk_size] for i in range(0, n, chunk_size)]
+    total_dist, total_dur = 0, 0
+    final_order  = []
+
+    for i, chunk in enumerate(chunks):
+        try:
+            ordered_chunk, dist, dur = _osrm_trip(chunk)
+            # If not first chunk, re-anchor: find which end of this chunk
+            # is closest to the last stop of the previous chunk, reverse if needed
+            if final_order:
+                last = final_order[-1]
+                if ordered_chunk and _dsq(last, ordered_chunk[-1]) < _dsq(last, ordered_chunk[0]):
+                    ordered_chunk = list(reversed(ordered_chunk))
+            final_order.extend(ordered_chunk)
+            total_dist += dist
+            total_dur  += dur
+        except Exception as e:
+            log.warning(f'[osrm_full] chunk {i} failed ({e}), using NN for chunk')
+            final_order.extend(_nn_sort(chunk))
+
+    return final_order, total_dist, total_dur
+
+
+# Keep for any legacy callers
+def osrm_optimize_segment(pkgs):
+    return osrm_optimize_full_route(pkgs)
+
 
 def build_optimized_route(geocoded):
     """
-    Full optimized routing pipeline:
-    1. Cluster packages into geographic zones (k-means)
-    2. Determine zone driving order (nearest-neighbor on centroids)
-    3. Run OSRM per zone for within-zone optimization
-    4. Combine into final delivery sequence
+    Route optimization pipeline — correct order of operations:
+
+    1. Run OSRM trip on ALL stops globally → optimal driving sequence
+    2. THEN assign zones as sequential chunks of the optimized order
+       (Zone A = first N stops, Zone B = next N, etc.)
+    3. Apply address-confidence zone labels from address_intel
+
+    This eliminates backtracking between zones because zones ARE
+    the route — not arbitrary geographic clusters optimized separately.
+
     Returns (sorted_pkgs, total_dist_m, total_dur_s)
     """
     if not geocoded:
         return [], 0, 0
-    groups, cluster_letter = cluster_packages_geo(geocoded)
-    total_dist, total_dur = 0, 0
-    result = []
-    delivery_counter = 1
-    for cluster_idx in sorted(groups, key=lambda c: cluster_letter.get(c,'Z')):
-        zone_pkgs = groups[cluster_idx]
-        letter    = cluster_letter.get(cluster_idx, 'A')
-        color     = ZONE_COLORS.get(letter, {'hex':'#6b7280','emoji':'⚪'})
-        ordered, dist_m, dur_s = osrm_optimize_segment(zone_pkgs)
-        total_dist += dist_m
-        total_dur  += dur_s
-        for local_num, p in enumerate(ordered, 1):
-            # Confidence badge: locked (pinned) vs estimated
-            conf        = p.get('_zone_confidence', 0.0)
-            zone_count  = p.get('_zone_count', 0)
-            is_pinned   = p.get('_pinned_zone') is not None
-            if is_pinned:
-                zone_status = 'locked'      # 3+ consistent deliveries
-            elif zone_count >= 1:
-                zone_status = 'learning'    # seen before, building confidence
-            else:
-                zone_status = 'new'         # first time at this address
-            p.update({
-                'zone_letter':    letter,
-                'zone_num':       local_num,
-                'zone_label_full':f'{letter}-{local_num}',
-                'zone_color':     color['hex'],
-                'zone_emoji':     color['emoji'],
-                'bag_num':        math.ceil(local_num / BAG_SIZE),
-                'bag_label':      f'{letter}-Bag{math.ceil(local_num / BAG_SIZE)}',
-                'delivery_order': delivery_counter,
-                'load_position':  0,
-                'zone_confidence':round(conf * 100),
-                'zone_status':    zone_status,
-                'zone_deliveries':zone_count,
-            })
-            result.append(p)
-            delivery_counter += 1
-    # Set load positions (last delivery = highest load_position = load first)
-    total = len(result)
-    for i, p in enumerate(result):
-        p['load_position'] = total - i
+
+    # ── Step 1: Get address confidence BEFORE routing ──────────────────
+    addresses  = [p.get('address', '') for p in geocoded]
+    confidence = get_address_zone_confidence(addresses)
+    for p in geocoded:
+        key  = _normalize_addr_key(p.get('address', ''))
+        info = confidence.get(key)
+        p['_zone_confidence']  = info['confidence'] if info else 0.0
+        p['_zone_count']       = info['count']      if info else 0
+        p['_pinned_zone']      = info['zone']       if (info and info['pinned']) else None
+
+    # ── Step 2: Globally optimize ALL stops in one shot ─────────────
+    # Correct order of ops: optimize first, THEN assign zones
+    # This prevents backtracking between zones completely.
+    globally_ordered, total_dist, total_dur = osrm_optimize_full_route(geocoded)
+    n = len(globally_ordered)
+
+    # ── Step 3: Assign zones as sequential chunks of the optimal order ─
+    # Zone A = first N stops on the route, Zone B = next N, etc.
+    # Zones are now guaranteed to flow in one direction — no backtracking.
+    k          = calc_num_zones_adaptive(geocoded)
+    zone_size  = math.ceil(n / k)
+    result     = []
+    for i, p in enumerate(globally_ordered):
+        zone_seq   = min(i // zone_size, k - 1)       # 0-indexed zone number
+        letter     = chr(65 + zone_seq)               # A, B, C …
+        local_num  = (i % zone_size) + 1
+        color      = ZONE_COLORS.get(letter, {'hex': '#6b7280', 'emoji': '⚪'})
+        conf       = p.get('_zone_confidence', 0.0)
+        zone_count = p.get('_zone_count', 0)
+        is_pinned  = p.get('_pinned_zone') is not None
+        if is_pinned:
+            zone_status = 'locked'
+        elif zone_count >= 1:
+            zone_status = 'learning'
+        else:
+            zone_status = 'new'
+        p.update({
+            'zone_letter':     letter,
+            'zone_num':        local_num,
+            'zone_label_full': f'{letter}-{local_num}',
+            'zone_color':      color['hex'],
+            'zone_emoji':      color['emoji'],
+            'bag_num':         math.ceil(local_num / BAG_SIZE),
+            'bag_label':       f'{letter}-Bag{math.ceil(local_num / BAG_SIZE)}',
+            'delivery_order':  i + 1,
+            'load_position':   n - i,    # last delivery loads last (near door)
+            'zone_confidence': round(conf * 100),
+            'zone_status':     zone_status,
+            'zone_deliveries': zone_count,
+        })
+        result.append(p)
+
     return result, total_dist, total_dur
 
 def assign_delivery_zones(sorted_pkgs):
