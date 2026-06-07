@@ -8,9 +8,26 @@
   #map {
     height: 340px;
     border-radius: 14px;
-    /* no overflow:hidden — LRM panel renders inside map div and gets clipped */
     border: 2px solid #222;
     margin-bottom: 0;
+    transition: height 0.35s ease;
+  }
+  #map.nav-follow {
+    height: min(62vh, 520px);
+    border-radius: 14px 14px 0 0;
+  }
+  .map-wrap.nav-follow {
+    margin-left: -1rem;
+    margin-right: -1rem;
+  }
+  .driver-arrow {
+    width: 22px;
+    height: 22px;
+    background: #0088ff;
+    border: 3px solid #fff;
+    border-radius: 50% 50% 50% 0;
+    transform: rotate(-45deg);
+    box-shadow: 0 0 14px #0088ffaa;
   }
   /* Dark map tiles */
 
@@ -122,7 +139,7 @@
   </div>
 
   <!-- Live Map -->
-  <div style="position:relative;">
+  <div class="map-wrap" id="map-wrap" style="position:relative;">
     <div id="map" style="border-radius:0 0 14px 14px;"></div>
     <!-- NAV / Overview toggle -->
     <button id="nav-mode-btn" onclick="toggleNavMode()"
@@ -133,33 +150,6 @@
       <i class="fas fa-location-arrow me-1"></i>Following
     </button>
   </div>
-  <script>
-  function toggleNavMode() {
-    navMode = !navMode;
-    const btn = document.getElementById('nav-mode-btn');
-    if (navMode) {
-      btn.innerHTML = '<i class="fas fa-location-arrow me-1"></i>Following';
-      btn.style.color = '#3b82f6';
-      btn.style.borderColor = '#3b82f6';
-      // Snap back to driver
-      if (lastDriverLat !== null) {
-        mbMap.easeTo({center:[lastDriverLng,lastDriverLat], zoom:17, pitch:55, bearing:lastHeading, duration:600});
-      }
-    } else {
-      btn.innerHTML = '<i class="fas fa-map me-1"></i>Overview';
-      btn.style.color = '#9ca3af';
-      btn.style.borderColor = '#374151';
-      // Fit full route
-      if (mbMap.getSource('route')) {
-        const coords = mbMap.getSource('route')._data?.geometry?.coordinates || [];
-        if (coords.length > 1) {
-          const bounds = coords.reduce((b,c)=>b.extend(c), new mapboxgl.LngLatBounds(coords[0],coords[0]));
-          mbMap.fitBounds(bounds, {padding:60, maxZoom:16, pitch:0, bearing:0, duration:800});
-        }
-      }
-    }
-  }
-  </script>
 
   <!-- Proximity Bar -->
   <div class="card p-3 mb-3">
@@ -334,9 +324,12 @@ let routeSteps   = [];
 let currentStep  = 0;
 let lastRouteFetch = 0;
 let lastDriverLat = null, lastDriverLng = null;
+let prevDriverLat = null, prevDriverLng = null;
 let navMode = true;       // true = follow driver like GPS; false = overview
-let lastHeading = 0;      // device compass heading
+let lastHeading = 0;      // device compass / movement heading
 let routeFirstDrawn = false;
+let routeCoords = [];
+let compassHeading = null;
 
 // ── MAPBOX MAP SETUP ──────────────────────────────────────────
 const mbMap = new mapboxgl.Map({
@@ -350,6 +343,9 @@ const mbMap = new mapboxgl.Map({
 });
 
 mbMap.addControl(new mapboxgl.NavigationControl({showCompass:true}), 'top-right');
+mbMap.setPadding({ top: 60, bottom: 140, left: 24, right: 24 });
+document.getElementById('map').classList.add('nav-follow');
+document.getElementById('map-wrap').classList.add('nav-follow');
 
 // Destination marker
 let destMarker = null;
@@ -357,6 +353,8 @@ let driverMarker = null;
 let routeDrawn = false;
 
 mbMap.on('load', () => {
+  mbMap.resize();
+  applyNavModeUI();
   // 3D buildings
   mbMap.addLayer({
     id:'3d-buildings', source:'composite', 'source-layer':'building',
@@ -436,6 +434,108 @@ mbMap.on('load', () => {
   }
 });
 
+// ── NAV CAMERA HELPERS ────────────────────────────────────────
+function computeBearing(lat1, lng1, lat2, lng2) {
+  const toRad = d => d * Math.PI / 180;
+  const toDeg = r => ((r * 180 / Math.PI) + 360) % 360;
+  const dLng = toRad(lng2 - lng1);
+  const y = Math.sin(dLng) * Math.cos(toRad(lat2));
+  const x = Math.cos(toRad(lat1)) * Math.sin(toRad(lat2)) -
+            Math.sin(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.cos(dLng);
+  return toDeg(Math.atan2(y, x));
+}
+
+function bearingFromRoute(lng, lat) {
+  if (!routeCoords || routeCoords.length < 2) return null;
+  let bestIdx = 0;
+  let bestDist = Infinity;
+  for (let i = 0; i < routeCoords.length; i++) {
+    const c = routeCoords[i];
+    const d = Math.hypot(lat - c[1], (lng - c[0]) * Math.cos(lat * Math.PI / 180));
+    if (d < bestDist) { bestDist = d; bestIdx = i; }
+  }
+  const ahead = Math.min(bestIdx + 3, routeCoords.length - 1);
+  const from = routeCoords[Math.max(0, bestIdx)];
+  const to = routeCoords[ahead];
+  if (!from || !to) return null;
+  return computeBearing(from[1], from[0], to[1], to[0]);
+}
+
+function resolveHeading(lat, lng) {
+  if (compassHeading !== null && !isNaN(compassHeading)) return compassHeading;
+  if (prevDriverLat !== null && prevDriverLng !== null) {
+    const moved = Math.hypot(lat - prevDriverLat, lng - prevDriverLng);
+    if (moved > 0.00003) {
+      return computeBearing(prevDriverLat, prevDriverLng, lat, lng);
+    }
+  }
+  const routeBearing = bearingFromRoute(lng, lat);
+  if (routeBearing !== null) return routeBearing;
+  return lastHeading;
+}
+
+function updateNavCamera(lng, lat, animate) {
+  if (!navMode || !mbMap.isStyleLoaded()) return;
+  lastHeading = resolveHeading(lat, lng);
+  const opts = {
+    center: [lng, lat],
+    zoom: 18.5,
+    pitch: 62,
+    bearing: lastHeading,
+    padding: { top: 60, bottom: 140, left: 24, right: 24 },
+    duration: animate ? 280 : 0,
+    essential: true,
+  };
+  if (animate) mbMap.easeTo(opts);
+  else mbMap.jumpTo(opts);
+  if (driverMarker) {
+    const el = driverMarker.getElement();
+    if (el) el.style.transform = 'rotate(' + (lastHeading - 45) + 'deg)';
+  }
+}
+
+function showRouteOverview() {
+  const coords = routeCoords.length ? routeCoords : (mbMap.getSource('route')?._data?.geometry?.coordinates || []);
+  if (coords.length > 1) {
+    const bounds = coords.reduce((b,c)=>b.extend(c), new mapboxgl.LngLatBounds(coords[0],coords[0]));
+    mbMap.fitBounds(bounds, {padding:60, maxZoom:16, pitch:0, bearing:0, duration:800});
+  }
+}
+
+function applyNavModeUI() {
+  const btn = document.getElementById('nav-mode-btn');
+  const mapEl = document.getElementById('map');
+  const wrap = document.getElementById('map-wrap');
+  if (!btn || !mapEl) return;
+  if (navMode) {
+    btn.innerHTML = '<i class="fas fa-location-arrow me-1"></i>Following';
+    btn.style.color = '#3b82f6';
+    btn.style.borderColor = '#3b82f6';
+    mapEl.classList.add('nav-follow');
+    if (wrap) wrap.classList.add('nav-follow');
+    mbMap.setPadding({ top: 60, bottom: 140, left: 24, right: 24 });
+  } else {
+    btn.innerHTML = '<i class="fas fa-map me-1"></i>Overview';
+    btn.style.color = '#9ca3af';
+    btn.style.borderColor = '#374151';
+    mapEl.classList.remove('nav-follow');
+    if (wrap) wrap.classList.remove('nav-follow');
+    mbMap.setPadding({ top: 0, bottom: 0, left: 0, right: 0 });
+  }
+  setTimeout(() => mbMap.resize(), 350);
+}
+
+function toggleNavMode() {
+  navMode = !navMode;
+  applyNavModeUI();
+  if (navMode && lastDriverLat !== null) {
+    updateNavCamera(lastDriverLng, lastDriverLat, true);
+  } else if (!navMode) {
+    showRouteOverview();
+  }
+}
+window.toggleNavMode = toggleNavMode;
+
 // ── ROUTE + TURN-BY-TURN ────────────────────────────────────
 function fetchRoute(fromLng, fromLat) {
   if (!DEST_LAT || !DEST_LNG) return;
@@ -448,6 +548,7 @@ function fetchRoute(fromLng, fromLat) {
     if (!d.routes || !d.routes[0]) return;
     const route = d.routes[0];
     const geo   = route.geometry;
+    routeCoords = geo.coordinates || [];
 
     // Draw or update route line
     if (mbMap.getSource('route')) {
@@ -457,22 +558,18 @@ function fetchRoute(fromLng, fromLat) {
       mbMap.addLayer({
         id:'route-line', type:'line', source:'route',
         layout:{'line-join':'round','line-cap':'round'},
-        paint:{'line-color':'#3b82f6','line-width':5,'line-opacity':0.9}
-      }, 'geofence-fill'); // insert below geofence layer
-      // On first draw: fly to driver in nav mode; overview-only if no GPS yet
+        paint:{'line-color':'#3b82f6','line-width':6,'line-opacity':0.95}
+      }, 'geofence-fill');
       routeFirstDrawn = true;
-      if (navMode && lastDriverLat !== null) {
-        mbMap.easeTo({
-          center: [lastDriverLng, lastDriverLat],
-          zoom: 17, pitch: 55, bearing: lastHeading,
-          duration: 800
-        });
-      } else {
-        // Fallback: fit full route
-        const coords = geo.coordinates;
-        const bounds = coords.reduce((b,c)=>b.extend(c), new mapboxgl.LngLatBounds(coords[0],coords[0]));
-        mbMap.fitBounds(bounds, {padding:60, maxZoom:16});
-      }
+    }
+
+    // Always enter 3D follow camera when in nav mode — never zoom out to overview
+    if (navMode) {
+      const camLng = lastDriverLng !== null ? lastDriverLng : fromLng;
+      const camLat = lastDriverLat !== null ? lastDriverLat : fromLat;
+      updateNavCamera(camLng, camLat, true);
+    } else {
+      showRouteOverview();
     }
 
     // Extract steps
@@ -549,8 +646,9 @@ function sendLocation(lat, lng) {
   // Update driver marker on Mapbox map
   if (!driverMarker) {
     const el = document.createElement('div');
-    el.style.cssText = 'width:14px;height:14px;border-radius:50%;background:#0088ff;border:3px solid #fff;box-shadow:0 0 10px #0088ff;';
-    driverMarker = new mapboxgl.Marker({element:el}).setLngLat([lng,lat]).addTo(mbMap);
+    el.className = 'driver-arrow';
+    driverMarker = new mapboxgl.Marker({element:el, rotationAlignment: 'map', pitchAlignment: 'map'})
+      .setLngLat([lng, lat]).addTo(mbMap);
 
     // Draw / refresh route from driver to destination
     const now = Date.now();
@@ -569,19 +667,16 @@ function sendLocation(lat, lng) {
       }
     }
   }
-  lastDriverLat = lat; lastDriverLng = lng;
-
-  // GPS follow mode — re-center map on driver every position update
-  if (navMode && mbMap.loaded()) {
-    mbMap.easeTo({
-      center: [lng, lat],
-      zoom: 17,
-      pitch: 55,
-      bearing: lastHeading,
-      duration: 600,
-      easing: t => t  // linear for smooth driving feel
-    });
+  // 3D follow camera — jump on fast updates, ease when creeping
+  if (navMode) {
+    const moved = prevDriverLat !== null
+      ? Math.hypot(lat - prevDriverLat, lng - prevDriverLng) : 0;
+    updateNavCamera(lng, lat, moved < 0.00015);
   }
+  prevDriverLat = lat;
+  prevDriverLng = lng;
+  lastDriverLat = lat;
+  lastDriverLng = lng;
 
   // Send to server
   fetch('/api/location', {
@@ -627,22 +722,35 @@ function sendLocation(lat, lng) {
 }
 
 function handlePosition(pos) {
-  if (pos.coords.heading !== null && !isNaN(pos.coords.heading)) {
-    lastHeading = pos.coords.heading;
+  if (pos.coords.heading !== null && !isNaN(pos.coords.heading) && pos.coords.heading >= 0) {
+    compassHeading = pos.coords.heading;
   }
   sendLocation(pos.coords.latitude, pos.coords.longitude);
 }
 
-// Allow manual drag to exit nav follow mode
+// Device compass (iOS/Android) for heading when stationary or moving slowly
+function startCompass() {
+  const handler = (e) => {
+    const h = e.webkitCompassHeading ?? (360 - (e.alpha || 0));
+    if (!isNaN(h) && h >= 0) compassHeading = h;
+  };
+  if (window.DeviceOrientationEvent) {
+    if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+      DeviceOrientationEvent.requestPermission()
+        .then(state => { if (state === 'granted') window.addEventListener('deviceorientation', handler, true); })
+        .catch(() => {});
+    } else {
+      window.addEventListener('deviceorientation', handler, true);
+    }
+  }
+}
+startCompass();
+
+// Manual drag exits follow mode
 mbMap.on('dragstart', () => {
   if (navMode) {
     navMode = false;
-    const btn = document.getElementById('nav-mode-btn');
-    if (btn) {
-      btn.innerHTML = '<i class="fas fa-map me-1"></i>Overview';
-      btn.style.color = '#9ca3af';
-      btn.style.borderColor = '#374151';
-    }
+    applyNavModeUI();
   }
 });
 
@@ -654,84 +762,6 @@ if (navigator.geolocation) {
   );
 } else {
   gpsText.textContent = 'GPS not available on this device';
-}
-
-// ── GOOGLE MAPS STOP INIT ──
-const GMAPS_AVAILABLE = {{ 'true' if gmaps_key else 'false' }};
-
-function initStopMap() {
-  if (!DEST_LAT || !DEST_LNG) return;
-  const mapEl = document.getElementById('map');
-  if (!mapEl) return;
-  const stopPos = { lat: DEST_LAT, lng: DEST_LNG };
-  const gmap = new google.maps.Map(mapEl, {
-    center: stopPos, zoom: 17, tilt: 45,
-    mapTypeId: 'roadmap',
-    styles: [
-      {elementType:'geometry', stylers:[{color:'#0a0a0a'}]},
-      {elementType:'labels.text.fill', stylers:[{color:'#757575'}]},
-      {elementType:'labels.text.stroke', stylers:[{color:'#0a0a0a'}]},
-      {featureType:'road', elementType:'geometry', stylers:[{color:'#1a1a1a'}]},
-      {featureType:'road.arterial', elementType:'geometry', stylers:[{color:'#222'}]},
-      {featureType:'road.highway', elementType:'geometry', stylers:[{color:'#2a2a2a'}]},
-      {featureType:'road.highway', elementType:'geometry.stroke', stylers:[{color:'#00ff8833'}]},
-      {featureType:'water', elementType:'geometry', stylers:[{color:'#000'}]},
-      {featureType:'poi', stylers:[{visibility:'off'}]},
-      {featureType:'transit', stylers:[{visibility:'off'}]},
-    ],
-    disableDefaultUI: true, zoomControl: true, gestureHandling: 'greedy',
-  });
-  // Destination pin
-  new google.maps.Marker({
-    position: stopPos, map: gmap,
-    icon: { path: google.maps.SymbolPath.CIRCLE, scale: 12,
-      fillColor:'#00ff88', fillOpacity:1, strokeColor:'#fff', strokeWeight:2 },
-    title: 'Delivery Address'
-  });
-  // Override sendLocation to update Google Maps driver marker
-  const origSend = sendLocation;
-  let driverGMark = null;
-  window._gmapStop = gmap;
-  window._updateDriverGMap = function(lat, lng) {
-    const dp = {lat, lng};
-    if (!driverGMark) {
-      driverGMark = new google.maps.Marker({
-        position: dp, map: gmap,
-        icon: { path: google.maps.SymbolPath.FORWARD_CLOSED_ARROW, scale: 5,
-          fillColor:'#0088ff', fillOpacity:1, strokeColor:'#fff', strokeWeight:2, rotation:0 },
-        zIndex: 999
-      });
-      // Draw directions
-      new google.maps.DirectionsRenderer({
-        map: gmap,
-        suppressMarkers: true,
-        polylineOptions: { strokeColor:'#0088ff', strokeWeight:4, strokeOpacity:0.7 }
-      });
-      new google.maps.DirectionsService().route({
-        origin: dp, destination: stopPos,
-        travelMode: google.maps.TravelMode.DRIVING
-      }, (result, status) => {
-        if (status === 'OK') {
-          new google.maps.DirectionsRenderer({
-            map: gmap, directions: result, suppressMarkers: true,
-            polylineOptions: {strokeColor:'#0088ff', strokeWeight:4, strokeOpacity:0.7}
-          }).setDirections(result);
-          const bounds = new google.maps.LatLngBounds();
-          bounds.extend(dp); bounds.extend(stopPos);
-          gmap.fitBounds(bounds, {top:40, right:20, bottom:60, left:20});
-        }
-      });
-    } else {
-      driverGMark.setPosition(dp);
-    }
-  };
-}
-
-// Patch sendLocation to also update Google Maps
-const _origSendLocation = sendLocation;
-function sendLocation(lat, lng) {
-  _origSendLocation(lat, lng);
-  if (GMAPS_AVAILABLE && window._updateDriverGMap) window._updateDriverGMap(lat, lng);
 }
 
 // ── PROXIMITY TEST ──
