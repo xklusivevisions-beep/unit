@@ -1,0 +1,85 @@
+# UNIT App — Cursor Context
+
+## What This App Is
+Delivery driver tool for Speed X drivers. Scan packages → assign to geographic zones
+→ optimize route → sequential numbered navigation. Built for Director X's daily routes.
+Director X drives a 2018 Jeep Grand Cherokee (suv_midsize).
+
+## Live URL
+https://unit-6gxn.onrender.com
+
+## Stack
+- Backend: Python / Flask
+- Database: SQLite
+- AI Vision: Anthropic Claude Vision (package scanning / address extraction)
+- Routing: OSRM
+- Maps: Leaflet.js
+- Frontend: HTML/CSS/JS (served via Flask templates)
+
+## Project Structure
+- app.py — main Flask app, all routes and logic
+- templates/ — HTML templates (scan, map, route views)
+- static/ — CSS, JS, assets
+- database.db — SQLite (packages, addresses, routes, zone intel)
+- start.sh — local run script
+
+## Vehicle Zones (Jeep Grand Cherokee — suv_midsize)
+Load order (deepest first):
+1. Cargo Back — furthest deliveries, loaded first
+2. Cargo Middle
+3. Cargo Liftgate
+4. Back Seat R / M / L
+5. Front Passenger — closest deliveries, loaded last
+
+## Current Architecture (Being Rebuilt)
+### What exists:
+- Screenshot import flow (Claude Vision extracts addresses from Speed X screenshots)
+- Live barcode scanning
+- Zone assignment (currently count-based — being replaced)
+- OSRM route optimization
+- Leaflet map with zone color markers
+
+### What is being replaced / added:
+- COUNT-BASED zone balancing → REMOVED (this caused re-sorting chaos)
+- Replacing with: K-MEANS GEOGRAPHIC CLUSTERING (zones based on address location, not count)
+- Adding: ZIP code sector visualization (color-coded sectors on map)
+- Adding: Address intelligence database (learns zones from route history)
+- Adding: Loading plan screen (shown before physical sorting begins)
+
+## Core Rules — DO NOT VIOLATE
+1. Packages are touched ONCE — during loading. Never re-sorted.
+2. Scanning phase = data collection only. No physical sorting signals during scan.
+3. K-means runs ONCE after all packages are scanned and Optimize is hit.
+4. Sectors are LOCKED after optimize. No rebalancing after that point.
+5. Late additions → appended to end of route. No re-clustering.
+6. Sector count = max 5 (matches vehicle zone count).
+7. Loading plan screen must show before any sorting begins (which sector → which car zone).
+
+## The Correct Flow
+PHASE 1 — SCAN: Scan all packages. Dots appear on map (visual only). No sorting yet.
+PHASE 2 — OPTIMIZE: K-means runs on complete dataset. Sectors finalized + locked.
+           Route numbered 1→end. Loading plan generated.
+PHASE 3 — SORT ONCE: Follow loading plan. One pass. Done.
+PHASE 4 — DRIVE: Sequential route. No backtracking.
+
+## Address Intelligence DB (In Progress)
+- Every scanned/imported address saved with: ZIP, coordinates, sector assignment, route date
+- Over time: ZIP → sector mapping is learned and predicted on scan
+- Apartment complexes and recurring addresses auto-recognized
+- Goal: by last scan, system semi-predicts full route
+
+## Do Not Touch
+- OSRM routing integration (working)
+- Vehicle zone definitions (suv_midsize confirmed correct)
+- Claude Vision address extraction logic
+
+## Constants
+- ZONE_LOCK_THRESHOLD = 20 (legacy — being phased out)
+- ZONE_STABLE_MILES = 0.15mi
+- Detroit ZIP codes are primary operating area (e.g. 48202 ~3.3mi → ~4 zones)
+
+## Key Context
+- This is a real production tool used daily by Speed X drivers
+- Speed and reliability matter more than polish
+- Director X uses this personally — UX must be frictionless
+- No redundancy in workflow — every interaction must have a purpose

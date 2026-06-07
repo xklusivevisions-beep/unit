@@ -220,6 +220,40 @@
   .zone-pill { display: inline-flex; align-items: center; gap: 4px; font-size: 0.72rem;
                font-weight: 700; padding: 3px 9px; border-radius: 999px;
                margin-top: 4px; margin-left: 4px; background: #1e3a5f; color: #60a5fa; }
+
+  /* Phase banner */
+  #phase-banner { border-radius: 14px; padding: 12px 16px; margin-bottom: 14px;
+                  text-align: center; font-weight: 700; font-size: 0.95rem; }
+  #phase-banner.scanning { background: #1c1917; border: 2px solid #f59e0b; color: #f59e0b; }
+  #phase-banner.optimized { background: #052e16; border: 2px solid #10b981; color: #10b981; }
+
+  /* Optimize button */
+  .optimize-btn { width: 100%; padding: 18px; font-size: 1.15rem; font-weight: 800;
+                  background: linear-gradient(135deg, #10b981, #059669);
+                  color: #fff; border: none; border-radius: 14px;
+                  cursor: pointer; margin-bottom: 10px; display: none; }
+  .optimize-btn:disabled { background: #1f2937; color: #6b7280; cursor: not-allowed; }
+  .optimize-btn.visible { display: block; }
+
+  /* Loading plan modal */
+  .loading-plan-bg { position: fixed; inset: 0; background: rgba(0,0,0,.85);
+                     z-index: 900; display: none; align-items: center; justify-content: center;
+                     padding: 16px; }
+  .loading-plan-bg.open { display: flex; }
+  .loading-plan-modal { background: #111827; border-radius: 20px; padding: 24px 20px;
+                        width: 100%; max-width: 420px; max-height: 85vh; overflow-y: auto; }
+  .loading-plan-modal h2 { font-size: 1.2rem; font-weight: 800; margin: 0 0 4px; color: #f3f4f6; }
+  .loading-plan-modal .lp-sub { font-size: 0.82rem; color: #6b7280; margin: 0 0 16px; }
+  .lp-zone-row { display: flex; align-items: center; gap: 12px; padding: 12px 14px;
+                 border-radius: 12px; margin-bottom: 8px; }
+  .lp-order-num { font-size: 1.3rem; font-weight: 900; color: #fff; width: 28px; flex-shrink: 0; text-align: center; }
+  .lp-zone-info { flex: 1; }
+  .lp-zone-letter { font-size: 1.1rem; font-weight: 800; }
+  .lp-zone-spot { font-size: 0.8rem; opacity: .85; margin-top: 2px; }
+  .lp-zone-count { font-size: 0.72rem; opacity: .7; margin-top: 1px; }
+  .lp-start-btn { width: 100%; padding: 16px; background: #3b82f6; color: #fff;
+                  border: none; border-radius: 12px; font-size: 1rem; font-weight: 800;
+                  cursor: pointer; margin-top: 16px; }
 </style>
 
 <div class="scan-page">
@@ -232,6 +266,11 @@
   <div class="scan-header">
     <h1>📦 Scan Packages</h1>
     <span class="scan-count" id="pkg-count">{{ items|length }} scanned</span>
+  </div>
+
+  <!-- Phase banner -->
+  <div id="phase-banner" class="scanning">
+    📦 SCAN MODE — Add all packages, then tap OPTIMIZE
   </div>
 
   <!-- Vehicle selector bar -->
@@ -378,7 +417,7 @@
       <div>Extracting stops + locking zones…</div>
     </div>
     <div id="import-result"></div>
-    <div class="import-toggle" onclick="toggleImportPanel()">Or just start scanning → auto-locks after 20 scans</div>
+    <div class="import-toggle" onclick="toggleImportPanel()">Or scan packages one by one → tap OPTIMIZE when done</div>
   </div>
 
   <!-- Lock flash overlay -->
@@ -388,15 +427,8 @@
     <div class="lf-sub" id="lock-flash-sub">Now load your car — zones will never shift again</div>
   </div>
 
-  <!-- Calibration bar -->
-  <div id="calibration-bar">
-    <div class="cal-header">
-      <span class="cal-title">🟡 Calibrating Zones…</span>
-      <button class="cal-lock-btn" onclick="manualLockZones()">Lock Now</button>
-    </div>
-    <div class="cal-track"><div class="cal-fill" id="cal-fill" style="width:0%"></div></div>
-    <div class="cal-note">📦 <span id="cal-scans-left">20</span> more scans until zones lock — hold these packages, don’t load yet</div>
-  </div>
+  <!-- Legacy calibration bar (hidden — zones lock via OPTIMIZE only) -->
+  <div id="calibration-bar" style="display:none"></div>
 
   <!-- Zone Summary Strip -->
   <div id="zone-summary">
@@ -436,12 +468,28 @@
   </div>
 
   <!-- Actions -->
-  <button class="build-btn" id="build-btn" onclick="buildRoute()" {% if not items %}disabled{% endif %}>
+  <!-- OPTIMIZE ROUTE button — appears after first scan, replaces build button during scan phase -->
+  <button class="optimize-btn" id="optimize-btn" onclick="optimizeRoute()">
+    ⚡ OPTIMIZE ROUTE — Lock Zones &amp; Get Loading Plan
+  </button>
+
+  <button class="build-btn" id="build-btn" onclick="buildRoute()" {% if not items %}disabled{% endif %} style="display:none">
     🗺️ Build Optimized Route ({{ items|length }} stops)
   </button>
   {% if items %}
   <button class="clear-btn" onclick="clearAll()">Clear All Packages</button>
   {% endif %}
+
+  <!-- Loading Plan Modal -->
+  <div class="loading-plan-bg" id="loading-plan-bg">
+    <div class="loading-plan-modal">
+      <h2>📦 Loading Plan</h2>
+      <p class="lp-sub">Load in this order — deepest zone first.</p>
+      <div id="loading-plan-zones"></div>
+      <div id="loading-plan-stats" style="font-size:0.8rem;color:#6b7280;text-align:center;margin:8px 0;"></div>
+      <button class="lp-start-btn" onclick="startLoading()">\u2705 Got It — Start Loading</button>
+    </div>
+  </div>
 </div>
 
 <div class="toast" id="toast"></div>
@@ -466,7 +514,27 @@ let mapPolyline = null;
 let currentVehicleType = 'suv_midsize';
 let lastScannedZone    = null;
 let lastAddedItemId    = null;
-let zonesLocked        = false;
+let zonesLocked        = {{ 'true' if zones_locked else 'false' }};
+let currentPhase       = '{{ phase or "scanning" }}';  // 'scanning' | 'optimized'
+
+// Restore UI if session was already optimized (page reload)
+if (currentPhase === 'optimized' || zonesLocked) {
+  currentPhase = 'optimized';
+  zonesLocked = true;
+  document.addEventListener('DOMContentLoaded', () => {
+    const phaseBanner = document.getElementById('phase-banner');
+    if (phaseBanner) {
+      phaseBanner.className = 'optimized';
+      phaseBanner.textContent = '🔒 ZONES LOCKED — Follow loading plan, then build route';
+    }
+    const obtn = document.getElementById('optimize-btn');
+    if (obtn) obtn.style.display = 'none';
+    const bbtn = document.getElementById('build-btn');
+    if (bbtn && pkgCount > 0) bbtn.style.display = 'block';
+    const badge = document.getElementById('sort-status');
+    if (badge) { badge.textContent = '🔒 Locked'; badge.className = 'sort-badge locked'; }
+  });
+}
 
 // ── Import-first ──
 function toggleImportPanel() {
@@ -501,11 +569,20 @@ function handleImportFiles(input) {
         🔒 <b>${data.n_zones} zones locked</b> from scan #1<br>
         <span style="font-size:0.75rem;opacity:.8;">${zSummary}</span>`;
       zonesLocked = true;
+      currentPhase = 'optimized';
       // Hide calibration bar, update badge
       document.getElementById('calibration-bar').style.display = 'none';
+      const importPhaseBanner = document.getElementById('phase-banner');
+      if (importPhaseBanner) {
+        importPhaseBanner.className = 'optimized';
+        importPhaseBanner.textContent = '🔒 ZONES LOCKED — Scan packages, then build route';
+      }
       const badge = document.getElementById('sort-status');
       badge.textContent = '🔒 Locked';
       badge.className = 'sort-badge locked';
+      // Show build button, hide optimize button
+      document.getElementById('build-btn').style.display = 'block';
+      document.getElementById('optimize-btn').style.display = 'none';
       // Auto-build route immediately and redirect
       res.style.display = 'block';
       res.innerHTML = `✅ <b>${data.imported} stops imported</b> — building your route…`;
@@ -542,16 +619,76 @@ if (pkgCount > 0) {
   document.getElementById('import-panel').style.display = 'none';
 }
 
-// ── Manual lock ──
-function manualLockZones() {
-  fetch('/driver/scan/lock-zones', { method: 'POST' })
+// ── Optimize Route (Phase 2) ──
+function optimizeRoute() {
+  const btn = document.getElementById('optimize-btn');
+  btn.disabled = true;
+  btn.textContent = '⏳ Optimizing…';
+  fetch('/driver/scan/optimize', { method: 'POST' })
     .then(r => r.json())
     .then(data => {
-      if (!data.ok) { showToast(data.error || 'Could not lock zones', true); return; }
+      btn.disabled = false;
+      btn.textContent = '⚡ OPTIMIZE ROUTE — Lock Zones & Get Loading Plan';
+      if (!data.ok) { showToast(data.error || 'Optimization failed', true); return; }
+      currentPhase = 'optimized';
       zonesLocked = true;
+      showLoadingPlan(data);
       triggerLockFlash(data.n_zones);
-      setTimeout(refreshLiveSort, 400);
+      setTimeout(refreshLiveSort, 500);
+    })
+    .catch(() => {
+      btn.disabled = false;
+      btn.textContent = '⚡ OPTIMIZE ROUTE — Lock Zones & Get Loading Plan';
+      showToast('Error optimizing route', true);
     });
+}
+
+function showLoadingPlan(data) {
+  const modal = document.getElementById('loading-plan-bg');
+  const zonesEl = document.getElementById('loading-plan-zones');
+  const statsEl = document.getElementById('loading-plan-stats');
+
+  zonesEl.innerHTML = (data.loading_plan || []).map(z => `
+    <div class="lp-zone-row" style="background:${z.color}22;border:2px solid ${z.color};">
+      <div class="lp-order-num">${z.load_order}</div>
+      <div class="lp-zone-info">
+        <div class="lp-zone-letter" style="color:${z.color}">${z.emoji} Zone ${z.letter} → ${z.vehicle_spot}</div>
+        <div class="lp-zone-spot" style="color:${z.color}">${z.vehicle_desc}</div>
+        <div class="lp-zone-count" style="color:${z.color}">${z.count} packages, ${z.n_bags} bag${z.n_bags !== 1 ? 's' : ''}</div>
+      </div>
+    </div>`).join('');
+
+  const stats = [];
+  if (data.route_miles) stats.push(`${data.route_miles} mi`);
+  if (data.route_drive_mins) {
+    const dm = data.route_drive_mins;
+    stats.push(dm >= 60 ? `${Math.floor(dm/60)}h ${Math.round(dm%60)}m drive` : `${Math.round(dm)} min drive`);
+  }
+  statsEl.textContent = stats.join(' • ');
+
+  modal.classList.add('open');
+
+  // Update phase banner
+  const phaseBanner = document.getElementById('phase-banner');
+  if (phaseBanner) {
+    phaseBanner.className = 'optimized';
+    phaseBanner.textContent = '🔒 ZONES LOCKED — Follow loading plan, then build route';
+  }
+
+  // Show build route button, hide optimize button
+  document.getElementById('build-btn').style.display = 'block';
+  document.getElementById('optimize-btn').style.display = 'none';
+}
+
+function startLoading() {
+  document.getElementById('loading-plan-bg').classList.remove('open');
+  showToast('Load packages by zone order ✓');
+  refreshLiveSort();
+}
+
+// ── Manual lock (backward compat) ──
+function manualLockZones() {
+  optimizeRoute();
 }
 
 function triggerLockFlash(nZones) {
@@ -695,6 +832,26 @@ function refreshLiveSort() {
     .then(data => {
       if (!data.ok || !data.items.length) return;
 
+      // Sync phase from server
+      if (data.phase) currentPhase = data.phase;
+
+      // Update phase banner
+      const phaseBanner = document.getElementById('phase-banner');
+      if (phaseBanner) {
+        if (currentPhase === 'optimized') {
+          phaseBanner.className = 'optimized';
+          phaseBanner.textContent = '🔒 ZONES LOCKED — Load by zone, then build route';
+        } else {
+          phaseBanner.className = 'scanning';
+          phaseBanner.textContent = `📦 SCAN MODE — ${data.total || 0} packages scanned, tap OPTIMIZE when done`;
+        }
+      }
+
+      // During scanning phase, suppress zone banner for new packages
+      if (currentPhase !== 'optimized') {
+        lastAddedItemId = null;
+      }
+
       // Show map section
       const section = document.getElementById('live-map-section');
       section.style.display = 'block';
@@ -702,30 +859,38 @@ function refreshLiveSort() {
       // Force Leaflet to recalculate size after container becomes visible
       setTimeout(() => liveMap && liveMap.invalidateSize(), 50);
 
+      const isScanPhase = currentPhase === 'scanning' && !data.zones_locked;
+
       // Update sort status badge + lock state
       const badge = document.getElementById('sort-status');
-      if (data.zones_locked) {
+      if (data.zones_locked || currentPhase === 'optimized') {
         zonesLocked = true;
         badge.textContent = '🔒 Locked';
         badge.className = 'sort-badge locked';
-        document.getElementById('calibration-bar').style.display = 'none';
-        document.getElementById('import-panel').style.display    = 'none';
-        // Trigger flash if just locked this scan
-        if (data.just_locked) triggerLockFlash(data.zone_summary ? data.zone_summary.length : 1);
+        document.getElementById('import-panel').style.display = 'none';
+        const bbtn = document.getElementById('build-btn');
+        if (bbtn && data.total > 0) bbtn.style.display = 'block';
+        const obtn = document.getElementById('optimize-btn');
+        if (obtn) { obtn.classList.remove('visible'); obtn.style.display = 'none'; }
+      } else if (isScanPhase) {
+        badge.textContent = `${data.total || 0} scanned`;
+        badge.className   = 'sort-badge pending';
+        if (data.total >= 1) {
+          const obtn = document.getElementById('optimize-btn');
+          if (obtn) obtn.classList.add('visible');
+        }
+        document.getElementById('build-btn').style.display = 'none';
       } else {
         badge.textContent = data.sorted ? 'Sorted ✓' : 'Sorting...';
         badge.className   = data.sorted ? 'sort-badge' : 'sort-badge pending';
-        // Show / update calibration bar
-        const calBar = document.getElementById('calibration-bar');
-        calBar.style.display = 'block';
-        const scansLeft = data.scans_until_lock || 0;
-        const pct = Math.min(100, Math.round((1 - scansLeft / 20) * 100));
-        document.getElementById('cal-fill').style.width = pct + '%';
-        document.getElementById('cal-scans-left').textContent = scansLeft;
       }
 
-      // ─ Zone summary strip ─
-      if (data.zone_summary && data.zone_summary.length > 0) {
+      // Hide route stats during scan — not meaningful until optimized
+      document.getElementById('route-stats').style.display = isScanPhase ? 'none' : 'block';
+
+      // ─ Zone summary strip (optimized phase only) ─
+      if (!isScanPhase && data.zone_summary && data.zone_summary.length > 0) {
+        document.getElementById('zone-summary').style.display = 'block';
         document.getElementById('zone-summary').style.display = 'block';
         const strip = document.getElementById('zone-strip');
         strip.innerHTML = data.zone_summary.map(z => `
@@ -740,43 +905,46 @@ function refreshLiveSort() {
           `<b style="color:${z.color}">${z.emoji} Zone ${z.letter}</b> (${z.count} pkgs)`
         ).join(' → ');
         loadBar.innerHTML = '📦 Load order: ' + loadSteps + ' → drive';
+      } else {
+        document.getElementById('zone-summary').style.display = 'none';
       }
 
-      // ─ Map markers colored by delivery zone ─
+      // ─ Map markers ─
       mapMarkers.forEach(m => m.remove());
       mapMarkers = [];
       if (mapPolyline) { mapPolyline.remove(); mapPolyline = null; }
 
-      // Draw one polyline per zone in zone color
       const zoneLines = {};
-      const total = data.items.length;
+      const allCoords = [];
 
-      data.items.forEach((pkg) => {
+      data.items.forEach((pkg, idx) => {
         if (!pkg.lat || !pkg.lng) return;
-        const color  = pkg.zone_color || '#3b82f6';
-        const label  = pkg.zone_label_full || pkg.delivery_order;
+        const color  = isScanPhase ? '#6b7280' : (pkg.zone_color || '#3b82f6');
+        const label  = isScanPhase ? (pkg.scan_order || idx + 1) : (pkg.zone_label_full || pkg.delivery_order);
         const icon = L.divIcon({
           html: `<div style="background:${color};color:#fff;border-radius:50%;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:10px;border:2px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.6);white-space:nowrap;">${label}</div>`,
           className: '', iconSize: [28, 28], iconAnchor: [14, 14]
         });
+        const popupExtra = isScanPhase ? '' : `<br>📦 ${pkg.vehicle_zone_label || ''}`;
         const marker = L.marker([pkg.lat, pkg.lng], { icon })
-          .bindPopup(`<b>${label}</b><br>${pkg.name || ''}<br><small>${pkg.address}</small><br>📦 ${pkg.vehicle_zone_label || ''}`);
+          .bindPopup(`<b>${isScanPhase ? 'Scan #' + label : label}</b><br>${pkg.name || ''}<br><small>${pkg.address}</small>${popupExtra}`);
         marker.addTo(liveMap);
         mapMarkers.push(marker);
-        // Collect latlngs per zone for colored polylines
-        const zl = pkg.zone_letter || 'A';
-        if (!zoneLines[zl]) zoneLines[zl] = { coords: [], color };
-        zoneLines[zl].coords.push([pkg.lat, pkg.lng]);
+        allCoords.push([pkg.lat, pkg.lng]);
+        if (!isScanPhase) {
+          const zl = pkg.zone_letter || 'A';
+          if (!zoneLines[zl]) zoneLines[zl] = { coords: [], color };
+          zoneLines[zl].coords.push([pkg.lat, pkg.lng]);
+        }
       });
 
-      // Draw colored polyline per zone
-      const allCoords = [];
-      Object.values(zoneLines).forEach(z => {
-        if (z.coords.length >= 2) {
-          L.polyline(z.coords, { color: z.color, weight: 2.5, opacity: 0.75, dashArray: '5,4' }).addTo(liveMap);
-        }
-        allCoords.push(...z.coords);
-      });
+      if (!isScanPhase) {
+        Object.values(zoneLines).forEach(z => {
+          if (z.coords.length >= 2) {
+            L.polyline(z.coords, { color: z.color, weight: 2.5, opacity: 0.75, dashArray: '5,4' }).addTo(liveMap);
+          }
+        });
+      }
       if (allCoords.length >= 2) {
         liveMap.fitBounds(L.latLngBounds(allCoords), { padding: [20, 20] });
       } else if (allCoords.length === 1) {
@@ -807,8 +975,8 @@ function refreshLiveSort() {
         }
       }
 
-      // ─ Zone banner for newly scanned package ─
-      if (lastAddedItemId !== null) {
+      // ─ Zone banner for newly scanned package (optimized phase only) ─
+      if (!isScanPhase && lastAddedItemId !== null) {
         const newPkg = data.items.find(p => p.id === lastAddedItemId);
         if (newPkg && newPkg.zone_label_full) {
           lastScannedZone = newPkg.zone_label_full;
@@ -822,12 +990,31 @@ function refreshLiveSort() {
         }
       }
 
-      // ─ Re-render package list grouped by zone ─
+      // ─ Re-render package list ─
       const listEl  = document.getElementById('pkg-list-inner');
       listEl.innerHTML = '';
       let lastLetter = null;
       let lastBag     = null;
-      const isLocked  = data.zones_locked;
+      const isLocked  = data.zones_locked || currentPhase === 'optimized';
+
+      if (isScanPhase) {
+        data.items.forEach((pkg, idx) => {
+          listEl.innerHTML += `
+            <div class="pkg-item" id="item-${pkg.id}" style="border-left:3px solid #6b7280;">
+              <div class="pkg-info">
+                <div class="pkg-name" style="display:flex;align-items:center;gap:8px;">
+                  <span style="background:#374151;color:#9ca3af;border-radius:6px;padding:1px 7px;font-size:0.8rem;font-weight:800;flex-shrink:0;">#${pkg.scan_order || idx + 1}</span>
+                  ${nameShort(pkg.name)}
+                </div>
+                <div class="pkg-addr">${pkg.address}</div>
+                ${pkg.tracking ? `<div class="pkg-tracking">${pkg.tracking}</div>` : ''}
+              </div>
+              <button class="pkg-remove" onclick="removeItem(${pkg.id}, this)">✕</button>
+            </div>`;
+        });
+        return;
+      }
+
       data.items.forEach((pkg) => {
         const color    = pkg.zone_color    || '#3b82f6';
         const letter   = pkg.zone_letter   || '?';
@@ -905,6 +1092,12 @@ function updateCount() {
   const btn = document.getElementById('build-btn');
   btn.disabled = pkgCount === 0;
   btn.textContent = `🗺️ Build Optimized Route (${pkgCount} stops)`;
+  // Show optimize button once packages exist (only during scanning phase)
+  const obtn = document.getElementById('optimize-btn');
+  if (obtn) {
+    if (pkgCount >= 1 && currentPhase === 'scanning') obtn.classList.add('visible');
+    else if (currentPhase === 'optimized') obtn.classList.remove('visible');
+  }
 }
 
 // ── Camera ──
@@ -1010,7 +1203,13 @@ function processBlob(blob) {
           pkgCount = added.count;
           updateCount();
           lastScannedZone  = null;
-          lastAddedItemId  = added.new_item_id || null;
+          lastAddedItemId  = currentPhase === 'optimized' ? (added.new_item_id || null) : null;
+          showToast('Package added ✓' + (added.geocoded ? ' 📍' : ''));
+          // Show optimize button during scanning phase
+          if (currentPhase === 'scanning') {
+            const obtn = document.getElementById('optimize-btn');
+            if (obtn && pkgCount >= 1) obtn.classList.add('visible');
+          }
           if (added.zip_warning) {
             document.getElementById('zip-warn-text').textContent = added.zip_warning;
             document.getElementById('zip-warn-banner').classList.add('show');
@@ -1134,9 +1333,14 @@ function confirmPackage() {
       zipWarnEl.classList.remove('show');
     }
     showToast('Package added ✓' + (data.geocoded ? ' 📍' : ''));
-    // Reset zone banner flag so the next sort shows the new package's zone
+    // Reset zone banner flag — only show zone banner after optimize (locked phase)
     lastScannedZone = null;
-    lastAddedItemId = data.new_item_id || null;
+    lastAddedItemId = currentPhase === 'optimized' ? (data.new_item_id || null) : null;
+    // Show optimize button after first package
+    if (pkgCount >= 1) {
+      const obtn = document.getElementById('optimize-btn');
+      if (obtn && currentPhase === 'scanning') obtn.classList.add('visible');
+    }
     // Refresh live sort map + reorder list
     setTimeout(refreshLiveSort, 600);
   })
@@ -1184,6 +1388,10 @@ function removeItem(id, btn) {
 
 // ── Build route ──
 function buildRoute() {
+  if (!zonesLocked && currentPhase !== 'optimized') {
+    showToast('Tap OPTIMIZE to lock zones first', true);
+    return;
+  }
   const btn = document.getElementById('build-btn');
   btn.disabled = true;
   btn.textContent = '⏳ Building route…';
