@@ -1462,6 +1462,14 @@ def init_db():
         )""",
         "CREATE INDEX IF NOT EXISTS idx_address_intel_zip ON address_intel (zip_code)",
         "CREATE INDEX IF NOT EXISTS idx_address_intel_latng ON address_intel (lat, lng)",
+        """CREATE TABLE IF NOT EXISTS route_manual_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            driver_id INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            packages INTEGER DEFAULT 0,
+            notes TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )""",
     ]:
         try:
             db.execute(migration)
@@ -4579,6 +4587,8 @@ def route_log():
         """, (driver_id,)).fetchall()
     except Exception:
         manual = []
+        try: db._conn.rollback()
+        except: pass
 
     # This week totals (Mon–today)
     from datetime import date as _date, timedelta
@@ -4653,17 +4663,6 @@ def route_log_manual():
         return redirect(url_for('route_log'))
 
     db = get_db()
-    # Create the table if first time
-    db.execute("""
-        CREATE TABLE IF NOT EXISTS route_manual_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            driver_id INTEGER NOT NULL,
-            date TEXT NOT NULL,
-            packages INTEGER DEFAULT 0,
-            notes TEXT,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
     db.execute(
         "INSERT INTO route_manual_log (driver_id, date, packages, notes) VALUES (?,?,?,?)",
         (session['driver_id'], date_val, int(packages), notes)
