@@ -8,6 +8,142 @@ from PIL import Image
 import anthropic
 
 ANTHROPIC_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
+# Free vision: get a key at https://aistudio.google.com/apikey (no credit card on free tier)
+GEMINI_API_KEY  = os.environ.get('GEMINI_API_KEY') or os.environ.get('GOOGLE_API_KEY', '')
+GEMINI_MODELS   = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-2.0-flash-lite']
+
+
+def _vision_available():
+    return bool(GEMINI_API_KEY or ANTHROPIC_KEY)
+
+
+def _vision_provider_label():
+    if GEMINI_API_KEY:
+        return GEMINI_MODELS[0]
+    if ANTHROPIC_KEY:
+        return 'claude-haiku-4-5'
+    return 'none'
+
+
+def _parse_json_response(text, expect='object'):
+    """Parse JSON object or array from a vision model response."""
+    text = (text or '').strip()
+    if text.startswith('```'):
+        text = re.sub(r'^```[a-z]*\n?', '', text)
+        text = re.sub(r'\n?```$', '', text)
+    if expect == 'array':
+        m = re.search(r'\[.*\]', text, re.DOTALL)
+        if m:
+            return json.loads(m.group())
+        raise ValueError('Could not parse label data from the photo')
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        m = re.search(r'\{.*\}', text, re.DOTALL)
+        if m:
+            return json.loads(m.group())
+        raise ValueError('Could not parse label data from the photo')
+
+
+def _gemini_vision(prompt, img_bytes, max_tokens=512):
+    """Google Gemini vision (free tier) — REST, no extra package."""
+    if not GEMINI_API_KEY:
+        raise ValueError('GEMINI_API_KEY not set')
+    img_bytes = compress_for_api(img_bytes)
+    b64 = base64.standard_b64encode(img_bytes).decode('utf-8')
+    payload = {
+        'contents': [{'parts': [
+            {'inline_data': {'mime_type': 'image/jpeg', 'data': b64}},
+            {'text': prompt},
+        ]}],
+        'generationConfig': {'maxOutputTokens': max_tokens, 'temperature': 0.1},
+    }
+    last_err = None
+    for model in GEMINI_MODELS:
+        url = f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent'
+        for attempt in range(3):
+            try:
+                r = requests.post(url, params={'key': GEMINI_API_KEY}, json=payload, timeout=90)
+                if r.status_code in (429, 500, 503) and attempt < 2:
+                    import time as _t; _t.sleep(0.6 * (attempt + 1))
+                    continue
+                if not r.ok:
+                    try:
+                        err_msg = r.json().get('error', {}).get('message', r.text[:200])
+                    except Exception:
+                        err_msg = r.text[:200]
+                    last_err = f'{model}: {err_msg}'
+                    break
+                data = r.json()
+                cands = data.get('candidates') or []
+                if not cands:
+                    last_err = f'{model}: empty response'
+                    break
+                parts = (cands[0].get('content') or {}).get('parts') or []
+                text = ''.join(p.get('text', '') for p in parts).strip()
+                if text:
+                    log.info(f'[gemini_vision] ok model={model}')
+                    return text
+                last_err = f'{model}: no text returned'
+                break
+            except requests.RequestException as e:
+                last_err = str(e)
+                if attempt < 2:
+                    import time as _t; _t.sleep(0.6 * (attempt + 1))
+                    continue
+    raise ValueError(f'Gemini vision failed: {last_err or "unknown error"}')
+
+
+def _anthropic_vision(prompt, img_bytes, max_tokens=512):
+    """Anthropic Claude vision — paid fallback when Gemini unavailable."""
+    if not ANTHROPIC_KEY:
+        raise ValueError('ANTHROPIC_API_KEY not set')
+    img_bytes = compress_for_api(img_bytes)
+    client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+    b64 = base64.standard_b64encode(img_bytes).decode('utf-8')
+    last_err = None
+    for attempt in range(3):
+        try:
+            resp = client.messages.create(
+                model='claude-haiku-4-5',
+                max_tokens=max_tokens,
+                messages=[{'role': 'user', 'content': [
+                    {'type': 'image',
+                     'source': {'type': 'base64', 'media_type': 'image/jpeg', 'data': b64}},
+                    {'type': 'text', 'text': prompt},
+                ]}],
+            )
+            for block in (resp.content or []):
+                if getattr(block, 'text', None):
+                    t = block.text.strip()
+                    if t:
+                        return t
+            raise ValueError('Vision model returned an empty response')
+        except Exception as e:
+            last_err = e
+            transient = any(t in str(e).lower() for t in ('overloaded', '529', 'rate', 'timeout', '500', '503'))
+            if transient and attempt < 2:
+                import time as _t; _t.sleep(0.6 * (attempt + 1))
+                continue
+            log.error(f'anthropic_vision error: {e}')
+            raise ValueError(f'Vision API error: {e}')
+    raise ValueError(f'Vision API error: {last_err}')
+
+
+def _vision_extract_text(prompt, img_bytes, max_tokens=512):
+    """Gemini (free) first, Anthropic fallback."""
+    if GEMINI_API_KEY:
+        try:
+            return _gemini_vision(prompt, img_bytes, max_tokens)
+        except Exception as e:
+            log.warning(f'Gemini vision failed ({e}), trying Anthropic fallback')
+            if not ANTHROPIC_KEY:
+                raise ValueError(str(e))
+    if ANTHROPIC_KEY:
+        return _anthropic_vision(prompt, img_bytes, max_tokens)
+    raise ValueError(
+        'Vision AI not configured — add GEMINI_API_KEY (free at aistudio.google.com) in Render'
+    )
 
 def compress_for_api(img_bytes, max_bytes=4 * 1024 * 1024):
     """Resize + compress image to stay under Anthropic 5MB API limit."""
@@ -35,25 +171,9 @@ def extract_stops_from_image(img_bytes):
     """Universal carrier-agnostic stop extraction from any delivery app screenshot.
     Supports: Speed X, FedEx, Veho, GoFor, Amazon Flex, OnTrac, and similar apps.
     """
-    if not ANTHROPIC_KEY:
-        raise ValueError('Vision AI not configured on server — contact admin')
-    try:
-        img_bytes = compress_for_api(img_bytes)
-        client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-        b64    = base64.standard_b64encode(img_bytes).decode('utf-8')
-        resp   = client.messages.create(
-            model='claude-haiku-4-5',
-            max_tokens=4096,
-            messages=[{
-                'role': 'user',
-                'content': [
-                    {
-                        'type': 'image',
-                        'source': {'type': 'base64', 'media_type': 'image/jpeg', 'data': b64}
-                    },
-                    {
-                        'type': 'text',
-                        'text': """This is a delivery driver app screenshot. It may be from ANY carrier:
+    if not _vision_available():
+        raise ValueError('Vision AI not configured on server — add GEMINI_API_KEY (free)')
+    prompt = """This is a delivery driver app screenshot. It may be from ANY carrier:
 Speed X, FedEx, Veho, GoFor, Amazon Flex, OnTrac, DoorDash, Roadie, or similar.
 
 Extract EVERY delivery stop visible on screen.
@@ -112,47 +232,34 @@ JSON array format:
 Include EVERY stop card visible. Do not skip any.
 If a field is not visible, use empty string - never null.
 Return ONLY the JSON array."""
-                    }
-                ]
-            }])
-        text = resp.content[0].text.strip()
-        log.info(f'[extract_stops] Claude raw (first 400): {text[:400]}')
-        match = re.search(r'\[.*\]', text, re.DOTALL)
-        if match:
-            try:
-                stops = json.loads(match.group())
-                return [{
-                    'address':  s.get('address','').strip(),
-                    'name':     s.get('name','').strip(),
-                    'tracking': s.get('tracking','').strip(),
-                    'stop_num': str(s.get('stop_num','')).strip(),
-                    'unit':     s.get('unit','').strip(),
-                    'phone':    re.sub(r'\D', '', s.get('phone', '')),
-                    'carrier':  s.get('carrier', '').strip(),
-                } for s in stops if s.get('address')]
-            except json.JSONDecodeError as je:
-                log.warning(f'JSON parse failed: {je} | raw: {text[:200]}')
-                return []
-        log.warning(f'No JSON array found in Claude response: {text[:300]}')
+    try:
+        text = _vision_extract_text(prompt, img_bytes, max_tokens=4096)
+        log.info(f'[extract_stops] vision raw (first 400): {text[:400]}')
+        stops = _parse_json_response(text, expect='array')
+        return [{
+            'address':  s.get('address', '').strip(),
+            'name':     s.get('name', '').strip(),
+            'tracking': s.get('tracking', '').strip(),
+            'stop_num': str(s.get('stop_num', '')).strip(),
+            'unit':     s.get('unit', '').strip(),
+            'phone':    re.sub(r'\D', '', s.get('phone', '')),
+            'carrier':  s.get('carrier', '').strip(),
+        } for s in stops if s.get('address')]
+    except ValueError:
+        log.warning('[extract_stops] could not parse JSON array from vision response')
         return []
     except Exception as e:
-        log.error(f'Claude Vision API error ({type(e).__name__}): {e}')
-        raise  # bubble up so caller can report the specific error
+        log.error(f'Vision API error ({type(e).__name__}): {e}')
+        raise
+        raise
 
 
 def extract_package_label(img_bytes):
-    """Use Claude Vision to extract delivery info from a shipping label photo.
-
-    Raises on API / parse errors (with a clear message) so the caller can
-    surface the real reason to the driver instead of a generic failure.
-    """
-    if not ANTHROPIC_KEY:
-        raise ValueError('Vision AI not configured — ANTHROPIC_API_KEY missing on server')
-
-    img_bytes = compress_for_api(img_bytes)
-    client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-    b64 = base64.standard_b64encode(img_bytes).decode('utf-8')
-
+    """Extract delivery info from a shipping label photo (Gemini free / Claude fallback)."""
+    if not _vision_available():
+        raise ValueError(
+            'Vision AI not configured — add GEMINI_API_KEY (free at aistudio.google.com) in Render'
+        )
     prompt = '''This is a shipping label. Extract the delivery information.
 Return ONLY a JSON object, no markdown, no code blocks.
 
@@ -167,59 +274,16 @@ Example output:
 
 If a field is not visible, use an empty string.
 Return ONLY the JSON object.'''
-
-    # Retry transient overload/server errors a couple of times.
-    last_err = None
-    for attempt in range(3):
-        try:
-            resp = client.messages.create(
-                model='claude-haiku-4-5',
-                max_tokens=512,
-                messages=[{
-                    'role': 'user',
-                    'content': [
-                        {'type': 'image',
-                         'source': {'type': 'base64', 'media_type': 'image/jpeg', 'data': b64}},
-                        {'type': 'text', 'text': prompt}
-                    ]
-                }]
-            )
-            break
-        except Exception as e:
-            last_err = e
-            transient = any(t in str(e).lower() for t in ('overloaded', '529', 'rate', 'timeout', '500', '503'))
-            if transient and attempt < 2:
-                import time as _t; _t.sleep(0.6 * (attempt + 1))
-                continue
-            log.error(f'extract_package_label API error: {e}')
-            raise ValueError(f'Vision API error: {e}')
-    else:
-        raise ValueError(f'Vision API error: {last_err}')
-
-    # Pull the first text block out of the response.
-    text = ''
-    for block in (resp.content or []):
-        if getattr(block, 'type', None) == 'text' or getattr(block, 'text', None):
-            text = (block.text or '').strip()
-            if text:
-                break
+    try:
+        text = _vision_extract_text(prompt, img_bytes, max_tokens=512)
+    except Exception as e:
+        log.error(f'extract_package_label API error: {e}')
+        raise ValueError(str(e))
     if not text:
         raise ValueError('Vision model returned an empty response')
-
-    # Strip markdown fences if the model wrapped the JSON.
-    if text.startswith('```'):
-        text = re.sub(r'^```[a-z]*\n?', '', text)
-        text = re.sub(r'\n?```$', '', text)
     try:
-        return json.loads(text)
+        return _parse_json_response(text, expect='object')
     except json.JSONDecodeError:
-        # Last resort: grab the first {...} block from the text.
-        m = re.search(r'\{.*\}', text, re.DOTALL)
-        if m:
-            try:
-                return json.loads(m.group(0))
-            except json.JSONDecodeError:
-                pass
         log.error(f'extract_package_label parse error; raw: {text[:200]}')
         raise ValueError('Could not parse label data from the photo')
 
@@ -2093,8 +2157,8 @@ def scan_process():
     if not file:
         return jsonify({'ok': False, 'error': 'No photo received'})
     img_bytes = file.read()
-    if not ANTHROPIC_KEY:
-        return jsonify({'ok': False, 'error': 'Vision AI not configured — ANTHROPIC_API_KEY missing on server'})
+    if not _vision_available():
+        return jsonify({'ok': False, 'error': 'Vision AI not configured — add GEMINI_API_KEY (free) on server'})
     if not img_bytes:
         return jsonify({'ok': False, 'error': 'Empty photo received — try capturing again'})
     try:
@@ -2642,9 +2706,9 @@ def scan_import_route():
     )
     db.commit()
 
-    if not ANTHROPIC_KEY:
+    if not _vision_available():
         db.close()
-        return jsonify({'ok': False, 'error': 'Vision AI not configured on server — contact admin'})
+        return jsonify({'ok': False, 'error': 'Vision AI not configured — add GEMINI_API_KEY (free) on server'})
 
     # Extract stops from all uploaded screenshots and PDFs
     all_stops = []
@@ -2811,46 +2875,40 @@ def scan_lock_zones():
 
 @app.route('/driver/scan/test-vision', methods=['GET'])
 def test_vision():
-    """Quick API sanity check — confirms model + key are working."""
+    """Quick API sanity check — confirms vision provider + key are working."""
     if 'driver_id' not in session:
         return jsonify({'ok': False, 'error': 'not logged in'}), 401
-    if not ANTHROPIC_KEY:
-        return jsonify({'ok': False, 'error': 'ANTHROPIC_API_KEY not set on server'})
+    if not _vision_available():
+        return jsonify({'ok': False, 'error': 'No vision key — set GEMINI_API_KEY (free at aistudio.google.com)'})
     try:
+        if GEMINI_API_KEY:
+            url = f'https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODELS[0]}:generateContent'
+            r = requests.post(url, params={'key': GEMINI_API_KEY}, json={
+                'contents': [{'parts': [{'text': 'Reply with exactly: VISION_API_OK'}]}],
+                'generationConfig': {'maxOutputTokens': 32},
+            }, timeout=30)
+            if not r.ok:
+                return jsonify({'ok': False, 'error': r.text[:300]})
+            text = r.json()['candidates'][0]['content']['parts'][0]['text'].strip()
+            return jsonify({'ok': True, 'response': text, 'provider': 'gemini', 'model': GEMINI_MODELS[0]})
         client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
         resp = client.messages.create(
-            model='claude-haiku-4-5',
-            max_tokens=50,
+            model='claude-haiku-4-5', max_tokens=50,
             messages=[{'role': 'user', 'content': 'Reply with exactly: VISION_API_OK'}]
         )
-        return jsonify({'ok': True, 'response': resp.content[0].text.strip(), 'model': 'claude-haiku-4-5'})
+        return jsonify({'ok': True, 'response': resp.content[0].text.strip(),
+                        'provider': 'anthropic', 'model': 'claude-haiku-4-5'})
     except Exception as e:
         return jsonify({'ok': False, 'error': f'{type(e).__name__}: {str(e)}'})
 
 def _extract_loading_scan(img_bytes):
     """
-    Claude Vision extraction tuned specifically for the Speed X
-    'Loading Scan' screen format. Handles the two-line address
-    layout where unit/apt number appears as the first token on line 2.
+    Vision extraction tuned for the Speed X 'Loading Scan' screen format.
+    Handles the two-line address layout where unit/apt appears on line 2.
     """
-    if not ANTHROPIC_KEY:
+    if not _vision_available():
         raise ValueError('Vision AI not configured')
-    img_bytes = compress_for_api(img_bytes)
-    client    = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-    b64       = base64.standard_b64encode(img_bytes).decode('utf-8')
-    resp = client.messages.create(
-        model='claude-haiku-4-5',
-        max_tokens=4096,
-        messages=[{
-            'role': 'user',
-            'content': [
-                {
-                    'type': 'image',
-                    'source': {'type': 'base64', 'media_type': 'image/jpeg', 'data': b64}
-                },
-                {
-                    'type': 'text',
-                    'text': '''This is a Speed X "Loading Scan" delivery app screenshot.
+    prompt = '''This is a Speed X "Loading Scan" delivery app screenshot.
 Extract EVERY delivery stop visible. Return ONLY a raw JSON array, no markdown, no code blocks.
 
 SCREEN LAYOUT:
@@ -2915,41 +2973,31 @@ OUTPUT FORMAT — JSON array of objects:
 ]
 
 Include EVERY stop card visible on screen. Do not skip any.'''
-                }
-            ]
-        }]
-    )
-    text = resp.content[0].text.strip()
-    log.info(f'[loading_scan] Claude raw (first 500): {text[:500]}')
-    match = re.search(r'\[.*\]', text, re.DOTALL)
-    if not match:
+    text = _vision_extract_text(prompt, img_bytes, max_tokens=4096)
+    log.info(f'[loading_scan] vision raw (first 500): {text[:500]}')
+    try:
+        stops = _parse_json_response(text, expect='array')
+    except (json.JSONDecodeError, ValueError):
         log.warning(f'[loading_scan] No JSON array in response: {text[:300]}')
         return []
-    try:
-        stops = json.loads(match.group())
-        # Words that are NOT valid unit values (keywords, not numbers)
-        _UNIT_WORDS = {'apt', 'apartment', 'unit', 'suite', 'ste', 'floor', 'fl', '#', 'no', 'num', 'usa', 'u'}
-        result = []
-        for s in stops:
-            addr = (s.get('address') or '').strip()
-            if not addr:
-                continue
-            raw_unit = str(s.get('unit') or '').strip()
-            # Clean unit: reject words that aren't real unit identifiers
-            unit = raw_unit if raw_unit.lower() not in _UNIT_WORDS and raw_unit != '' else ''
-            result.append({
-                'address':  addr,
-                'unit':     unit,
-                'name':     (s.get('name') or '').strip(),
-                'tracking': (s.get('tracking') or '').strip(),
-                'stop_num': str(s.get('stop_num') or '').strip(),
-                'phone':    '',
-            })
-        log.info(f'[loading_scan] Extracted {len(result)} stops')
-        return result
-    except json.JSONDecodeError as je:
-        log.warning(f'[loading_scan] JSON parse failed: {je} | raw: {text[:300]}')
-        return []
+    _UNIT_WORDS = {'apt', 'apartment', 'unit', 'suite', 'ste', 'floor', 'fl', '#', 'no', 'num', 'usa', 'u'}
+    result = []
+    for s in stops:
+        addr = (s.get('address') or '').strip()
+        if not addr:
+            continue
+        raw_unit = str(s.get('unit') or '').strip()
+        unit = raw_unit if raw_unit.lower() not in _UNIT_WORDS and raw_unit != '' else ''
+        result.append({
+            'address':  addr,
+            'unit':     unit,
+            'name':     (s.get('name') or '').strip(),
+            'tracking': (s.get('tracking') or '').strip(),
+            'stop_num': str(s.get('stop_num') or '').strip(),
+            'phone':    '',
+        })
+    log.info(f'[loading_scan] Extracted {len(result)} stops')
+    return result
 
 
 @app.route('/driver/scan/screenshots-to-pdf', methods=['POST'])
@@ -3440,7 +3488,8 @@ def test_import():
             'compressed_size_kb': round(compressed_size / 1024),
             'stops_found': len(stops),
             'stops': stops,
-            'anthropic_key_set': bool(ANTHROPIC_KEY)
+            'vision_key_set': _vision_available(),
+            'vision_provider': 'gemini' if GEMINI_API_KEY else ('anthropic' if ANTHROPIC_KEY else 'none'),
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -4794,7 +4843,10 @@ def health():
             git_hash = subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD'], cwd=os.path.dirname(__file__) or '.', stderr=subprocess.DEVNULL).decode().strip()
         except Exception:
             git_hash = 'unknown'
-        return jsonify({'status': 'ok', 'time': datetime.now().isoformat(), 'version': git_hash, 'model': 'claude-haiku-4-5', 'vision_key': 'set' if ANTHROPIC_KEY else 'MISSING'})
+        return jsonify({'status': 'ok', 'time': datetime.now().isoformat(), 'version': git_hash,
+                        'model': _vision_provider_label(),
+                        'vision_key': 'set' if _vision_available() else 'MISSING',
+                        'vision_provider': 'gemini' if GEMINI_API_KEY else ('anthropic' if ANTHROPIC_KEY else 'none')})
     except Exception as e:
         return jsonify({'status': 'error', 'msg': str(e)}), 500
 

@@ -1175,8 +1175,8 @@ function processBlob(blob) {
         if (errEl) {
           errEl.style.display = 'block';
           errEl.innerHTML = `<b>⚠️ ${errMsg}</b>` +
-            (errMsg.includes('configured') || errMsg.includes('API')
-              ? '<div style="color:#9ca3af;font-size:0.8rem;margin-top:6px;">Server needs ANTHROPIC_API_KEY configured.</div>' : '');
+            (errMsg.includes('configured') || errMsg.includes('API') || errMsg.includes('GEMINI')
+              ? '<div style="color:#9ca3af;font-size:0.8rem;margin-top:6px;">Add GEMINI_API_KEY in Render — free at aistudio.google.com/apikey</div>' : '');
         }
         return;
       }
