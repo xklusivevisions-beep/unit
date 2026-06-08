@@ -141,26 +141,19 @@ Return ONLY the JSON array."""
 
 
 def extract_package_label(img_bytes):
-    """Use Claude Vision to extract delivery info from a shipping label photo."""
+    """Use Claude Vision to extract delivery info from a shipping label photo.
+
+    Raises on API / parse errors (with a clear message) so the caller can
+    surface the real reason to the driver instead of a generic failure.
+    """
     if not ANTHROPIC_KEY:
-        return None
-    try:
-        img_bytes = compress_for_api(img_bytes)
-        client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-        b64 = base64.standard_b64encode(img_bytes).decode('utf-8')
-        resp = client.messages.create(
-            model='claude-haiku-4-5',
-            max_tokens=512,
-            messages=[{
-                'role': 'user',
-                'content': [
-                    {
-                        'type': 'image',
-                        'source': {'type': 'base64', 'media_type': 'image/jpeg', 'data': b64}
-                    },
-                    {
-                        'type': 'text',
-                        'text': '''This is a shipping label. Extract the delivery information.
+        raise ValueError('Vision AI not configured — ANTHROPIC_API_KEY missing on server')
+
+    img_bytes = compress_for_api(img_bytes)
+    client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+    b64 = base64.standard_b64encode(img_bytes).decode('utf-8')
+
+    prompt = '''This is a shipping label. Extract the delivery information.
 Return ONLY a JSON object, no markdown, no code blocks.
 
 Extract:
@@ -174,19 +167,61 @@ Example output:
 
 If a field is not visible, use an empty string.
 Return ONLY the JSON object.'''
-                    }
-                ]
-            }]
-        )
-        text = resp.content[0].text.strip()
-        # Strip markdown if model wrapped it
-        if text.startswith('```'):
-            text = re.sub(r'^```[a-z]*\n?', '', text)
-            text = re.sub(r'\n?```$', '', text)
+
+    # Retry transient overload/server errors a couple of times.
+    last_err = None
+    for attempt in range(3):
+        try:
+            resp = client.messages.create(
+                model='claude-haiku-4-5',
+                max_tokens=512,
+                messages=[{
+                    'role': 'user',
+                    'content': [
+                        {'type': 'image',
+                         'source': {'type': 'base64', 'media_type': 'image/jpeg', 'data': b64}},
+                        {'type': 'text', 'text': prompt}
+                    ]
+                }]
+            )
+            break
+        except Exception as e:
+            last_err = e
+            transient = any(t in str(e).lower() for t in ('overloaded', '529', 'rate', 'timeout', '500', '503'))
+            if transient and attempt < 2:
+                import time as _t; _t.sleep(0.6 * (attempt + 1))
+                continue
+            log.error(f'extract_package_label API error: {e}')
+            raise ValueError(f'Vision API error: {e}')
+    else:
+        raise ValueError(f'Vision API error: {last_err}')
+
+    # Pull the first text block out of the response.
+    text = ''
+    for block in (resp.content or []):
+        if getattr(block, 'type', None) == 'text' or getattr(block, 'text', None):
+            text = (block.text or '').strip()
+            if text:
+                break
+    if not text:
+        raise ValueError('Vision model returned an empty response')
+
+    # Strip markdown fences if the model wrapped the JSON.
+    if text.startswith('```'):
+        text = re.sub(r'^```[a-z]*\n?', '', text)
+        text = re.sub(r'\n?```$', '', text)
+    try:
         return json.loads(text)
-    except Exception as e:
-        log.error(f'extract_package_label error: {e}')
-        return None
+    except json.JSONDecodeError:
+        # Last resort: grab the first {...} block from the text.
+        m = re.search(r'\{.*\}', text, re.DOTALL)
+        if m:
+            try:
+                return json.loads(m.group(0))
+            except json.JSONDecodeError:
+                pass
+        log.error(f'extract_package_label parse error; raw: {text[:200]}')
+        raise ValueError('Could not parse label data from the photo')
 
 
 from twilio.rest import Client
@@ -2060,9 +2095,18 @@ def scan_process():
     img_bytes = file.read()
     if not ANTHROPIC_KEY:
         return jsonify({'ok': False, 'error': 'Vision AI not configured — ANTHROPIC_API_KEY missing on server'})
-    result = extract_package_label(img_bytes)
-    if not result:
-        return jsonify({'ok': False, 'error': 'Could not read label — try a clearer photo'})
+    if not img_bytes:
+        return jsonify({'ok': False, 'error': 'Empty photo received — try capturing again'})
+    try:
+        result = extract_package_label(img_bytes)
+    except Exception as e:
+        log.error(f'scan_process label read failed: {e}')
+        return jsonify({'ok': False, 'error': str(e)})
+    if not result or not isinstance(result, dict):
+        return jsonify({'ok': False, 'error': 'Could not read label — try a clearer, well-lit photo'})
+    # Empty extraction = unreadable label (rather than a hard error)
+    if not (result.get('address') or '').strip() and not (result.get('tracking') or '').strip():
+        return jsonify({'ok': False, 'error': 'No address or tracking found — move closer and fill the frame with the label'})
 
     # ─ Lookup mode: check if tracking already in session ─
     tracking = result.get('tracking', '').strip()
