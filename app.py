@@ -8,9 +8,15 @@ from PIL import Image
 import anthropic
 
 ANTHROPIC_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
-# Free vision: get a key at https://aistudio.google.com/apikey (no credit card on free tier)
+# Free vision: get a key at https://aistudio.google.com/apikey
 GEMINI_API_KEY  = os.environ.get('GEMINI_API_KEY') or os.environ.get('GOOGLE_API_KEY', '')
-GEMINI_MODELS   = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-2.0-flash-lite']
+# gemini-2.0-flash is 404 for new keys — use 2.5+ models first
+GEMINI_MODELS   = [
+    'gemini-2.5-flash-lite',
+    'gemini-2.5-flash',
+    'gemini-2.0-flash-lite',
+    'gemini-1.5-flash',
+]
 
 
 def _vision_available():
@@ -63,7 +69,12 @@ def _gemini_vision(prompt, img_bytes, max_tokens=512):
         url = f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent'
         for attempt in range(3):
             try:
-                r = requests.post(url, params={'key': GEMINI_API_KEY}, json=payload, timeout=90)
+                r = requests.post(
+                    url,
+                    headers={'x-goog-api-key': GEMINI_API_KEY, 'Content-Type': 'application/json'},
+                    json=payload,
+                    timeout=90,
+                )
                 if r.status_code in (429, 500, 503) and attempt < 2:
                     import time as _t; _t.sleep(0.6 * (attempt + 1))
                     continue
@@ -73,11 +84,15 @@ def _gemini_vision(prompt, img_bytes, max_tokens=512):
                     except Exception:
                         err_msg = r.text[:200]
                     last_err = f'{model}: {err_msg}'
+                    log.warning(f'[gemini_vision] {last_err}')
                     break
                 data = r.json()
                 cands = data.get('candidates') or []
                 if not cands:
-                    last_err = f'{model}: empty response'
+                    feedback = data.get('promptFeedback') or {}
+                    block = feedback.get('blockReason')
+                    last_err = f'{model}: blocked ({block})' if block else f'{model}: empty response'
+                    log.warning(f'[gemini_vision] {last_err}')
                     break
                 parts = (cands[0].get('content') or {}).get('parts') or []
                 text = ''.join(p.get('text', '') for p in parts).strip()
@@ -131,14 +146,9 @@ def _anthropic_vision(prompt, img_bytes, max_tokens=512):
 
 
 def _vision_extract_text(prompt, img_bytes, max_tokens=512):
-    """Gemini (free) first, Anthropic fallback."""
+    """Use Gemini when configured. Never silently fall back to Anthropic."""
     if GEMINI_API_KEY:
-        try:
-            return _gemini_vision(prompt, img_bytes, max_tokens)
-        except Exception as e:
-            log.warning(f'Gemini vision failed ({e}), trying Anthropic fallback')
-            if not ANTHROPIC_KEY:
-                raise ValueError(str(e))
+        return _gemini_vision(prompt, img_bytes, max_tokens)
     if ANTHROPIC_KEY:
         return _anthropic_vision(prompt, img_bytes, max_tokens)
     raise ValueError(
@@ -2883,7 +2893,9 @@ def test_vision():
     try:
         if GEMINI_API_KEY:
             url = f'https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODELS[0]}:generateContent'
-            r = requests.post(url, params={'key': GEMINI_API_KEY}, json={
+            r = requests.post(url, headers={
+                'x-goog-api-key': GEMINI_API_KEY, 'Content-Type': 'application/json',
+            }, json={
                 'contents': [{'parts': [{'text': 'Reply with exactly: VISION_API_OK'}]}],
                 'generationConfig': {'maxOutputTokens': 32},
             }, timeout=30)
