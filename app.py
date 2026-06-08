@@ -1501,6 +1501,7 @@ def init_db():
         "ALTER TABLE scan_sessions ADD COLUMN prev_centroids TEXT",
         "ALTER TABLE scan_items ADD COLUMN zone_letter TEXT",
         "ALTER TABLE scan_items ADD COLUMN delivery_order INTEGER",
+        "ALTER TABLE scan_items ADD COLUMN scan_order INTEGER",
         "ALTER TABLE stops ADD COLUMN zone_letter TEXT",
         "ALTER TABLE stops ADD COLUMN delivered_at TEXT",
         "ALTER TABLE routes ADD COLUMN est_distance_miles REAL",
@@ -2095,6 +2096,24 @@ def _ss_val(row, key, default=None):
         return default
 
 
+def _scan_order_for_item(item, fallback_index):
+    """Permanent warehouse sticker number (1-based). Set at first scan, never changes."""
+    so = _ss_val(item, 'scan_order')
+    if so is not None and int(so) > 0:
+        return int(so)
+    return fallback_index + 1
+
+
+def _scan_order_map(items):
+    return {item['id']: _scan_order_for_item(item, i) for i, item in enumerate(items)}
+
+
+def _attach_scan_orders(packages, order_map):
+    for p in packages:
+        p['scan_order'] = order_map.get(p['id'], p.get('scan_order') or 0)
+    return packages
+
+
 def _persist_optimized_scan_items(db, session_id, sorted_pkgs):
     """Save locked zone + delivery order onto scan_items for build-route."""
     for p in sorted_pkgs:
@@ -2329,16 +2348,18 @@ def scan_add():
         if assigned and zip_code not in assigned:
             zip_warning = f'ZIP {zip_code} is outside your assigned zone ({driver_row["assigned_zips"]})'
 
+    next_order = db.execute(
+        "SELECT COUNT(*) FROM scan_items WHERE session_id=?", (ss_id,)
+    ).fetchone()[0] + 1
     db.execute(
-        """INSERT INTO scan_items (session_id, tracking, customer_name, address, zip_code, raw_json, dest_lat, dest_lng)
-           VALUES (?,?,?,?,?,?,?,?)""",
-        (ss_id, tracking, name, address, zip_code, json.dumps(data), lat, lng)
+        """INSERT INTO scan_items (session_id, tracking, customer_name, address, zip_code, raw_json, dest_lat, dest_lng, scan_order)
+           VALUES (?,?,?,?,?,?,?,?,?)""",
+        (ss_id, tracking, name, address, zip_code, json.dumps(data), lat, lng, next_order)
     )
     db.commit()
     new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
-    count = db.execute("SELECT COUNT(*) FROM scan_items WHERE session_id=?", (ss_id,)).fetchone()[0]
     db.close()
-    return jsonify({'ok': True, 'count': count, 'geocoded': lat is not None,
+    return jsonify({'ok': True, 'count': next_order, 'scan_order': next_order, 'geocoded': lat is not None,
                    'new_item_id': new_id, 'zip_warning': zip_warning})
 
 
@@ -2380,14 +2401,16 @@ def scan_live_sort():
                         'vehicle_zones': VEHICLE_ZONES.get(vehicle_type, VEHICLE_ZONES['suv_midsize'])})
 
     packages = []
+    order_map = _scan_order_map(items)
     for item in items:
         packages.append({
-            'id':       item['id'],
-            'tracking': item['tracking'],
-            'name':     item['customer_name'],
-            'address':  item['address'],
-            'lat':      item['dest_lat'],
-            'lng':      item['dest_lng'],
+            'id':         item['id'],
+            'tracking':   item['tracking'],
+            'name':       item['customer_name'],
+            'address':    item['address'],
+            'lat':        item['dest_lat'],
+            'lng':        item['dest_lng'],
+            'scan_order': order_map[item['id']],
         })
 
     # Split into geocoded and non-geocoded
@@ -2465,6 +2488,7 @@ def scan_live_sort():
 
     # ─ Assign vehicle cargo zones based on delivery zone letter ─
     sorted_pkgs = assign_vehicle_zones(sorted_pkgs, vehicle_type)
+    _attach_scan_orders(sorted_pkgs, order_map)
 
     # ─ Build zone summary ─
     zone_summary = {}
@@ -2580,6 +2604,8 @@ def scan_optimize():
 
     # Assign vehicle zones
     sorted_pkgs = assign_vehicle_zones(sorted_pkgs, vehicle_type)
+    order_map = _scan_order_map(items)
+    _attach_scan_orders(sorted_pkgs, order_map)
 
     # Compute centroids for locked zone reference
     centroids = compute_centroids(sorted_pkgs)
@@ -2797,12 +2823,12 @@ def scan_import_route():
         s['lng'] = lng
         geocoded_stops.append(s)
 
-    # Insert all stops into scan_items
+    # Insert all stops into scan_items (scan_order = sticker # written at warehouse)
     for i, s in enumerate(geocoded_stops):
         db.execute(
             """INSERT INTO scan_items
-               (session_id, tracking, customer_name, address, zip_code, raw_json, dest_lat, dest_lng)
-               VALUES (?,?,?,?,?,?,?,?)""",
+               (session_id, tracking, customer_name, address, zip_code, raw_json, dest_lat, dest_lng, scan_order)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
             (
                 ss_id,
                 s.get('tracking', '').strip(),
@@ -2812,6 +2838,7 @@ def scan_import_route():
                 json.dumps(s),
                 s.get('lat'),
                 s.get('lng'),
+                i + 1,
             )
         )
     db.commit()

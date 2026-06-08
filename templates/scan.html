@@ -251,6 +251,35 @@
   .lp-zone-letter { font-size: 1.1rem; font-weight: 800; }
   .lp-zone-spot { font-size: 0.8rem; opacity: .85; margin-top: 2px; }
   .lp-zone-count { font-size: 0.72rem; opacity: .7; margin-top: 1px; }
+
+  /* Warehouse sticker numbers */
+  .sticker-prompt { display:none; background:linear-gradient(135deg,#1e3a5f,#0f172a);
+    border:3px solid #f59e0b; border-radius:18px; padding:20px; margin-bottom:14px; text-align:center; }
+  .sticker-prompt.show { display:block; animation: stickerPop .35s ease; }
+  @keyframes stickerPop { from{transform:scale(.92);opacity:0} to{transform:scale(1);opacity:1} }
+  .sticker-prompt-lbl { font-size:0.72rem; color:#fbbf24; font-weight:800; letter-spacing:.12em; text-transform:uppercase; }
+  .sticker-prompt-num { font-size:4rem; font-weight:900; color:#fff; line-height:1; margin:6px 0; }
+  .sticker-prompt-hint { font-size:0.85rem; color:#94a3b8; }
+
+  .list-view-tabs { display:none; gap:8px; margin-bottom:10px; }
+  .list-view-tabs.visible { display:flex; }
+  .list-tab { flex:1; text-align:center; padding:10px; border-radius:10px; font-weight:800; font-size:0.82rem;
+              background:#111827; color:#6b7280; border:1px solid #1f2937; cursor:pointer; }
+  .list-tab.active { background:#f59e0b18; color:#f59e0b; border-color:#f59e0b55; }
+
+  .sticker-sort-guide { display:none; margin-bottom:14px; }
+  .sticker-sort-guide.visible { display:block; }
+  .sticker-sort-hdr { font-size:0.78rem; color:#fbbf24; font-weight:800; margin-bottom:8px; }
+  .sticker-row { display:flex; align-items:center; gap:12px; padding:12px 14px; margin-bottom:6px;
+                 background:#0f172a; border-radius:12px; border:1px solid #1e293b; }
+  .sticker-row-num { min-width:52px; height:52px; border-radius:12px; background:#f59e0b; color:#000;
+                     font-size:1.4rem; font-weight:900; display:flex; align-items:center; justify-content:center; flex-shrink:0; }
+  .sticker-row-arrow { color:#475569; font-size:1.1rem; flex-shrink:0; }
+  .sticker-row-dest { flex:1; min-width:0; }
+  .sticker-row-zone { font-size:1rem; font-weight:800; }
+  .sticker-row-sub { font-size:0.78rem; color:#94a3b8; margin-top:2px; }
+  .sticker-badge { background:#f59e0b; color:#000; border-radius:6px; padding:1px 7px;
+                   font-size:0.72rem; font-weight:900; flex-shrink:0; }
   .lp-start-btn { width: 100%; padding: 16px; background: #3b82f6; color: #fff;
                   border: none; border-radius: 12px; font-size: 1rem; font-weight: 800;
                   cursor: pointer; margin-top: 16px; }
@@ -270,7 +299,7 @@
 
   <!-- Phase banner -->
   <div id="phase-banner" class="scanning">
-    📦 SCAN MODE — Add all packages, then tap OPTIMIZE
+    📦 SCAN MODE — Write each # on the package, then tap OPTIMIZE
   </div>
 
   <!-- Vehicle selector bar -->
@@ -323,6 +352,13 @@
         font-size:0.8rem;font-weight:800;cursor:pointer;flex-shrink:0;margin-left:10px;margin-top:2px;
       ">🗺️ Go</button>
     </div>
+  </div>
+
+  <!-- Sticker prompt — write scan # on package -->
+  <div class="sticker-prompt" id="sticker-prompt">
+    <div class="sticker-prompt-lbl">✏️ Write this on the package</div>
+    <div class="sticker-prompt-num" id="sticker-prompt-num">#1</div>
+    <div class="sticker-prompt-hint">Use a marker or sticker — this number stays with the package through sorting</div>
   </div>
 
   <!-- Camera zone -->
@@ -444,12 +480,20 @@
   <div id="live-map-section">
     <h2>📍 Live Route Sort <span class="sort-badge pending" id="sort-status">Sorting...</span></h2>
     <div id="live-map"></div>
-    <p class="map-legend">Markers colored by zone — numbers = delivery order within zone</p>
+    <p class="map-legend">Marker color = zone · number = sticker # on package</p>
   </div>
 
   <!-- Package list -->
   <div class="pkg-list">
     <h2>Scanned Packages</h2>
+    <div class="list-view-tabs" id="list-view-tabs">
+      <div class="list-tab active" id="tab-by-sticker" onclick="setListView('sticker')">🏷️ By Sticker #</div>
+      <div class="list-tab" id="tab-by-zone" onclick="setListView('zone')">🗺️ By Zone</div>
+    </div>
+    <div class="sticker-sort-guide" id="sticker-sort-guide">
+      <div class="sticker-sort-hdr">SORT GUIDE — grab each sticker #, place in zone shown →</div>
+      <div id="sticker-sort-rows"></div>
+    </div>
     <div id="pkg-list-inner">
       {% if items %}
         {% for item in items %}
@@ -460,7 +504,7 @@
             {% if item.tracking %}
             <div class="pkg-tracking">{{ item.tracking }}</div>
             {% endif %}
-            <span class="pkg-num">#{{ loop.index }}</span>
+            <span class="sticker-badge">#{{ item.scan_order or loop.index }}</span>
           </div>
           <button class="pkg-remove" onclick="removeItem({{ item.id }}, this)">✕</button>
         </div>
@@ -488,7 +532,9 @@
   <div class="loading-plan-bg" id="loading-plan-bg">
     <div class="loading-plan-modal">
       <h2>📦 Loading Plan</h2>
-      <p class="lp-sub">Load in this order — deepest zone first.</p>
+      <p class="lp-sub">Your sticker numbers map to zones below. Grab each #, sort once, load by zone.</p>
+      <div id="loading-plan-stickers" style="max-height:220px;overflow-y:auto;margin-bottom:12px;"></div>
+      <p class="lp-sub" style="margin-top:4px;">Load zones deepest-first:</p>
       <div id="loading-plan-zones"></div>
       <div id="loading-plan-stats" style="font-size:0.8rem;color:#6b7280;text-align:center;margin:8px 0;"></div>
       <button class="lp-start-btn" onclick="startLoading()">✅ Got It — Start Loading</button>
@@ -520,15 +566,72 @@ let lastScannedZone    = null;
 let lastAddedItemId    = null;
 let zonesLocked        = {{ 'true' if zones_locked else 'false' }};
 let currentPhase       = '{{ phase or "scanning" }}';  // 'scanning' | 'optimized'
+let listViewMode       = 'sticker';  // 'sticker' | 'zone' — warehouse sort view
+
+function showStickerPrompt(num) {
+  if (!num || currentPhase === 'optimized') return;
+  const el = document.getElementById('sticker-prompt');
+  document.getElementById('sticker-prompt-num').textContent = '#' + num;
+  el.classList.add('show');
+  if (typeof navigator.vibrate === 'function') navigator.vibrate(80);
+}
+
+function setListView(mode) {
+  listViewMode = mode;
+  document.getElementById('tab-by-sticker').classList.toggle('active', mode === 'sticker');
+  document.getElementById('tab-by-zone').classList.toggle('active', mode === 'zone');
+  document.getElementById('sticker-sort-guide').classList.toggle('visible', mode === 'sticker');
+  refreshLiveSort();
+}
+
+function renderStickerSortGuide(items) {
+  const rows = document.getElementById('sticker-sort-rows');
+  if (!rows) return;
+  const sorted = [...items].sort((a, b) => (a.scan_order || 0) - (b.scan_order || 0));
+  rows.innerHTML = sorted.map(pkg => {
+    const color = pkg.zone_color || '#6b7280';
+    const zoneLabel = pkg.zone_label_full || (pkg.zone_letter ? `Zone ${pkg.zone_letter}` : '?');
+    const spot = pkg.vehicle_zone_label || '';
+    return `
+      <div class="sticker-row" style="border-color:${color}44;">
+        <div class="sticker-row-num">#${pkg.scan_order || '?'}</div>
+        <div class="sticker-row-arrow">→</div>
+        <div class="sticker-row-dest">
+          <div class="sticker-row-zone" style="color:${color}">${pkg.zone_emoji || ''} ${zoneLabel}${spot ? ' · ' + spot : ''}</div>
+          <div class="sticker-row-sub">${nameShort(pkg.name)} · ${(pkg.address || '').slice(0, 42)}</div>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+function renderStickerSortModal(items) {
+  const el = document.getElementById('loading-plan-stickers');
+  if (!el || !items || !items.length) return;
+  const sorted = [...items].sort((a, b) => (a.scan_order || 0) - (b.scan_order || 0));
+  el.innerHTML = sorted.map(pkg => {
+    const color = pkg.zone_color || '#6b7280';
+    const zoneLabel = pkg.zone_label_full || `Zone ${pkg.zone_letter || '?'}`;
+    return `
+      <div style="display:flex;align-items:center;gap:10px;padding:8px 10px;margin-bottom:4px;
+                  background:#111827;border-radius:10px;border-left:3px solid ${color};">
+        <span style="background:#f59e0b;color:#000;font-weight:900;border-radius:8px;padding:4px 10px;min-width:36px;text-align:center;">#${pkg.scan_order}</span>
+        <span style="color:${color};font-weight:700;font-size:0.88rem;">→ ${zoneLabel}</span>
+      </div>`;
+  }).join('');
+}
 
 // Restore UI only if session was actually optimized (page reload)
 if (currentPhase === 'optimized' && zonesLocked) {
+  listViewMode = 'sticker';
   document.addEventListener('DOMContentLoaded', () => {
     const phaseBanner = document.getElementById('phase-banner');
     if (phaseBanner) {
       phaseBanner.className = 'optimized';
-      phaseBanner.textContent = '🔒 ZONES LOCKED — Follow loading plan, then build route';
+      phaseBanner.textContent = '🔒 SORT BY STICKER # — grab each #, place in zone shown';
     }
+    document.getElementById('tab-by-sticker')?.classList.add('active');
+    document.getElementById('tab-by-zone')?.classList.remove('active');
+    document.getElementById('list-view-tabs')?.classList.add('visible');
     const obtn = document.getElementById('optimize-btn');
     if (obtn) obtn.style.display = 'none';
     const bbtn = document.getElementById('build-btn');
@@ -655,6 +758,11 @@ function showLoadingPlan(data) {
   const modal = document.getElementById('loading-plan-bg');
   const zonesEl = document.getElementById('loading-plan-zones');
   const statsEl = document.getElementById('loading-plan-stats');
+
+  renderStickerSortModal(data.items || []);
+  listViewMode = 'sticker';
+  document.getElementById('tab-by-sticker')?.classList.add('active');
+  document.getElementById('tab-by-zone')?.classList.remove('active');
 
   zonesEl.innerHTML = (data.loading_plan || []).map(z => `
     <div class="lp-zone-row" style="background:${z.color}22;border:2px solid ${z.color};">
@@ -843,15 +951,28 @@ function refreshLiveSort() {
       // Sync phase from server
       if (data.phase) currentPhase = data.phase;
 
+      const isScanPhase = currentPhase === 'scanning' && !data.zones_locked;
+
       // Update phase banner
       const phaseBanner = document.getElementById('phase-banner');
       if (phaseBanner) {
         if (currentPhase === 'optimized') {
           phaseBanner.className = 'optimized';
-          phaseBanner.textContent = '🔒 ZONES LOCKED — Load by zone, then build route';
+          phaseBanner.textContent = '🔒 SORT BY STICKER # — grab each #, place in zone shown';
         } else {
           phaseBanner.className = 'scanning';
-          phaseBanner.textContent = `📦 SCAN MODE — ${data.total || 0} packages scanned, tap OPTIMIZE when done`;
+          phaseBanner.textContent = `📦 SCAN MODE — ${data.total || 0} scanned · write # on each package`;
+        }
+      }
+
+      // Show list view tabs + sticker sort guide when optimized
+      const tabsEl = document.getElementById('list-view-tabs');
+      if (tabsEl) {
+        const showTabs = !isScanPhase && data.zones_locked;
+        tabsEl.classList.toggle('visible', showTabs);
+        if (showTabs) {
+          document.getElementById('sticker-sort-guide').classList.toggle('visible', listViewMode === 'sticker');
+          renderStickerSortGuide(data.items);
         }
       }
 
@@ -866,8 +987,6 @@ function refreshLiveSort() {
       initMap();
       // Force Leaflet to recalculate size after container becomes visible
       setTimeout(() => liveMap && liveMap.invalidateSize(), 50);
-
-      const isScanPhase = currentPhase === 'scanning' && !data.zones_locked;
 
       // Update sort status badge + lock state
       const badge = document.getElementById('sort-status');
@@ -927,15 +1046,15 @@ function refreshLiveSort() {
 
       data.items.forEach((pkg, idx) => {
         if (!pkg.lat || !pkg.lng) return;
-        const color  = isScanPhase ? '#6b7280' : (pkg.zone_color || '#3b82f6');
-        const label  = isScanPhase ? (pkg.scan_order || idx + 1) : (pkg.zone_label_full || pkg.delivery_order);
+        const color  = isScanPhase ? '#f59e0b' : (pkg.zone_color || '#3b82f6');
+        const label  = pkg.scan_order || idx + 1;
         const icon = L.divIcon({
           html: `<div style="background:${color};color:#fff;border-radius:50%;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:10px;border:2px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.6);white-space:nowrap;">${label}</div>`,
           className: '', iconSize: [28, 28], iconAnchor: [14, 14]
         });
-        const popupExtra = isScanPhase ? '' : `<br>📦 ${pkg.vehicle_zone_label || ''}`;
+        const popupExtra = isScanPhase ? '' : `<br>${pkg.zone_label_full || ''} · ${pkg.vehicle_zone_label || ''}`;
         const marker = L.marker([pkg.lat, pkg.lng], { icon })
-          .bindPopup(`<b>${isScanPhase ? 'Scan #' + label : label}</b><br>${pkg.name || ''}<br><small>${pkg.address}</small>${popupExtra}`);
+          .bindPopup(`<b>Sticker #${label}</b>${isScanPhase ? '' : '<br>' + (pkg.zone_emoji||'') + ' ' + (pkg.zone_label_full||'')}${popupExtra}<br>${pkg.name || ''}<br><small>${pkg.address}</small>`);
         marker.addTo(liveMap);
         mapMarkers.push(marker);
         allCoords.push([pkg.lat, pkg.lng]);
@@ -1007,11 +1126,12 @@ function refreshLiveSort() {
 
       if (isScanPhase) {
         data.items.forEach((pkg, idx) => {
+          const sn = pkg.scan_order || idx + 1;
           listEl.innerHTML += `
-            <div class="pkg-item" id="item-${pkg.id}" style="border-left:3px solid #6b7280;">
+            <div class="pkg-item" id="item-${pkg.id}" style="border-left:3px solid #f59e0b;">
               <div class="pkg-info">
                 <div class="pkg-name" style="display:flex;align-items:center;gap:8px;">
-                  <span style="background:#374151;color:#9ca3af;border-radius:6px;padding:1px 7px;font-size:0.8rem;font-weight:800;flex-shrink:0;">#${pkg.scan_order || idx + 1}</span>
+                  <span class="sticker-badge">#${sn}</span>
                   ${nameShort(pkg.name)}
                 </div>
                 <div class="pkg-addr">${pkg.address}</div>
@@ -1020,6 +1140,13 @@ function refreshLiveSort() {
               <button class="pkg-remove" onclick="removeItem(${pkg.id}, this)">✕</button>
             </div>`;
         });
+        return;
+      }
+
+      // Optimized + sticker view: hide zone-grouped list (sort guide shows instead)
+      if (listViewMode === 'sticker') {
+        listEl.innerHTML = `<div style="color:#6b7280;font-size:0.82rem;padding:8px 4px;text-align:center;">
+          ↑ Use the sort guide above — each sticker # maps to its zone</div>`;
         return;
       }
 
@@ -1061,7 +1188,8 @@ function refreshLiveSort() {
         listEl.innerHTML += `
           <div class="pkg-item" id="item-${pkg.id}" style="border-left:3px solid ${color};${!isLocked?'opacity:0.75;':''}">
             <div class="pkg-info">
-              <div class="pkg-name" style="display:flex;align-items:center;gap:8px;">
+              <div class="pkg-name" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                <span class="sticker-badge">#${pkg.scan_order || '?'}</span>
                 <span style="background:${color};color:#fff;border-radius:6px;padding:1px 7px;font-size:0.8rem;font-weight:800;flex-shrink:0;">${label}</span>
                 ${nameShort(pkg.name)}
               </div>
@@ -1226,7 +1354,7 @@ function processBlob(blob) {
           lastScannedZone  = null;
           lastAddedItemId  = currentPhase === 'optimized' ? (added.new_item_id || null) : null;
           showToast('Package added ✓' + (added.geocoded ? ' 📍' : ''));
-          // Show optimize button during scanning phase
+          if (added.scan_order && currentPhase !== 'optimized') showStickerPrompt(added.scan_order);
           if (currentPhase === 'scanning') {
             const obtn = document.getElementById('optimize-btn');
             if (obtn && pkgCount >= 1) obtn.classList.add('visible');
@@ -1354,6 +1482,9 @@ function confirmPackage() {
       zipWarnEl.classList.remove('show');
     }
     showToast('Package added ✓' + (data.geocoded ? ' 📍' : ''));
+    if (data.scan_order && currentPhase !== 'optimized') {
+      showStickerPrompt(data.scan_order);
+    }
     // Reset zone banner flag — only show zone banner after optimize (locked phase)
     lastScannedZone = null;
     lastAddedItemId = currentPhase === 'optimized' ? (data.new_item_id || null) : null;
