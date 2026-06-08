@@ -364,6 +364,10 @@
     <button class="lookup-dismiss" onclick="dismissLookup()" style="margin-top:8px;">Got it ✓</button>
   </div>
 
+  <!-- Scan error (never destroys preview form) -->
+  <div id="scan-error" style="display:none;background:#1f2937;border:1px solid #ef4444;border-radius:16px;
+       padding:14px 16px;margin-bottom:16px;color:#fca5a5;font-size:0.9rem;"></div>
+
   <!-- Preview card -->
   <div id="preview-card">
     <h3>Confirm Package</h3>
@@ -487,7 +491,7 @@
       <p class="lp-sub">Load in this order — deepest zone first.</p>
       <div id="loading-plan-zones"></div>
       <div id="loading-plan-stats" style="font-size:0.8rem;color:#6b7280;text-align:center;margin:8px 0;"></div>
-      <button class="lp-start-btn" onclick="startLoading()">\u2705 Got It — Start Loading</button>
+      <button class="lp-start-btn" onclick="startLoading()">✅ Got It — Start Loading</button>
     </div>
   </div>
 </div>
@@ -517,10 +521,8 @@ let lastAddedItemId    = null;
 let zonesLocked        = {{ 'true' if zones_locked else 'false' }};
 let currentPhase       = '{{ phase or "scanning" }}';  // 'scanning' | 'optimized'
 
-// Restore UI if session was already optimized (page reload)
-if (currentPhase === 'optimized' || zonesLocked) {
-  currentPhase = 'optimized';
-  zonesLocked = true;
+// Restore UI only if session was actually optimized (page reload)
+if (currentPhase === 'optimized' && zonesLocked) {
   document.addEventListener('DOMContentLoaded', () => {
     const phaseBanner = document.getElementById('phase-banner');
     if (phaseBanner) {
@@ -614,10 +616,16 @@ function handleImportFiles(input) {
   input.value = '';
 }
 
-// Hide import panel if already locked
-if (pkgCount > 0) {
-  document.getElementById('import-panel').style.display = 'none';
-}
+// Page load: show optimize button when packages exist in scan phase
+document.addEventListener('DOMContentLoaded', () => {
+  if (pkgCount > 0) {
+    document.getElementById('import-panel').style.display = 'none';
+    if (currentPhase === 'scanning' && !zonesLocked) {
+      const obtn = document.getElementById('optimize-btn');
+      if (obtn) obtn.classList.add('visible');
+    }
+  }
+});
 
 // ── Optimize Route (Phase 2) ──
 function optimizeRoute() {
@@ -1152,6 +1160,8 @@ function processBlob(blob) {
   if (!blob) { showToast('No image captured — try again', true); return; }
   document.getElementById('loading').style.display = 'block';
   document.getElementById('preview-card').style.display = 'none';
+  const errEl = document.getElementById('scan-error');
+  if (errEl) errEl.style.display = 'none';
   const fd = new FormData();
   fd.append('photo', blob, 'label.jpg');
   fetch('/driver/scan/process', { method: 'POST', body: fd })
@@ -1159,18 +1169,29 @@ function processBlob(blob) {
     .then(data => {
       document.getElementById('loading').style.display = 'none';
       if (!data.ok) {
-        // Show error prominently — not just a brief toast
         const errMsg = data.error || 'Could not read label';
         showToast(errMsg, true);
-        // If it’s a config error, show it in the preview card too so it’s not missed
-        if (errMsg.includes('configured') || errMsg.includes('API')) {
-          document.getElementById('preview-card').style.display = 'block';
-          document.getElementById('preview-card').innerHTML = `<div style="color:#ef4444;font-size:0.9rem;font-weight:700;">⚠️ ${errMsg}</div><div style="color:#9ca3af;font-size:0.8rem;margin-top:6px;">Contact support — server needs ANTHROPIC_API_KEY configured.</div>`;
+        const errEl = document.getElementById('scan-error');
+        if (errEl) {
+          errEl.style.display = 'block';
+          errEl.innerHTML = `<b>⚠️ ${errMsg}</b>` +
+            (errMsg.includes('configured') || errMsg.includes('API')
+              ? '<div style="color:#9ca3af;font-size:0.8rem;margin-top:6px;">Server needs ANTHROPIC_API_KEY configured.</div>' : '');
         }
         return;
       }
+      const errEl = document.getElementById('scan-error');
+      if (errEl) errEl.style.display = 'none';
 
-      // ─ Lookup mode: package already in session ─
+      // ─ Duplicate: already scanned today (scan phase) ─
+      if (data.mode === 'duplicate') {
+        showToast('Already scanned ✓ — ' + (data.tracking || 'this package'));
+        dismissLookup();
+        setTimeout(refreshLiveSort, 300);
+        return;
+      }
+
+      // ─ Lookup mode: package already in session (zones locked) ─
       if (data.mode === 'lookup') {
         if (data.zones_locked) {
           // ─ ZONES LOCKED: zero taps — flash zone banner instantly, no card ─
@@ -1390,6 +1411,8 @@ function removeItem(id, btn) {
 function buildRoute() {
   if (!zonesLocked && currentPhase !== 'optimized') {
     showToast('Tap OPTIMIZE to lock zones first', true);
+    const obtn = document.getElementById('optimize-btn');
+    if (obtn) { obtn.classList.add('visible'); obtn.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
     return;
   }
   const btn = document.getElementById('build-btn');

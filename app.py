@@ -1954,15 +1954,51 @@ def _get_or_create_scan_session(db, driver_id):
     return row['id']
 
 
+def _ss_val(row, key, default=None):
+    """Safe column read for sqlite Row / PG dict (missing migration columns)."""
+    if not row:
+        return default
+    try:
+        if hasattr(row, 'keys') and key not in row.keys():
+            return default
+        val = row[key]
+        return val if val is not None else default
+    except (KeyError, IndexError, TypeError):
+        return default
+
+
 def _persist_optimized_scan_items(db, session_id, sorted_pkgs):
     """Save locked zone + delivery order onto scan_items for build-route."""
     for p in sorted_pkgs:
-        db.execute(
-            """UPDATE scan_items SET zone_letter=?, delivery_order=?
-               WHERE id=? AND session_id=?""",
-            (p.get('zone_letter', '?'), p.get('delivery_order', 0), p['id'], session_id)
-        )
+        try:
+            db.execute(
+                """UPDATE scan_items SET zone_letter=?, delivery_order=?
+                   WHERE id=? AND session_id=?""",
+                (p.get('zone_letter', '?'), p.get('delivery_order', 0), p['id'], session_id)
+            )
+        except Exception as e:
+            log.warning(f'[scan] persist zone/order failed for item {p.get("id")}: {e}')
     db.commit()
+
+
+def _unlock_stale_scan_session(db, ss):
+    """
+    Auto-lock from the old flow set zones_locked without phase='optimized'.
+    Reset so drivers can scan → optimize → build cleanly.
+    """
+    if not ss:
+        return ss
+    phase = _ss_val(ss, 'phase', 'scanning') or 'scanning'
+    if _ss_val(ss, 'zones_locked', 0) and phase != 'optimized':
+        db.execute(
+            """UPDATE scan_sessions
+               SET zones_locked=0, zone_centroids=NULL, prev_centroids=NULL, phase='scanning'
+               WHERE id=?""",
+            (ss['id'],)
+        )
+        db.commit()
+        return db.execute("SELECT * FROM scan_sessions WHERE id=?", (ss['id'],)).fetchone()
+    return ss
 
 
 @app.route('/driver/scan', methods=['GET'])
@@ -1972,12 +2008,13 @@ def scan_packages():
     db = get_db()
     ss_id = _get_or_create_scan_session(db, session['driver_id'])
     ss = db.execute("SELECT * FROM scan_sessions WHERE id=?", (ss_id,)).fetchone()
+    ss = _unlock_stale_scan_session(db, ss)
     items = db.execute(
         "SELECT * FROM scan_items WHERE session_id=? ORDER BY id ASC",
         (ss_id,)
     ).fetchall()
-    zones_locked = bool(ss['zones_locked']) if ss else False
-    phase = (ss['phase'] if ss and ss['phase'] else 'scanning')
+    zones_locked = bool(_ss_val(ss, 'zones_locked', 0)) if ss else False
+    phase = _ss_val(ss, 'phase', 'scanning') or 'scanning'
     db.close()
     return render_template(
         'scan.html',
@@ -2023,9 +2060,21 @@ def scan_process():
                 (ss['id'], tracking)
             ).fetchone()
             if existing:
+                ss = _unlock_stale_scan_session(db, ss)
+                zones_locked = bool(_ss_val(ss, 'zones_locked', 0))
+                phase = _ss_val(ss, 'phase', 'scanning') or 'scanning'
+                # During scan phase, tell client it's a duplicate — not a zone lookup
+                if not zones_locked or phase != 'optimized':
+                    db.close()
+                    return jsonify({
+                        'ok': True,
+                        'mode': 'duplicate',
+                        'tracking': tracking,
+                        'address': (f"{existing['customer_name']} — " if existing['customer_name'] else '') + existing['address'],
+                        'data': result,
+                    })
                 # Package already in session — look up its zone + vehicle spot
                 stored_cents = json.loads(ss['zone_centroids']) if ss['zone_centroids'] else None
-                zones_locked = bool(ss['zones_locked'])
                 lookup_zone  = {}
                 if stored_cents and existing['dest_lat'] and existing['dest_lng']:
                     pkg_pt  = {'lat': existing['dest_lat'], 'lng': existing['dest_lng']}
@@ -2179,10 +2228,11 @@ def scan_live_sort():
     driver   = db.execute("SELECT vehicle_type FROM drivers WHERE id=?", (session['driver_id'],)).fetchone()
     ss_full  = db.execute("SELECT * FROM scan_sessions WHERE id=?", (ss['id'],)).fetchone()
     vehicle_type    = (driver['vehicle_type'] if driver and driver['vehicle_type'] else 'suv_midsize')
-    zones_locked    = bool(ss_full['zones_locked']) if ss_full else False
+    ss_full         = _unlock_stale_scan_session(db, ss_full) if ss_full else None
+    zones_locked    = bool(_ss_val(ss_full, 'zones_locked', 0)) if ss_full else False
     stored_cents    = json.loads(ss_full['zone_centroids']) if ss_full and ss_full['zone_centroids'] else None
     prev_cents      = json.loads(ss_full['prev_centroids'])  if ss_full and ss_full['prev_centroids']  else None
-    current_phase   = ss_full['phase'] if ss_full and ss_full['phase'] else 'scanning'
+    current_phase   = _ss_val(ss_full, 'phase', 'scanning') or 'scanning'
     db.close()
 
     if not items:
@@ -2521,7 +2571,10 @@ def scan_import_route():
     # Clear any existing items so import is a clean slate
     db.execute("DELETE FROM scan_items WHERE session_id=?", (ss_id,))
     db.execute(
-        "UPDATE scan_sessions SET zones_locked=0, zone_centroids=NULL, prev_centroids=NULL, status='scanning' WHERE id=?",
+        """UPDATE scan_sessions
+           SET zones_locked=0, zone_centroids=NULL, prev_centroids=NULL,
+               phase='scanning', status='scanning'
+           WHERE id=?""",
         (ss_id,)
     )
     db.commit()
@@ -2626,27 +2679,42 @@ def scan_import_route():
         )
     db.commit()
 
-    # Build package list for clustering
+    driver = db.execute("SELECT vehicle_type FROM drivers WHERE id=?", (session['driver_id'],)).fetchone()
+    vehicle_type = (driver['vehicle_type'] if driver and driver['vehicle_type'] else 'suv_midsize')
+
+    db_items = db.execute(
+        "SELECT * FROM scan_items WHERE session_id=? ORDER BY id ASC", (ss_id,)
+    ).fetchall()
     geo_pkgs = [
-        {'id': i, 'lat': s['lat'], 'lng': s['lng'],
-         'delivery_order': i + 1, 'address': s.get('address', ''),
-         'tracking': s.get('tracking', ''), 'name': s.get('name', '')}
-        for i, s in enumerate(geocoded_stops)
-        if s.get('lat') and s.get('lng')
+        {'id': r['id'], 'lat': r['dest_lat'], 'lng': r['dest_lng'],
+         'address': r['address'], 'tracking': r['tracking'] or '',
+         'name': r['customer_name'] or ''}
+        for r in db_items if r['dest_lat'] and r['dest_lng']
     ]
 
-    if len(geo_pkgs) < 2:
+    if len(geo_pkgs) < 1:
         db.close()
         return jsonify({
             'ok': True, 'imported': len(unique_stops),
-            'geocoded': len(geo_pkgs),
-            'zones_locked': False,
-            'message': 'Imported but not enough geocoded stops to cluster zones yet'
+            'geocoded': 0, 'zones_locked': False,
+            'message': 'Imported but addresses could not be geocoded — check and re-import',
         })
 
-    # Cluster + lock zones immediately
-    clustered = assign_delivery_zones(geo_pkgs)
-    centroids  = compute_centroids(clustered)
+    # Optimize + lock zones (same pipeline as manual scan → optimize)
+    sorted_pkgs, _, _ = build_optimized_route(geo_pkgs)
+    ungeoced = [
+        {'id': r['id'], 'address': r['address'], 'tracking': r['tracking'] or '',
+         'name': r['customer_name'] or ''}
+        for r in db_items if not (r['dest_lat'] and r['dest_lng'])
+    ]
+    n = len(sorted_pkgs)
+    for p in ungeoced:
+        p.update({'zone_letter': '?', 'delivery_order': n + 1})
+        sorted_pkgs.append(p)
+        n += 1
+    sorted_pkgs = assign_vehicle_zones(sorted_pkgs, vehicle_type)
+    centroids = compute_centroids(sorted_pkgs)
+    _persist_optimized_scan_items(db, ss_id, sorted_pkgs)
 
     db.execute(
         "UPDATE scan_sessions SET zones_locked=1, zone_centroids=?, locked_at=?, phase='optimized' WHERE id=?",
@@ -2654,21 +2722,21 @@ def scan_import_route():
     )
     db.commit()
 
-    # Build zone summary for response
     zone_counts = {}
-    for p in clustered:
+    for p in sorted_pkgs:
         l = p.get('zone_letter', '?')
-        zone_counts[l] = zone_counts.get(l, 0) + 1
+        if l != '?':
+            zone_counts[l] = zone_counts.get(l, 0) + 1
 
     db.close()
     return jsonify({
-        'ok':          True,
-        'imported':    len(unique_stops),
-        'geocoded':    len(geo_pkgs),
+        'ok':           True,
+        'imported':     len(unique_stops),
+        'geocoded':     len(geo_pkgs),
         'zones_locked': True,
-        'n_zones':     len(centroids),
-        'zone_counts': zone_counts,
-        'centroids':   centroids,
+        'n_zones':      len(centroids),
+        'zone_counts':  zone_counts,
+        'centroids':    centroids,
     })
 
 
@@ -2995,7 +3063,8 @@ def scan_build_route():
     if not ss:
         db.close()
         return jsonify({'ok': False, 'error': 'No scan session found'})
-    if not ss['zones_locked']:
+    ss = _unlock_stale_scan_session(db, ss)
+    if not _ss_val(ss, 'zones_locked', 0):
         db.close()
         return jsonify({'ok': False, 'error': 'Tap OPTIMIZE to lock zones before building route'})
     ss_id = ss['id']
@@ -3040,14 +3109,23 @@ def scan_build_route():
                 failed_addresses.append(item['address'])
         import secrets as _sec
         token = _sec.token_urlsafe(12)
-        zone_letter = item['zone_letter'] if 'zone_letter' in item.keys() else None
-        db.execute(
-            """INSERT INTO stops
-               (route_id, stop_number, address, customer_name, tracking, dest_lat, dest_lng, status, token, zone_letter)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""",
-            (route_id, i + 1, item['address'], item['customer_name'],
-             item['tracking'], lat, lng, 'pending', token, zone_letter)
-        )
+        zone_letter = _ss_val(item, 'zone_letter')
+        try:
+            db.execute(
+                """INSERT INTO stops
+                   (route_id, stop_number, address, customer_name, tracking, dest_lat, dest_lng, status, token, zone_letter)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (route_id, i + 1, item['address'], item['customer_name'],
+                 item['tracking'], lat, lng, 'pending', token, zone_letter)
+            )
+        except Exception:
+            db.execute(
+                """INSERT INTO stops
+                   (route_id, stop_number, address, customer_name, tracking, dest_lat, dest_lng, status, token)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                (route_id, i + 1, item['address'], item['customer_name'],
+                 item['tracking'], lat, lng, 'pending', token)
+            )
     db.commit()
 
     # Route order already set by optimize — compute stats from locked sequence
