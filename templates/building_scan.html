@@ -1,0 +1,130 @@
+{% extends 'base.html' %}
+{% block title %}UNIT — Scan Building QR{% endblock %}
+
+{% block content %}
+<div class="container-fluid p-4 pb-nav" style="max-width:480px;margin:0 auto;">
+
+  <div class="d-flex align-items-center justify-content-between mb-3">
+    <a href="/driver" class="text-decoration-none" style="color:#555;padding:8px;margin:-8px;">
+      <i class="fas fa-arrow-left"></i>
+    </a>
+    <div class="text-center">
+      <div class="unit-logo" style="font-size:1.1rem;">UNIT<span>.</span></div>
+      <small class="text-secondary">Building Access</small>
+    </div>
+    <span style="width:32px;"></span>
+  </div>
+
+  <h1 style="font-size:1.3rem;font-weight:800;margin-bottom:6px;">📷 Scan Building QR</h1>
+  <p class="text-secondary" style="font-size:0.88rem;margin-bottom:16px;">
+    Point your camera at the QR code posted at the building entrance to unlock access codes and unit notes.
+  </p>
+
+  <!-- Scanner viewport -->
+  <div id="reader" style="width:100%;border-radius:16px;overflow:hidden;border:2px solid #222;background:#000;"></div>
+
+  <div id="scan-status" style="text-align:center;color:#9ca3af;font-size:0.85rem;margin-top:12px;">
+    Starting camera…
+  </div>
+
+  <!-- Manual fallback -->
+  <div style="margin-top:20px;background:#0f172a;border:1px solid #1e293b;border-radius:14px;padding:16px;">
+    <div style="font-size:0.78rem;color:#64748b;font-weight:700;margin-bottom:8px;">QR won't scan? Enter the building code:</div>
+    <div style="display:flex;gap:8px;">
+      <input id="manual-code" type="text" placeholder="bld_xxxxxxxx" autocomplete="off"
+        style="flex:1;background:#1e293b;border:1px solid #334155;color:#fff;border-radius:10px;padding:10px 12px;font-size:0.9rem;">
+      <button onclick="goManual()"
+        style="background:#3b82f6;color:#fff;border:none;border-radius:10px;padding:10px 16px;font-weight:700;cursor:pointer;">Go</button>
+    </div>
+  </div>
+</div>
+
+<div class="nav-bottom">
+  <a href="/driver"><i class="fas fa-home"></i>Home</a>
+  <a href="/driver/route-log"><i class="fas fa-receipt"></i>Pay Log</a>
+  <a href="/driver/scan"><i class="fas fa-camera"></i>Scan</a>
+  <a href="/account"><i class="fas fa-user"></i>Account</a>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script>
+const statusEl = document.getElementById('scan-status');
+let handled = false;
+
+// Extract a building code from either a full URL or a raw code string.
+function parseBuildingCode(text) {
+  if (!text) return null;
+  text = text.trim();
+  // URL form: https://host/building/bld_xxxx
+  const m = text.match(/building\/(bld_[A-Za-z0-9]+)/i);
+  if (m) return m[1];
+  // Raw code form: bld_xxxx
+  const r = text.match(/^(bld_[A-Za-z0-9]+)$/i);
+  if (r) return r[1];
+  // Last path segment fallback
+  try {
+    const u = new URL(text);
+    const seg = u.pathname.split('/').filter(Boolean).pop();
+    if (seg && /^bld_/i.test(seg)) return seg;
+  } catch (e) {}
+  return null;
+}
+
+function onScanSuccess(decodedText) {
+  if (handled) return;
+  const code = parseBuildingCode(decodedText);
+  if (!code) {
+    statusEl.textContent = '⚠️ Not a UNIT building QR — try again';
+    statusEl.style.color = '#f59e0b';
+    return;
+  }
+  handled = true;
+  statusEl.textContent = '✓ Building found — opening…';
+  statusEl.style.color = '#10b981';
+  if (typeof navigator.vibrate === 'function') navigator.vibrate(120);
+  setTimeout(() => { window.location.href = '/building/' + encodeURIComponent(code); }, 350);
+}
+
+function goManual() {
+  const code = parseBuildingCode(document.getElementById('manual-code').value);
+  if (!code) {
+    statusEl.textContent = '⚠️ Enter a valid code like bld_a1b2c3d4';
+    statusEl.style.color = '#f59e0b';
+    return;
+  }
+  window.location.href = '/building/' + encodeURIComponent(code);
+}
+
+const scanner = new Html5Qrcode('reader');
+Html5Qrcode.getCameras().then(cameras => {
+  if (!cameras || !cameras.length) {
+    statusEl.textContent = 'No camera found — use manual entry below';
+    statusEl.style.color = '#f59e0b';
+    return;
+  }
+  // Prefer the rear camera
+  const rear = cameras.find(c => /back|rear|environment/i.test(c.label)) || cameras[cameras.length - 1];
+  scanner.start(
+    rear.id,
+    { fps: 10, qrbox: { width: 240, height: 240 } },
+    onScanSuccess,
+    () => {}  // ignore per-frame decode failures
+  ).then(() => {
+    statusEl.textContent = 'Point at the building QR code';
+    statusEl.style.color = '#9ca3af';
+  }).catch(err => {
+    statusEl.textContent = 'Camera blocked — allow access or use manual entry';
+    statusEl.style.color = '#ef4444';
+  });
+}).catch(() => {
+  statusEl.textContent = 'Camera unavailable — use manual entry below';
+  statusEl.style.color = '#f59e0b';
+});
+
+window.addEventListener('beforeunload', () => {
+  try { scanner.stop().catch(()=>{}); } catch (e) {}
+});
+</script>
+{% endblock %}

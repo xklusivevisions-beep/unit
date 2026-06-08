@@ -1,0 +1,164 @@
+{% extends 'base.html' %}
+{% block title %}UNIT Admin — Buildings{% endblock %}
+
+{% block extra_css %}
+<style>
+  .ab-wrap { max-width: 760px; margin: 0 auto; }
+  .ab-card { background:#0f172a; border:1px solid #1e293b; border-radius:16px; padding:18px; margin-bottom:16px; }
+  .ab-card h3 { font-size:1rem; font-weight:800; margin:0 0 12px; }
+  .ab-field { margin-bottom:10px; }
+  .ab-field label { display:block; font-size:0.72rem; color:#64748b; font-weight:700; margin-bottom:4px; }
+  .ab-field input, .ab-field textarea {
+    width:100%; background:#1e293b; border:1px solid #334155; color:#f1f5f9;
+    border-radius:10px; padding:10px 12px; font-size:0.9rem; box-sizing:border-box; }
+  .ab-grid2 { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .ab-btn { background:#10b981; color:#000; border:none; border-radius:10px; padding:10px 16px;
+            font-weight:800; cursor:pointer; font-size:0.9rem; }
+  .ab-btn.blue { background:#3b82f6; color:#fff; }
+  .ab-btn.sm { padding:6px 12px; font-size:0.78rem; }
+  .ab-btn.red { background:#7f1d1d; color:#fecaca; }
+  .ab-qr { text-align:center; background:#fff; border-radius:12px; padding:14px; }
+  .ab-qr canvas, .ab-qr img { display:block; margin:0 auto; }
+  .ab-code { font-family:monospace; font-size:0.8rem; color:#60a5fa; word-break:break-all; }
+  .unit-pill { display:flex; justify-content:space-between; align-items:center;
+               background:#1e293b; border-radius:10px; padding:8px 12px; margin-bottom:6px; }
+  .unit-pill .u { font-weight:700; color:#f1f5f9; font-size:0.85rem; }
+  .unit-pill .n { color:#94a3b8; font-size:0.8rem; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid p-4 pb-nav ab-wrap">
+
+  <div class="d-flex align-items-center justify-content-between mb-3">
+    <a href="/admin" class="text-decoration-none" style="color:#555;"><i class="fas fa-arrow-left"></i> Admin</a>
+    <div class="unit-logo" style="font-size:1.2rem;">UNIT<span>.</span></div>
+    <span></span>
+  </div>
+
+  <h1 style="font-size:1.4rem;font-weight:900;margin-bottom:4px;">🏢 Building Access</h1>
+  <p class="text-secondary" style="font-size:0.85rem;margin-bottom:18px;">
+    Add buildings, gate codes, package room notes, and per-unit delivery instructions.
+    Each building gets a printable QR code drivers scan on-site.
+  </p>
+
+  {% for msg in get_flashed_messages(category_filter=['beta_pin']) %}
+  <div style="background:#10b98118;border:1px solid #10b98155;color:#6ee7b7;border-radius:10px;padding:10px 14px;margin-bottom:14px;font-size:0.85rem;">{{ msg }}</div>
+  {% endfor %}
+
+  <!-- New building -->
+  <div class="ab-card">
+    <h3>➕ Add New Building</h3>
+    <form method="POST" action="/admin/buildings/save">
+      <div class="ab-field"><label>Building Name</label><input name="name" placeholder="Woodward Lofts"></div>
+      <div class="ab-field"><label>Address *</label><input name="address" placeholder="3439 Woodward Ave, Detroit, MI 48201" required></div>
+      <div class="ab-grid2">
+        <div class="ab-field"><label>Gate / Access Code</label><input name="general_access_code" placeholder="#4471"></div>
+        <div class="ab-field"><label>Latitude / Longitude (optional)</label>
+          <div class="ab-grid2">
+            <input name="lat" placeholder="42.3501">
+            <input name="lng" placeholder="-83.0601">
+          </div>
+        </div>
+      </div>
+      <div class="ab-field"><label>Package Room Notes</label><textarea name="package_room_notes" rows="2" placeholder="Mail room left of lobby, code 2240"></textarea></div>
+      <div class="ab-field"><label>Lockbox Notes</label><textarea name="lockbox_notes" rows="2" placeholder="Lockbox on gas meter, right side"></textarea></div>
+      <div class="ab-field"><label>Interior Directions</label><textarea name="interior_directions" rows="2" placeholder="Elevator to floor, units face courtyard"></textarea></div>
+      <button class="ab-btn" type="submit">Save Building</button>
+      <span style="font-size:0.75rem;color:#64748b;margin-left:8px;">Coordinates auto-fill from the address if left blank.</span>
+    </form>
+  </div>
+
+  <!-- Existing buildings -->
+  {% for row in rows %}
+  {% set b = row.b %}
+  <div class="ab-card">
+    <div class="d-flex justify-content-between align-items-start" style="gap:12px;flex-wrap:wrap;">
+      <div style="flex:1;min-width:0;">
+        <h3 style="margin-bottom:2px;">{{ b.name or b.address }}</h3>
+        <div class="text-secondary" style="font-size:0.8rem;">{{ b.address }}</div>
+        <div class="ab-code" style="margin-top:6px;">
+          {% if b.building_code %}{{ base_url }}/building/{{ b.building_code }}{% else %}<span style="color:#f59e0b;">No QR code yet — save again to generate</span>{% endif %}
+        </div>
+        {% if not b.lat or not b.lng %}
+        <div style="color:#f59e0b;font-size:0.75rem;margin-top:4px;">⚠️ No coordinates — geofence check will fail until set.</div>
+        {% endif %}
+      </div>
+      {% if b.building_code %}
+      <div class="ab-qr">
+        <div class="qr-target" data-url="{{ base_url }}/building/{{ b.building_code }}"></div>
+        <div style="color:#000;font-size:0.7rem;font-weight:700;margin-top:6px;">{{ b.name or b.address }}</div>
+      </div>
+      {% endif %}
+    </div>
+
+    <!-- Edit building -->
+    <details style="margin-top:12px;">
+      <summary style="cursor:pointer;color:#3b82f6;font-size:0.82rem;font-weight:700;">✏️ Edit access data</summary>
+      <form method="POST" action="/admin/buildings/save" style="margin-top:10px;">
+        <input type="hidden" name="building_id" value="{{ b.id }}">
+        <div class="ab-field"><label>Building Name</label><input name="name" value="{{ b.name or '' }}"></div>
+        <div class="ab-field"><label>Address *</label><input name="address" value="{{ b.address }}" required></div>
+        <div class="ab-grid2">
+          <div class="ab-field"><label>Gate / Access Code</label><input name="general_access_code" value="{{ b.general_access_code or b.access_code or '' }}"></div>
+          <div class="ab-field"><label>Lat / Lng</label>
+            <div class="ab-grid2">
+              <input name="lat" value="{{ b.lat or '' }}">
+              <input name="lng" value="{{ b.lng or '' }}">
+            </div>
+          </div>
+        </div>
+        <div class="ab-field"><label>Package Room Notes</label><textarea name="package_room_notes" rows="2">{{ b.package_room_notes or '' }}</textarea></div>
+        <div class="ab-field"><label>Lockbox Notes</label><textarea name="lockbox_notes" rows="2">{{ b.lockbox_notes or '' }}</textarea></div>
+        <div class="ab-field"><label>Interior Directions</label><textarea name="interior_directions" rows="2">{{ b.interior_directions or '' }}</textarea></div>
+        <button class="ab-btn sm" type="submit">Update</button>
+      </form>
+    </details>
+
+    <!-- Units -->
+    <div style="margin-top:14px;">
+      <div style="font-size:0.75rem;color:#64748b;font-weight:800;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px;">Unit Notes ({{ row.units|length }})</div>
+      {% for u in row.units %}
+      <div class="unit-pill">
+        <div style="flex:1;min-width:0;">
+          <span class="u">Unit {{ u.unit_number }}</span>
+          {% if u.customer_notes %}<div class="n">{{ u.customer_notes }}</div>{% endif %}
+        </div>
+        <form method="POST" action="/admin/buildings/unit/{{ u.id }}/delete" style="margin:0;">
+          <button class="ab-btn red sm" type="submit">✕</button>
+        </form>
+      </div>
+      {% endfor %}
+
+      <form method="POST" action="/admin/buildings/{{ b.id }}/unit" style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;">
+        <input name="unit_number" placeholder="304" required
+          style="width:90px;background:#1e293b;border:1px solid #334155;color:#fff;border-radius:8px;padding:8px 10px;font-size:0.85rem;">
+        <input name="customer_notes" placeholder="Leave behind plant"
+          style="flex:1;min-width:140px;background:#1e293b;border:1px solid #334155;color:#fff;border-radius:8px;padding:8px 10px;font-size:0.85rem;">
+        <button class="ab-btn blue sm" type="submit">+ Unit</button>
+      </form>
+    </div>
+  </div>
+  {% else %}
+  <div style="text-align:center;color:#475569;padding:30px;">No buildings yet — add your first above.</div>
+  {% endfor %}
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
+<script>
+// Render a scannable QR for each building URL.
+document.querySelectorAll('.qr-target').forEach(el => {
+  const url = el.getAttribute('data-url');
+  if (!url) return;
+  try {
+    new QRCode(el, { text: url, width: 128, height: 128,
+      colorDark: '#000000', colorLight: '#ffffff' });
+  } catch (e) {
+    el.innerHTML = '<span style="color:#000;font-size:0.7rem;">QR error</span>';
+  }
+});
+</script>
+{% endblock %}

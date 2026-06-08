@@ -1398,6 +1398,21 @@ def init_db():
         "ALTER TABLE routes ADD COLUMN est_duration_mins REAL",
         "ALTER TABLE routes ADD COLUMN route_started_at TEXT",
         "ALTER TABLE routes ADD COLUMN first_delivery_at TEXT",
+        # ── QR Building Access feature ──
+        "ALTER TABLE buildings ADD COLUMN building_code TEXT",
+        "ALTER TABLE buildings ADD COLUMN name TEXT",
+        "ALTER TABLE buildings ADD COLUMN general_access_code TEXT",
+        "ALTER TABLE buildings ADD COLUMN package_room_notes TEXT",
+        "ALTER TABLE buildings ADD COLUMN lockbox_notes TEXT",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_buildings_code ON buildings (building_code)",
+        """CREATE TABLE IF NOT EXISTS delivery_instructions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            building_id INTEGER NOT NULL,
+            unit_number TEXT NOT NULL,
+            customer_notes TEXT,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_delivery_instructions_building ON delivery_instructions (building_id)",
         "CREATE TABLE IF NOT EXISTS pin_corrections (id INTEGER PRIMARY KEY AUTOINCREMENT, address TEXT UNIQUE NOT NULL, lat REAL NOT NULL, lng REAL NOT NULL, corrected_by TEXT, corrected_at TEXT DEFAULT CURRENT_TIMESTAMP)",
         "CREATE TABLE IF NOT EXISTS login_attempts (id INTEGER PRIMARY KEY AUTOINCREMENT, ip TEXT NOT NULL, attempted_at TEXT NOT NULL)",
         "CREATE INDEX IF NOT EXISTS idx_login_attempts_ip ON login_attempts (ip, attempted_at)",
@@ -1750,6 +1765,10 @@ def driver_login():
             db.close()
             if not onboarded:
                 return redirect(url_for('driver_walkthrough'))
+            # Return to a QR building gate if the driver scanned before logging in
+            dest = session.pop('post_login_redirect', None)
+            if dest:
+                return redirect(dest)
             return redirect(url_for('driver_dashboard'))
         db.close()
         record_attempt(ip)
@@ -4748,7 +4767,9 @@ def route_log():
     driver    = db.execute("SELECT * FROM drivers WHERE id=?", (driver_id,)).fetchone()
     pay_rate  = float(driver['pay_rate']) if driver and driver['pay_rate'] else 1.50
 
-    # Daily breakdown — last 30 days
+    # Daily breakdown — last 30 days.
+    # GROUP BY date only; aggregate name with MAX so this is valid on PostgreSQL
+    # (Postgres rejects non-aggregated SELECT columns missing from GROUP BY).
     days = db.execute("""
         SELECT
             r.date,
@@ -4756,8 +4777,7 @@ def route_log():
             SUM(CASE WHEN s.status='delivered' THEN 1 ELSE 0 END)   AS delivered,
             SUM(CASE WHEN s.status='failed'    THEN 1 ELSE 0 END)   AS failed,
             SUM(CASE WHEN s.status='pending'   THEN 1 ELSE 0 END)   AS pending,
-            r.id AS route_id,
-            r.name AS route_name
+            MAX(r.name)                                             AS route_name
         FROM routes r
         LEFT JOIN stops s ON s.route_id = r.id
         WHERE r.driver_id = ?
@@ -4871,6 +4891,304 @@ def route_log_manual_delete(entry_id):
     db.commit()
     db.close()
     return redirect(url_for('route_log'))
+
+
+# ─── QR BUILDING ACCESS ────────────────────────────────────────
+# Driver scans a QR posted at a building entrance → enters PIN → GPS is
+# checked against the building location (100m radius) → access codes and
+# per-unit delivery notes are revealed. Adapted to this stack: reuses the
+# existing `drivers.pin` auth (no separate hashed driver_pins table) and
+# geopy's geodesic for the distance gate (Haversine equivalent).
+
+BUILDING_GEOFENCE_METERS = 100
+
+def _gen_building_code():
+    """Generate a unique, URL-safe building identifier like bld_a1b2c3d4."""
+    return 'bld_' + secrets.token_hex(4)
+
+
+def _verify_driver_pin(db, pin):
+    """Return the driver row for a valid PIN, else None. Mirrors driver_login."""
+    if not pin or not pin.strip():
+        return None
+    return db.execute("SELECT * FROM drivers WHERE pin=?", (pin.strip(),)).fetchone()
+
+
+def _meters_between(lat1, lng1, lat2, lng2):
+    """Great-circle distance in meters (geopy geodesic — Haversine equivalent)."""
+    try:
+        return geodesic((lat1, lng1), (lat2, lng2)).meters
+    except Exception:
+        return float('inf')
+
+
+def _building_public(b):
+    """Minimal building info safe to show BEFORE verification (no codes)."""
+    return {
+        'building_code': _ss_val(b, 'building_code'),
+        'name': _ss_val(b, 'name') or _ss_val(b, 'address') or 'Building',
+        'address': _ss_val(b, 'address') or '',
+        'has_geo': bool(_ss_val(b, 'lat') and _ss_val(b, 'lng')),
+    }
+
+
+@app.route('/driver/building-scan')
+def building_scan():
+    """QR scanner screen — camera decodes the building QR and redirects."""
+    if 'driver_id' not in session:
+        return redirect(url_for('driver_login'))
+    return render_template('building_scan.html', driver=session['driver_name'])
+
+
+@app.route('/building/<building_code>')
+def building_gate(building_code):
+    """
+    Landing page from a scanned QR. Requires a logged-in driver, then shows
+    the PIN + GPS verification gate. Access data is NOT sent until verified.
+    """
+    if 'driver_id' not in session:
+        # Remember where we were headed, send through login, come back here.
+        session['post_login_redirect'] = url_for('building_gate', building_code=building_code)
+        return redirect(url_for('driver_login'))
+
+    db = get_db()
+    b = db.execute("SELECT * FROM buildings WHERE building_code=?", (building_code,)).fetchone()
+    db.close()
+    if not b:
+        return render_template('building_access.html', not_found=True,
+                               building_code=building_code), 404
+    return render_template('building_access.html', not_found=False,
+                           building=_building_public(b),
+                           building_code=building_code,
+                           geofence_m=BUILDING_GEOFENCE_METERS)
+
+
+@app.route('/api/building/verify', methods=['POST'])
+def building_verify():
+    """
+    Secure verification gate.
+    Inputs (JSON): building_code, pin, lat, lng.
+    Steps: valid PIN  →  within geofence  →  return access payload.
+    """
+    if 'driver_id' not in session:
+        return jsonify({'ok': False, 'error': 'not_logged_in'}), 401
+
+    ip = get_real_ip()
+    if is_rate_limited(ip):
+        return jsonify({'ok': False, 'error': 'rate_limited',
+                        'message': 'Too many attempts — wait a few minutes.'}), 429
+
+    data = request.get_json(silent=True) or {}
+    building_code = (data.get('building_code') or '').strip()
+    entered_pin   = (data.get('pin') or '').strip()
+    try:
+        driver_lat = float(data.get('lat'))
+        driver_lng = float(data.get('lng'))
+    except (TypeError, ValueError):
+        return jsonify({'ok': False, 'error': 'no_location',
+                        'message': 'Location required — enable GPS and try again.'}), 400
+
+    db = get_db()
+    b = db.execute("SELECT * FROM buildings WHERE building_code=?", (building_code,)).fetchone()
+    if not b:
+        db.close()
+        return jsonify({'ok': False, 'error': 'not_found',
+                        'message': 'Building not found.'}), 404
+
+    # 1) PIN check (reuses existing driver auth)
+    driver = _verify_driver_pin(db, entered_pin)
+    if not driver:
+        record_attempt(ip)
+        db.close()
+        return jsonify({'ok': False, 'error': 'bad_pin',
+                        'message': 'Invalid PIN.'}), 403
+
+    # 2) Geofence check (100m via Haversine/geodesic)
+    blat, blng = _ss_val(b, 'lat'), _ss_val(b, 'lng')
+    if blat is None or blng is None:
+        db.close()
+        return jsonify({'ok': False, 'error': 'no_building_geo',
+                        'message': 'Building has no saved coordinates — contact admin.'}), 409
+
+    distance_m = _meters_between(driver_lat, driver_lng, blat, blng)
+    if distance_m > BUILDING_GEOFENCE_METERS:
+        db.close()
+        return jsonify({'ok': False, 'error': 'too_far',
+                        'distance_m': round(distance_m),
+                        'message': f'You are {round(distance_m)}m away — must be within '
+                                   f'{BUILDING_GEOFENCE_METERS}m of the building.'}), 403
+
+    # 3) Both passed — return access payload + per-unit instructions
+    units = db.execute(
+        """SELECT unit_number, customer_notes FROM delivery_instructions
+           WHERE building_id=? ORDER BY unit_number ASC""",
+        (b['id'],)
+    ).fetchall()
+    db.close()
+
+    return jsonify({
+        'ok': True,
+        'building': {
+            'name': _ss_val(b, 'name') or _ss_val(b, 'address') or 'Building',
+            'address': _ss_val(b, 'address') or '',
+            'general_access_code': _ss_val(b, 'general_access_code') or _ss_val(b, 'access_code') or '',
+            'package_room_notes': _ss_val(b, 'package_room_notes') or '',
+            'lockbox_notes': _ss_val(b, 'lockbox_notes') or '',
+            'buzzer_notes': _ss_val(b, 'buzzer_notes') or '',
+            'interior_directions': _ss_val(b, 'interior_directions') or '',
+        },
+        'distance_m': round(distance_m),
+        'delivery_instructions': [
+            {'unit_number': u['unit_number'], 'customer_notes': u['customer_notes'] or ''}
+            for u in units
+        ],
+    })
+
+
+# ─── ADMIN: BUILDING ACCESS MANAGEMENT ─────────────────────────
+
+@app.route('/admin/buildings')
+def admin_buildings():
+    """Manage building access data + per-unit notes + QR codes."""
+    if not session.get('admin'):
+        return redirect(url_for('admin_login'))
+    db = get_db()
+    buildings = db.execute("SELECT * FROM buildings ORDER BY name, address").fetchall()
+    rows = []
+    for b in buildings:
+        units = db.execute(
+            "SELECT * FROM delivery_instructions WHERE building_id=? ORDER BY unit_number ASC",
+            (b['id'],)
+        ).fetchall()
+        rows.append({'b': b, 'units': units})
+    db.close()
+    return render_template('admin_buildings.html', rows=rows,
+                           base_url=request.host_url.rstrip('/'))
+
+
+@app.route('/admin/buildings/save', methods=['POST'])
+def admin_building_save():
+    """Create or update a building's access data (admin only)."""
+    if not session.get('admin'):
+        return redirect(url_for('admin_login'))
+    f = request.form
+    building_id = (f.get('building_id') or '').strip()
+    address     = (f.get('address') or '').strip()
+    if not address:
+        flash('Address is required.', 'beta_pin')
+        return redirect(url_for('admin_buildings'))
+
+    name                = (f.get('name') or '').strip()
+    general_access_code = (f.get('general_access_code') or '').strip()
+    package_room_notes  = (f.get('package_room_notes') or '').strip()
+    lockbox_notes       = (f.get('lockbox_notes') or '').strip()
+    interior_directions = (f.get('interior_directions') or '').strip()
+    lat_raw, lng_raw    = (f.get('lat') or '').strip(), (f.get('lng') or '').strip()
+
+    lat = lng = None
+    try:
+        if lat_raw and lng_raw:
+            lat, lng = float(lat_raw), float(lng_raw)
+    except ValueError:
+        lat = lng = None
+    # Auto-geocode from address if coordinates not provided
+    if lat is None or lng is None:
+        try:
+            coords = geocode_address(address)
+            if coords:
+                lat, lng = coords
+        except Exception as e:
+            log.warning(f'building geocode failed: {e}')
+
+    db = get_db()
+    if building_id:
+        db.execute(
+            """UPDATE buildings SET name=?, address=?, general_access_code=?,
+               package_room_notes=?, lockbox_notes=?, interior_directions=?,
+               lat=COALESCE(?, lat), lng=COALESCE(?, lng)
+               WHERE id=?""",
+            (name, address, general_access_code, package_room_notes,
+             lockbox_notes, interior_directions, lat, lng, building_id)
+        )
+        # Ensure it has a building_code for QR
+        row = db.execute("SELECT building_code FROM buildings WHERE id=?", (building_id,)).fetchone()
+        if row and not _ss_val(row, 'building_code'):
+            db.execute("UPDATE buildings SET building_code=? WHERE id=?",
+                       (_gen_building_code(), building_id))
+        db.commit()
+    else:
+        code = _gen_building_code()
+        try:
+            db.execute(
+                """INSERT INTO buildings (address, name, general_access_code,
+                   package_room_notes, lockbox_notes, interior_directions,
+                   lat, lng, building_code)
+                   VALUES (?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(address) DO UPDATE SET
+                     name=excluded.name,
+                     general_access_code=excluded.general_access_code,
+                     package_room_notes=excluded.package_room_notes,
+                     lockbox_notes=excluded.lockbox_notes,
+                     interior_directions=excluded.interior_directions,
+                     lat=COALESCE(excluded.lat, buildings.lat),
+                     lng=COALESCE(excluded.lng, buildings.lng)""",
+                (address, name, general_access_code, package_room_notes,
+                 lockbox_notes, interior_directions, lat, lng, code)
+            )
+            db.commit()
+            # Backfill code if the row already existed without one
+            row = db.execute("SELECT building_code FROM buildings WHERE address=?", (address,)).fetchone()
+            if row and not _ss_val(row, 'building_code'):
+                db.execute("UPDATE buildings SET building_code=? WHERE address=?", (code, address))
+                db.commit()
+        except Exception as e:
+            log.error(f'building save error: {e}')
+            try: db._conn.rollback()
+            except: pass
+    db.close()
+    flash('Building saved.', 'beta_pin')
+    return redirect(url_for('admin_buildings'))
+
+
+@app.route('/admin/buildings/<int:building_id>/unit', methods=['POST'])
+def admin_building_add_unit(building_id):
+    """Add / update a per-unit delivery instruction."""
+    if not session.get('admin'):
+        return redirect(url_for('admin_login'))
+    unit_number = (request.form.get('unit_number') or '').strip()
+    customer_notes = (request.form.get('customer_notes') or '').strip()
+    if unit_number:
+        db = get_db()
+        existing = db.execute(
+            "SELECT id FROM delivery_instructions WHERE building_id=? AND unit_number=?",
+            (building_id, unit_number)
+        ).fetchone()
+        if existing:
+            db.execute(
+                "UPDATE delivery_instructions SET customer_notes=?, updated_at=? WHERE id=?",
+                (customer_notes, datetime.now().isoformat(), existing['id'])
+            )
+        else:
+            db.execute(
+                """INSERT INTO delivery_instructions (building_id, unit_number, customer_notes, updated_at)
+                   VALUES (?,?,?,?)""",
+                (building_id, unit_number, customer_notes, datetime.now().isoformat())
+            )
+        db.commit()
+        db.close()
+    return redirect(url_for('admin_buildings'))
+
+
+@app.route('/admin/buildings/unit/<int:unit_id>/delete', methods=['POST'])
+def admin_building_delete_unit(unit_id):
+    """Remove a per-unit delivery instruction."""
+    if not session.get('admin'):
+        return redirect(url_for('admin_login'))
+    db = get_db()
+    db.execute("DELETE FROM delivery_instructions WHERE id=?", (unit_id,))
+    db.commit()
+    db.close()
+    return redirect(url_for('admin_buildings'))
 
 
 # Run init_db in a background thread so gunicorn binds to the port immediately.

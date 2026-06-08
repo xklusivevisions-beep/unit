@@ -1,0 +1,320 @@
+{% extends 'base.html' %}
+{% block title %}UNIT — Building Access{% endblock %}
+
+{% block extra_css %}
+<style>
+  .ba-wrap { max-width: 480px; margin: 0 auto; }
+  /* PIN entry */
+  .pin-dots { display:flex; justify-content:center; gap:14px; margin:18px 0 26px; }
+  .pin-dot { width:16px; height:16px; border-radius:50%; background:#1f2937; border:2px solid #374151; transition:.15s; }
+  .pin-dot.filled { background:#10b981; border-color:#10b981; box-shadow:0 0 10px #10b98166; }
+  .keypad { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; }
+  .key { background:#1f2937; border:none; color:#fff; font-size:1.6rem; font-weight:700;
+         border-radius:14px; padding:18px 0; cursor:pointer; -webkit-tap-highlight-color:transparent; }
+  .key:active { background:#374151; }
+  .key.alt { background:transparent; font-size:1rem; color:#9ca3af; }
+  .ba-unlock { width:100%; padding:16px; margin-top:18px; font-size:1.05rem; font-weight:800;
+               background:linear-gradient(135deg,#10b981,#059669); color:#fff; border:none;
+               border-radius:14px; cursor:pointer; }
+  .ba-unlock:disabled { background:#1f2937; color:#6b7280; cursor:not-allowed; }
+  .ba-error { display:none; background:#1f2937; border:1px solid #ef4444; color:#fca5a5;
+              border-radius:12px; padding:12px 14px; font-size:0.9rem; margin-top:14px; text-align:center; }
+
+  /* Dashboard */
+  .ba-tabs { display:flex; gap:8px; margin:4px 0 18px; }
+  .ba-tab { flex:1; text-align:center; padding:12px; border-radius:12px; font-weight:800;
+            font-size:0.9rem; background:#111827; color:#9ca3af; border:1px solid #1e293b; cursor:pointer; }
+  .ba-tab.active { background:#10b98118; color:#10b981; border-color:#10b98155; }
+  .ba-panel { display:none; }
+  .ba-panel.active { display:block; }
+  .code-card { background:linear-gradient(135deg,#0d1f0f,#0a1a10); border:1px solid #10b98144;
+               border-radius:18px; padding:22px; margin-bottom:14px; text-align:center; }
+  .code-card .lbl { font-size:0.72rem; letter-spacing:.12em; text-transform:uppercase; color:#6ee7b7; font-weight:800; }
+  .code-card .val { font-size:2.8rem; font-weight:900; color:#10b981; line-height:1.15; word-break:break-word; margin-top:6px; }
+  .note-card { background:#0f172a; border:1px solid #1e293b; border-radius:14px; padding:16px; margin-bottom:12px; }
+  .note-card .lbl { font-size:0.72rem; letter-spacing:.08em; text-transform:uppercase; color:#64748b; font-weight:800; margin-bottom:6px; }
+  .note-card .txt { font-size:1rem; color:#e2e8f0; white-space:pre-wrap; }
+  .unit-search { width:100%; background:#1e293b; border:1px solid #334155; color:#fff;
+                 border-radius:12px; padding:12px 14px; font-size:1rem; margin-bottom:12px; }
+  .unit-row { background:#0f172a; border:1px solid #1e293b; border-radius:12px; padding:14px 16px; margin-bottom:8px; }
+  .unit-row .num { font-size:1.05rem; font-weight:800; color:#f1f5f9; }
+  .unit-row .notes { font-size:0.9rem; color:#94a3b8; margin-top:4px; white-space:pre-wrap; }
+  .ba-muted { text-align:center; color:#475569; padding:28px 12px; font-size:0.9rem; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid p-4 pb-nav ba-wrap">
+
+  {% if not_found %}
+  <div class="text-center" style="padding:60px 20px;">
+    <div style="font-size:3rem;margin-bottom:14px;">🔍</div>
+    <h2 style="font-weight:800;">Building not found</h2>
+    <p class="text-secondary">No building matches code <code>{{ building_code }}</code>.</p>
+    <a href="/driver/building-scan" class="btn btn-primary mt-3">Scan Again</a>
+  </div>
+  {% else %}
+
+  <div class="d-flex align-items-center justify-content-between mb-3">
+    <a href="/driver/building-scan" class="text-decoration-none" style="color:#555;padding:8px;margin:-8px;">
+      <i class="fas fa-arrow-left"></i>
+    </a>
+    <div class="text-center">
+      <div class="unit-logo" style="font-size:1.1rem;">UNIT<span>.</span></div>
+      <small class="text-secondary">Building Access</small>
+    </div>
+    <span style="width:32px;"></span>
+  </div>
+
+  <!-- ── VERIFY VIEW ── -->
+  <div id="verify-view">
+    <div style="text-align:center;margin-bottom:6px;">
+      <div style="font-size:2.2rem;">🏢</div>
+      <h1 style="font-size:1.35rem;font-weight:800;margin:6px 0 2px;">{{ building.name }}</h1>
+      <div class="text-secondary" style="font-size:0.88rem;">{{ building.address }}</div>
+    </div>
+
+    <p class="text-secondary" style="text-align:center;font-size:0.85rem;margin:16px 0 0;">
+      Enter your PIN to unlock — you must be within {{ geofence_m }}m of the building.
+    </p>
+
+    <div class="pin-dots" id="pin-dots">
+      <div class="pin-dot"></div><div class="pin-dot"></div><div class="pin-dot"></div>
+      <div class="pin-dot"></div><div class="pin-dot"></div><div class="pin-dot"></div>
+    </div>
+
+    <div class="keypad">
+      <button class="key" onclick="pinPress('1')">1</button>
+      <button class="key" onclick="pinPress('2')">2</button>
+      <button class="key" onclick="pinPress('3')">3</button>
+      <button class="key" onclick="pinPress('4')">4</button>
+      <button class="key" onclick="pinPress('5')">5</button>
+      <button class="key" onclick="pinPress('6')">6</button>
+      <button class="key" onclick="pinPress('7')">7</button>
+      <button class="key" onclick="pinPress('8')">8</button>
+      <button class="key" onclick="pinPress('9')">9</button>
+      <button class="key alt" onclick="pinClear()">Clear</button>
+      <button class="key" onclick="pinPress('0')">0</button>
+      <button class="key alt" onclick="pinBack()">⌫</button>
+    </div>
+
+    <button class="ba-unlock" id="unlock-btn" onclick="verify()" disabled>🔓 Verify &amp; Unlock</button>
+    <div class="ba-error" id="ba-error"></div>
+    <div id="gps-note" style="text-align:center;color:#475569;font-size:0.78rem;margin-top:12px;">
+      <i class="fas fa-location-dot"></i> Location is checked on unlock.
+    </div>
+  </div>
+
+  <!-- ── DASHBOARD VIEW ── -->
+  <div id="dashboard-view" style="display:none;">
+    <div style="text-align:center;margin-bottom:8px;">
+      <h1 id="db-name" style="font-size:1.3rem;font-weight:800;margin:0;"></h1>
+      <div id="db-addr" class="text-secondary" style="font-size:0.85rem;"></div>
+      <div id="db-distance" style="font-size:0.72rem;color:#10b981;margin-top:4px;"></div>
+    </div>
+
+    <div class="ba-tabs">
+      <div class="ba-tab active" id="tab-access" onclick="showTab('access')">🔑 Building Access</div>
+      <div class="ba-tab" id="tab-units" onclick="showTab('units')">🚪 Unit Directory</div>
+    </div>
+
+    <!-- Access panel -->
+    <div class="ba-panel active" id="panel-access">
+      <div class="code-card" id="access-code-card">
+        <div class="lbl">Gate / Entry Code</div>
+        <div class="val" id="access-code">—</div>
+      </div>
+      <div class="note-card" id="package-card" style="display:none;">
+        <div class="lbl">📦 Package Room</div>
+        <div class="txt" id="package-notes"></div>
+      </div>
+      <div class="note-card" id="lockbox-card" style="display:none;">
+        <div class="lbl">🔐 Lockbox</div>
+        <div class="txt" id="lockbox-notes"></div>
+      </div>
+      <div class="note-card" id="buzzer-card" style="display:none;">
+        <div class="lbl">🔔 Buzzer / Entry Notes</div>
+        <div class="txt" id="buzzer-notes"></div>
+      </div>
+      <div class="note-card" id="interior-card" style="display:none;">
+        <div class="lbl">🧭 Interior Directions</div>
+        <div class="txt" id="interior-notes"></div>
+      </div>
+    </div>
+
+    <!-- Units panel -->
+    <div class="ba-panel" id="panel-units">
+      <input type="text" class="unit-search" id="unit-search" placeholder="🔎 Search unit number…"
+             oninput="filterUnits()" autocomplete="off">
+      <div id="unit-list"></div>
+    </div>
+  </div>
+
+  {% endif %}
+</div>
+
+<div class="nav-bottom">
+  <a href="/driver"><i class="fas fa-home"></i>Home</a>
+  <a href="/driver/route-log"><i class="fas fa-receipt"></i>Pay Log</a>
+  <a href="/driver/building-scan" class="active"><i class="fas fa-qrcode"></i>Access</a>
+  <a href="/account"><i class="fas fa-user"></i>Account</a>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{% if not not_found %}
+<script>
+const BUILDING_CODE = {{ building_code | tojson }};
+const GEOFENCE_M = {{ geofence_m }};
+let pin = '';
+let allUnits = [];
+
+// ── PIN keypad ──
+function renderDots() {
+  const dots = document.querySelectorAll('#pin-dots .pin-dot');
+  dots.forEach((d, i) => d.classList.toggle('filled', i < pin.length));
+  document.getElementById('unlock-btn').disabled = pin.length < 4;
+}
+function pinPress(n) {
+  if (pin.length >= 6) return;
+  pin += n;
+  renderDots();
+  hideError();
+}
+function pinBack() { pin = pin.slice(0, -1); renderDots(); }
+function pinClear() { pin = ''; renderDots(); }
+
+function showError(msg) {
+  const el = document.getElementById('ba-error');
+  el.textContent = msg;
+  el.style.display = 'block';
+}
+function hideError() { document.getElementById('ba-error').style.display = 'none'; }
+
+// ── Verify: capture GPS then POST ──
+function verify() {
+  if (pin.length < 4) return;
+  const btn = document.getElementById('unlock-btn');
+  btn.disabled = true;
+  btn.textContent = '📍 Getting location…';
+  hideError();
+
+  if (!navigator.geolocation) {
+    showError('GPS not available on this device.');
+    btn.disabled = false; btn.textContent = '🔓 Verify & Unlock';
+    return;
+  }
+
+  navigator.geolocation.getCurrentPosition(
+    pos => sendVerify(pos.coords.latitude, pos.coords.longitude),
+    err => {
+      showError('Location required — enable GPS and allow access.');
+      btn.disabled = false; btn.textContent = '🔓 Verify & Unlock';
+    },
+    { enableHighAccuracy: true, timeout: 12000, maximumAge: 0 }
+  );
+}
+
+function sendVerify(lat, lng) {
+  const btn = document.getElementById('unlock-btn');
+  btn.textContent = '🔐 Verifying…';
+  fetch('/api/building/verify', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ building_code: BUILDING_CODE, pin, lat, lng })
+  })
+  .then(r => r.json().then(d => ({ status: r.status, d })))
+  .then(({ d }) => {
+    if (!d.ok) {
+      showError(d.message || 'Verification failed.');
+      pinClear();
+      btn.disabled = true; btn.textContent = '🔓 Verify & Unlock';
+      return;
+    }
+    pin = '';
+    renderDashboard(d);
+  })
+  .catch(() => {
+    showError('Network error — try again.');
+    btn.disabled = false; btn.textContent = '🔓 Verify & Unlock';
+  });
+}
+
+// ── Dashboard render ──
+function renderDashboard(d) {
+  document.getElementById('verify-view').style.display = 'none';
+  document.getElementById('dashboard-view').style.display = 'block';
+  if (typeof navigator.vibrate === 'function') navigator.vibrate([60, 40, 60]);
+
+  const b = d.building || {};
+  document.getElementById('db-name').textContent = b.name || 'Building';
+  document.getElementById('db-addr').textContent = b.address || '';
+  if (d.distance_m != null) {
+    document.getElementById('db-distance').textContent = '✓ Verified on-site (' + d.distance_m + 'm away)';
+  }
+
+  document.getElementById('access-code').textContent = b.general_access_code || 'No code on file';
+  setNote('package', b.package_room_notes);
+  setNote('lockbox', b.lockbox_notes);
+  setNote('buzzer', b.buzzer_notes);
+  setNote('interior', b.interior_directions);
+
+  allUnits = d.delivery_instructions || [];
+  renderUnits(allUnits);
+}
+
+function setNote(key, val) {
+  const card = document.getElementById(key + '-card');
+  if (val && val.trim()) {
+    document.getElementById(key + '-notes').textContent = val;
+    card.style.display = 'block';
+  } else {
+    card.style.display = 'none';
+  }
+}
+
+function renderUnits(units) {
+  const list = document.getElementById('unit-list');
+  if (!units.length) {
+    list.innerHTML = '<div class="ba-muted">No unit-specific notes for this building.</div>';
+    return;
+  }
+  list.innerHTML = units.map(u => `
+    <div class="unit-row">
+      <div class="num">Unit ${escapeHtml(u.unit_number)}</div>
+      ${u.customer_notes ? `<div class="notes">${escapeHtml(u.customer_notes)}</div>` : ''}
+    </div>`).join('');
+}
+
+function filterUnits() {
+  const q = document.getElementById('unit-search').value.trim().toLowerCase();
+  if (!q) { renderUnits(allUnits); return; }
+  renderUnits(allUnits.filter(u =>
+    (u.unit_number || '').toLowerCase().includes(q) ||
+    (u.customer_notes || '').toLowerCase().includes(q)
+  ));
+}
+
+function showTab(which) {
+  document.getElementById('tab-access').classList.toggle('active', which === 'access');
+  document.getElementById('tab-units').classList.toggle('active', which === 'units');
+  document.getElementById('panel-access').classList.toggle('active', which === 'access');
+  document.getElementById('panel-units').classList.toggle('active', which === 'units');
+}
+
+function escapeHtml(s) {
+  return (s || '').replace(/[&<>"']/g, c => (
+    { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]
+  ));
+}
+
+// Hardware keyboard support (desktop testing)
+document.addEventListener('keydown', e => {
+  if (document.getElementById('verify-view').style.display === 'none') return;
+  if (e.key >= '0' && e.key <= '9') pinPress(e.key);
+  else if (e.key === 'Backspace') pinBack();
+  else if (e.key === 'Enter' && pin.length >= 4) verify();
+});
+</script>
+{% endif %}
+{% endblock %}
