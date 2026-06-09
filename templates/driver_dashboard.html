@@ -282,7 +282,14 @@
               <i class="fas fa-location-arrow me-1"></i>Active
             </a>
           {% else %}
-            <span class="status-pill pill-{{ stop.status }}">{{ stop.status.upper() }}</span>
+            <div class="d-flex flex-column align-items-end gap-1">
+              <span class="status-pill pill-{{ stop.status }}">{{ stop.status.upper() }}</span>
+              <form method="POST" action="/driver/stop/{{ stop.id }}/undo" style="display:inline;">
+                <button type="submit" class="btn btn-sm" style="background:#ffffff18;color:#94a3b8;border:1px solid #ffffff22;border-radius:8px;font-size:0.7rem;padding:2px 8px;">
+                  <i class="fas fa-undo me-1"></i>Undo
+                </button>
+              </form>
+            </div>
           {% endif %}
         </div>
       </div>
@@ -317,7 +324,14 @@
           {% elif stop.status == 'en_route' %}
           <a href="/driver/stop/{{ stop.id }}" class="btn btn-sm" style="background:#0088ff;border-radius:10px;">Active</a>
           {% else %}
-          <span class="status-pill pill-{{ stop.status }}">{{ stop.status.upper() }}</span>
+          <div class="d-flex flex-column align-items-end gap-1">
+            <span class="status-pill pill-{{ stop.status }}">{{ stop.status.upper() }}</span>
+            <form method="POST" action="/driver/stop/{{ stop.id }}/undo" style="display:inline;">
+              <button type="submit" class="btn btn-sm" style="background:#ffffff18;color:#94a3b8;border:1px solid #ffffff22;border-radius:8px;font-size:0.7rem;padding:2px 8px;">
+                <i class="fas fa-undo me-1"></i>Undo
+              </button>
+            </form>
+          </div>
           {% endif %}
         </div>
       </div>

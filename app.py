@@ -4933,6 +4933,20 @@ def stop_failed(stop_id):
         return redirect(url_for('stop_active', stop_id=next_stop['id']))
     return redirect(url_for('route_detail', route_id=route_id) if route_id else url_for('driver_dashboard'))
 
+@app.route('/driver/stop/<int:stop_id>/undo', methods=['POST'])
+def stop_undo(stop_id):
+    """Reset a failed or delivered stop back to pending so the driver can retry."""
+    if 'driver_id' not in session:
+        return redirect(url_for('driver_login'))
+    db = get_db()
+    stop = db.execute("SELECT * FROM stops WHERE id=?", (stop_id,)).fetchone()
+    if stop:
+        db.execute("UPDATE stops SET status='pending', delivered_at=NULL WHERE id=?", (stop_id,))
+        db.commit()
+    route_id = stop['route_id'] if stop else None
+    db.close()
+    return redirect(url_for('route_detail', route_id=route_id) if route_id else url_for('driver_dashboard'))
+
 @app.route('/driver/route/<int:route_id>/eta', methods=['GET'])
 def route_eta(route_id):
     """Live ETA: based on first delivery time + avg time per stop."""
