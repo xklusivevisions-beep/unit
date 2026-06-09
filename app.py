@@ -2677,6 +2677,29 @@ def scan_add():
     db = get_db()
     ss_id = _get_or_create_scan_session(db, session['driver_id'])
 
+    # Block duplicate adds (double-tap while geocoding)
+    addr_key = _normalize_addr_key(address)
+    trk_key = re.sub(r'\s+', '', tracking.upper()) if tracking else ''
+    dup = None
+    if trk_key:
+        dup = db.execute(
+            "SELECT id, scan_order, dest_lat FROM scan_items WHERE session_id=? AND REPLACE(UPPER(COALESCE(tracking,'')),' ','')=? LIMIT 1",
+            (ss_id, trk_key),
+        ).fetchone()
+    if not dup and addr_key:
+        dup = db.execute(
+            "SELECT id, scan_order, dest_lat FROM scan_items WHERE session_id=? AND UPPER(TRIM(address))=? LIMIT 1",
+            (ss_id, addr_key),
+        ).fetchone()
+    if dup:
+        count = db.execute("SELECT COUNT(*) FROM scan_items WHERE session_id=?", (ss_id,)).fetchone()[0]
+        db.close()
+        return jsonify({
+            'ok': True, 'duplicate': True, 'count': count,
+            'scan_order': dup['scan_order'], 'new_item_id': dup['id'],
+            'geocoded': bool(dup['dest_lat']), 'zip_warning': None,
+        })
+
     # Check zip against driver's assigned zips
     zip_warning = None
     driver_row = db.execute("SELECT assigned_zips FROM drivers WHERE id=?", (session['driver_id'],)).fetchone()

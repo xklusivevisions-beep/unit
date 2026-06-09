@@ -60,8 +60,21 @@
   .preview-actions { display: flex; gap: 8px; margin-top: 12px; }
   .btn-confirm { flex: 1; padding: 12px; background: #10b981; color: #fff;
                  border: none; border-radius: 10px; font-weight: 700; cursor: pointer; font-size: 0.95rem; }
+  .btn-confirm:disabled { opacity: 0.55; cursor: wait; }
   .btn-discard { flex: 0 0 auto; padding: 12px 16px; background: #374151; color: #fff;
                  border: none; border-radius: 10px; font-weight: 700; cursor: pointer; }
+  #label-tap-panel { margin-bottom: 12px; display: none; }
+  #label-tap-panel .tap-hint { font-size: 0.75rem; color: #fbbf24; margin-bottom: 8px; line-height: 1.35; }
+  #label-tap-wrap { position: relative; border-radius: 12px; overflow: hidden; border: 2px solid #374151; background: #111; }
+  #label-tap-img { width: 100%; display: block; cursor: crosshair; touch-action: manipulation; max-height: 220px; object-fit: contain; }
+  #label-tap-marker { position: absolute; width: 18px; height: 18px; margin: -9px 0 0 -9px;
+                      border: 2px solid #f59e0b; border-radius: 50%; background: rgba(245,158,11,0.35);
+                      pointer-events: none; display: none; box-shadow: 0 0 0 4px rgba(245,158,11,0.15); }
+  .label-zone-btns { display: flex; gap: 6px; margin-top: 8px; }
+  .label-zone-btn { flex: 1; padding: 8px 4px; font-size: 0.72rem; font-weight: 700; border-radius: 8px;
+                    border: 1px solid #4b5563; background: #111827; color: #d1d5db; cursor: pointer; }
+  .label-zone-btn:active { background: #374151; }
+  .label-zone-btn.mid { border-color: #f59e0b; color: #fbbf24; }
 
   /* Loading spinner */
   #loading { display: none; text-align: center; padding: 24px; color: #9ca3af; }
@@ -409,6 +422,18 @@
   <div id="preview-card">
     <h3>Confirm Package</h3>
     <div id="preview-source-hint" style="display:none;font-size:0.78rem;color:#fbbf24;margin-bottom:10px;"></div>
+    <div id="label-tap-panel">
+      <div class="tap-hint">Wrong address? Tap the <b>delivery address</b> on the label (usually middle — not sender at top)</div>
+      <div id="label-tap-wrap">
+        <img id="label-tap-img" alt="Label" onclick="onLabelTap(event)" ontouchend="onLabelTapTouch(event)">
+        <div id="label-tap-marker"></div>
+      </div>
+      <div class="label-zone-btns">
+        <button type="button" class="label-zone-btn" onclick="readLabelZone('top')">↑ Sender (top)</button>
+        <button type="button" class="label-zone-btn mid" onclick="readLabelZone('middle')">◎ Recipient (middle)</button>
+        <button type="button" class="label-zone-btn" onclick="readLabelZone('bottom')">↓ Barcode (bottom)</button>
+      </div>
+    </div>
     <div class="preview-field">
       <label>Recipient Name</label>
       <input type="text" id="p-name" placeholder="Name">
@@ -431,7 +456,7 @@
     ">🗺️ Navigate Now</button>
     <div class="preview-actions">
       <button class="btn-discard" onclick="discardPreview()">✕ Discard</button>
-      <button class="btn-confirm" onclick="confirmPackage()">+ Add to List</button>
+      <button class="btn-confirm" id="btn-add-package" onclick="confirmPackage()">+ Add to List</button>
     </div>
   </div>
 
@@ -1291,6 +1316,11 @@ let _previewOpen = false;
 let _refineAbort = null;
 let _lastLocalParsed = null;
 let _lastOcrText = '';
+let _lastLabelBlob = null;
+let _tapReading = false;
+let _addInFlight = false;
+let _lastAddKey = '';
+let _lastAddTime = 0;
 const _LABEL_CACHE_KEY = 'unit_label_memory_v1';
 
 const _TRACKING_PATTERNS = [
@@ -1642,6 +1672,164 @@ async function ocrLabelLocally(blob) {
   }
 }
 
+async function ocrLabelRegion(blob, normX, normY) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = async () => {
+      const cropW = Math.max(80, img.width * 0.88);
+      const cropH = Math.max(60, img.height * 0.36);
+      const cx = normX * img.width;
+      const cy = normY * img.height;
+      const x = Math.max(0, Math.min(img.width - cropW, cx - cropW / 2));
+      const y = Math.max(0, Math.min(img.height - cropH, cy - cropH / 2));
+      const c = document.createElement('canvas');
+      c.width = Math.round(cropW);
+      c.height = Math.round(cropH);
+      const ctx = c.getContext('2d');
+      ctx.drawImage(img, x, y, cropW, cropH, 0, 0, c.width, c.height);
+      try {
+        const id = ctx.getImageData(0, 0, c.width, c.height);
+        const d = id.data;
+        for (let i = 0; i < d.length; i += 4) {
+          const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+          const v = g > 175 ? 255 : g < 95 ? 0 : g < 128 ? g * 0.5 : Math.min(255, g * 1.15);
+          d[i] = d[i + 1] = d[i + 2] = v;
+        }
+        ctx.putImageData(id, 0, 0);
+      } catch (e) { /* skip */ }
+      c.toBlob(async (b) => {
+        URL.revokeObjectURL(img.src);
+        if (!b) return reject(new Error('crop'));
+        try {
+          const worker = await getTesseractWorker();
+          const { data: { text } } = await worker.recognize(b);
+          resolve(parseLabelFromOcrText(text));
+        } catch (e) { reject(e); }
+      }, 'image/jpeg', 0.9);
+    };
+    img.onerror = () => reject(new Error('load'));
+    img.src = URL.createObjectURL(blob);
+  });
+}
+
+function showLabelTapImage(blob) {
+  const panel = document.getElementById('label-tap-panel');
+  const imgEl = document.getElementById('label-tap-img');
+  if (!panel || !imgEl) return;
+  if (!blob) { panel.style.display = 'none'; return; }
+  if (imgEl._prevUrl) URL.revokeObjectURL(imgEl._prevUrl);
+  const url = URL.createObjectURL(blob);
+  imgEl._prevUrl = url;
+  imgEl.src = url;
+  panel.style.display = 'block';
+  const marker = document.getElementById('label-tap-marker');
+  if (marker) marker.style.display = 'none';
+}
+
+function _applyTapParse(parsed, normY) {
+  const curTrack = document.getElementById('p-tracking').value.trim();
+  const keepTopSender = normY < 0.35;
+  if (parsed.address && isPlausibleAddress(parsed.address)) {
+    document.getElementById('p-address').value = _cleanAddress(parsed.address);
+    if (isPlausibleName(parsed.name)) document.getElementById('p-name').value = parsed.name;
+    if (parsed.tracking && !curTrack) document.getElementById('p-tracking').value = parsed.tracking;
+    showToast('Updated from label ✓');
+    return true;
+  }
+  if (keepTopSender) {
+    showToast('Top is usually sender — try Recipient (middle)', true);
+  } else {
+    showToast('Could not read that area — tap the SHIP TO block', true);
+  }
+  return false;
+}
+
+async function readLabelZone(zone) {
+  if (!_lastLabelBlob || _tapReading) return;
+  const zones = { top: [0.5, 0.22], middle: [0.5, 0.52], bottom: [0.5, 0.78] };
+  const [nx, ny] = zones[zone] || zones.middle;
+  _placeTapMarker(nx, ny);
+  _tapReading = true;
+  showToast(zone === 'middle' ? 'Reading recipient block…' : 'Reading selected area…');
+  try {
+    const parsed = await ocrLabelRegion(_lastLabelBlob, nx, ny);
+    _applyTapParse(parsed, ny);
+  } catch (e) {
+    showToast('Read failed — try again', true);
+  }
+  _tapReading = false;
+}
+
+function _placeTapMarker(normX, normY) {
+  const img = document.getElementById('label-tap-img');
+  const marker = document.getElementById('label-tap-marker');
+  if (!img || !marker || !img.offsetWidth) return;
+  marker.style.left = (normX * 100) + '%';
+  marker.style.top = (normY * 100) + '%';
+  marker.style.display = 'block';
+}
+
+function onLabelTapTouch(ev) {
+  ev.preventDefault();
+  const touch = ev.changedTouches && ev.changedTouches[0];
+  if (!touch) return;
+  onLabelTap({ clientX: touch.clientX, clientY: touch.clientY, currentTarget: ev.currentTarget });
+}
+
+async function onLabelTap(ev) {
+  if (!_lastLabelBlob || _tapReading) return;
+  const img = ev.currentTarget;
+  const rect = img.getBoundingClientRect();
+  const normX = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
+  const normY = Math.max(0, Math.min(1, (ev.clientY - rect.top) / rect.height));
+  _placeTapMarker(normX, normY);
+  _tapReading = true;
+  showToast('Reading tapped area…');
+  try {
+    const parsed = await ocrLabelRegion(_lastLabelBlob, normX, normY);
+    _applyTapParse(parsed, normY);
+  } catch (e) {
+    showToast('Tap read failed — try again', true);
+  }
+  _tapReading = false;
+}
+
+function _resetAddButton() {
+  _addInFlight = false;
+  const btn = document.getElementById('btn-add-package');
+  if (btn) { btn.disabled = false; btn.textContent = '+ Add to List'; }
+}
+
+function _finishAddResponse(data, name, address, tracking, zip) {
+  if (!data.ok) { showToast(data.error || 'Error', true); return; }
+  if (data.duplicate) {
+    showToast('Already in list ✓');
+    discardPreview();
+    return;
+  }
+  pkgCount = data.count;
+  updateCount();
+  discardPreview();
+  const zipWarnEl = document.getElementById('zip-warn-banner');
+  if (data.zip_warning) {
+    document.getElementById('zip-warn-text').textContent = data.zip_warning;
+    zipWarnEl.classList.add('show');
+    setTimeout(() => zipWarnEl.classList.remove('show'), 8000);
+  } else {
+    zipWarnEl.classList.remove('show');
+  }
+  showToast('Package added ✓' + (data.geocoded ? ' 📍' : ''));
+  if (tracking && address) rememberLabelLocally(tracking, name, address, zip);
+  if (data.scan_order && currentPhase !== 'optimized') showStickerPrompt(data.scan_order);
+  lastScannedZone = null;
+  lastAddedItemId = currentPhase === 'optimized' ? (data.new_item_id || null) : null;
+  if (pkgCount >= 1) {
+    const obtn = document.getElementById('optimize-btn');
+    if (obtn && currentPhase === 'scanning') obtn.classList.add('visible');
+  }
+  setTimeout(refreshLiveSort, 600);
+}
+
 function setLoadingText(msg) {
   const el = document.getElementById('loading-text');
   if (el) el.textContent = msg;
@@ -1653,6 +1841,7 @@ function showPreviewFields(d, source) {
   document.getElementById('p-tracking').value = d.tracking || '';
   document.getElementById('preview-card').style.display = 'block';
   _previewOpen = true;
+  showLabelTapImage(_lastLabelBlob);
   const hint = document.getElementById('preview-source-hint');
   if (hint) {
     hint.textContent = source === 'local'
@@ -1774,6 +1963,7 @@ async function processBlob(blob) {
   setLoadingText('Reading on your phone…');
   let prepBlob = blob;
   try { prepBlob = await prepLabelImage(blob); } catch (e) {}
+  _lastLabelBlob = prepBlob;
   let parsed = { tracking: '', name: '', address: '', zip: '' };
   try { parsed = await ocrLabelLocally(prepBlob); } catch (e) {}
   _lastLocalParsed = parsed;
@@ -1893,6 +2083,9 @@ function discardPreview() {
   _previewOpen = false;
   if (_refineAbort) _refineAbort.abort();
   document.getElementById('preview-card').style.display = 'none';
+  const panel = document.getElementById('label-tap-panel');
+  if (panel) panel.style.display = 'none';
+  _resetAddButton();
 }
 
 let _lookupAddress = '';
@@ -1930,11 +2123,21 @@ function dismissLookup() {
 
 // ── Confirm & add ──
 function confirmPackage() {
+  if (_addInFlight) { showToast('Adding… one moment', true); return; }
   const name = document.getElementById('p-name').value.trim();
   const address = document.getElementById('p-address').value.trim();
   const tracking = document.getElementById('p-tracking').value.trim();
   if (!address) { showToast('Address is required', true); return; }
   const zip = (address.match(/\b(\d{5})\b/) || ['',''])[1];
+  const addKey = (tracking || '') + '|' + address.toLowerCase().replace(/\s+/g, ' ');
+  if (_lastAddKey === addKey && Date.now() - _lastAddTime < 45000) {
+    showToast('Already added this package ✓');
+    discardPreview();
+    return;
+  }
+  _addInFlight = true;
+  const btn = document.getElementById('btn-add-package');
+  if (btn) { btn.disabled = true; btn.textContent = 'Adding…'; }
   fetch('/driver/scan/add', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -1942,36 +2145,14 @@ function confirmPackage() {
   })
   .then(r => r.json())
   .then(data => {
-    if (!data.ok) { showToast(data.error || 'Error', true); return; }
-    pkgCount = data.count;
-    updateCount();
-    discardPreview();
-    // Show zip warning if package is outside assigned zone
-    const zipWarnEl = document.getElementById('zip-warn-banner');
-    if (data.zip_warning) {
-      document.getElementById('zip-warn-text').textContent = data.zip_warning;
-      zipWarnEl.classList.add('show');
-      setTimeout(() => zipWarnEl.classList.remove('show'), 8000);
-    } else {
-      zipWarnEl.classList.remove('show');
+    if (data.ok) {
+      _lastAddKey = addKey;
+      _lastAddTime = Date.now();
     }
-    showToast('Package added ✓' + (data.geocoded ? ' 📍' : ''));
-    if (tracking && address) rememberLabelLocally(tracking, name, address, zip);
-    if (data.scan_order && currentPhase !== 'optimized') {
-      showStickerPrompt(data.scan_order);
-    }
-    // Reset zone banner flag — only show zone banner after optimize (locked phase)
-    lastScannedZone = null;
-    lastAddedItemId = currentPhase === 'optimized' ? (data.new_item_id || null) : null;
-    // Show optimize button after first package
-    if (pkgCount >= 1) {
-      const obtn = document.getElementById('optimize-btn');
-      if (obtn && currentPhase === 'scanning') obtn.classList.add('visible');
-    }
-    // Refresh live sort map + reorder list
-    setTimeout(refreshLiveSort, 600);
+    _finishAddResponse(data, name, address, tracking, zip);
   })
-  .catch(() => showToast('Error adding package', true));
+  .catch(() => showToast('Error adding package', true))
+  .finally(_resetAddButton);
 }
 
 function appendPackageToList(pkg) {
