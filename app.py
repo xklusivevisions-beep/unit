@@ -2429,7 +2429,15 @@ end tell"""
         return False
 
 def get_base_url():
-    return request.host_url.rstrip('/')
+    # Always force HTTPS in production — HTTP links are unclickable in SMS on many carriers
+    explicit = os.environ.get('BASE_URL', '').rstrip('/')
+    if explicit:
+        return explicit
+    url = request.host_url.rstrip('/')
+    # Force https:// — Render proxy may pass http:// internally
+    if url.startswith('http://'):
+        url = 'https://' + url[7:]
+    return url
 
 def parse_speedx_screenshot(text):
     """Parse Speed X app screenshot OCR text into structured stops."""
