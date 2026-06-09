@@ -1289,6 +1289,9 @@ function handleFile(input) {
 let _tesseractWorker = null;
 let _previewOpen = false;
 let _refineAbort = null;
+let _lastLocalParsed = null;
+let _lastOcrText = '';
+const _LABEL_CACHE_KEY = 'unit_label_memory_v1';
 
 const _TRACKING_PATTERNS = [
   /\b(SPXDTW\d{12,})\b/i,
@@ -1297,10 +1300,58 @@ const _TRACKING_PATTERNS = [
   /\b(1Z[A-Z0-9]{16,})\b/i,
   /\b(TBA\d{10,})\b/i,
   /\b(VEHO[A-Z0-9]{8,})\b/i,
+  /\b(LP\d{10,})\b/i,
+  /\b(JJD\d{10,})\b/i,
+  /\b(420\d{27,})\b/i,
+  /\b(\d{22,})\b/,
 ];
 
 const _US_STATES = 'MI|OH|IL|IN|CA|NY|TX|FL|PA|GA|NC|VA|WA|AZ|CO|MN|WI|MO|TN|MD|MA|NJ|SC|AL|LA|KY|OR|OK|CT|UT|IA|NV|AR|MS|KS|NM|NE|WV|ID|HI|NH|ME|MT|RI|DE|SD|ND|AK|VT|WY|DC';
-const _STREET_RE = /\b(st|street|ave|avenue|rd|road|dr|drive|blvd|boulevard|way|ln|lane|ct|court|pl|place|pkwy|parkway|st\.|dr\.|ave\.|rd\.|pallister|woodward|cass|gratiot|michigan|warren|jefferson|fort|canfield|brush|eliot|alfred|winder|selden|third|second|first)\b/i;
+const _STREET_RE = /\b(st|street|ave|avenue|rd|road|dr|drive|blvd|boulevard|way|ln|lane|ct|court|pl|place|pkwy|parkway|st\.|dr\.|ave\.|rd\.|pallister|pallster|woodward|cass|gratiot|michigan|warren|jefferson|fort|canfield|brush|eliot|alfred|winder|selden|third|second|first)\b/i;
+const _SHIP_TO_RE = /ship\s*to|deliver\s*to|recipient|consignee|^to\s*:?\s*$/i;
+
+function _loadLabelCache() {
+  try { return JSON.parse(localStorage.getItem(_LABEL_CACHE_KEY) || '{}'); } catch (e) { return {}; }
+}
+function _saveLabelCache(cache) {
+  try {
+    const keys = Object.keys(cache);
+    if (keys.length > 900) {
+      keys.sort((a, b) => (cache[b].ts || 0) - (cache[a].ts || 0));
+      keys.slice(900).forEach(k => delete cache[k]);
+    }
+    localStorage.setItem(_LABEL_CACHE_KEY, JSON.stringify(cache));
+  } catch (e) { /* quota */ }
+}
+function lookupLocalLabelMemory(tracking) {
+  if (!tracking) return null;
+  const key = tracking.replace(/\s/g, '').toUpperCase();
+  const hit = _loadLabelCache()[key];
+  return hit && hit.address ? hit : null;
+}
+function rememberLabelLocally(tracking, name, address, zip) {
+  const key = (tracking || '').replace(/\s/g, '').toUpperCase();
+  if (!key || key.length < 8 || !address) return;
+  const cache = _loadLabelCache();
+  cache[key] = { name: name || '', address, zip: zip || '', ts: Date.now() };
+  _saveLabelCache(cache);
+}
+async function syncLabelMemoryFromServer() {
+  if (!navigator.onLine) return;
+  try {
+    const data = await fetch('/driver/scan/label-memory').then(r => r.json());
+    if (!data.ok || !data.items) return;
+    const cache = _loadLabelCache();
+    data.items.forEach(it => {
+      if (!it.tracking || !it.address) return;
+      const key = it.tracking.replace(/\s/g, '').toUpperCase();
+      if (!cache[key] || (it.read_count || 0) >= (cache[key].read_count || 0)) {
+        cache[key] = { name: it.name || '', address: it.address, zip: it.zip || '', ts: Date.now(), read_count: it.read_count || 1 };
+      }
+    });
+    _saveLabelCache(cache);
+  } catch (e) { /* offline */ }
+}
 
 function _isJunkLine(line) {
   if (!line || line.length < 2) return true;
@@ -1316,8 +1367,48 @@ function _isJunkLine(line) {
   return false;
 }
 
+function _looksLikeCityStateZip(line) {
+  if (!line) return false;
+  const t = line.trim();
+  if (/\b\d{5}(?:-\d{4})?\b/.test(t) && new RegExp('\\b(' + _US_STATES + ')\\b', 'i').test(t)) return true;
+  if (new RegExp('^[,.\s]*[A-Za-z.\s]+\\s+(' + _US_STATES + ')\\s+\\d{5}', 'i').test(t)) return true;
+  return false;
+}
+
+function _looksLikePersonName(line) {
+  if (!line || _looksLikeCityStateZip(line)) return false;
+  if (/^\d+\s+/.test(line) || _isJunkLine(line)) return false;
+  if (/\b(apt|unit|suite|ste|#)\b/i.test(line)) return false;
+  if (!/[A-Za-z]{2,}/.test(line) || /\d{5}/.test(line)) return false;
+  const words = line.replace(/[^\w\s'-]/g, ' ').split(/\s+/).filter(w => w.length > 1);
+  if (words.length < 1) return false;
+  if (words.length >= 2 && !new RegExp('\\b(' + _US_STATES + ')\\b', 'i').test(line)) return true;
+  return /[a-z]/.test(line) && /[A-Z]/.test(line);
+}
+
+function _isDirtyAddress(addr) {
+  if (!addr) return true;
+  if (/,\s*\./.test(addr) || /\.\s+[A-Z]{2}\s+\d{5}/.test(addr)) return true;
+  if (/^\.\s*/.test(addr.split(',').pop() || '')) return true;
+  return false;
+}
+
+function _cleanAddress(addr) {
+  if (!addr) return '';
+  let a = addr
+    .replace(/,\s*\.\s*/g, ', ')
+    .replace(/\b\.\s*(Detroit|Warren|Sterling|Dearborn|Livonia|Taylor|Southfield|Redford|Hamtramck|Highland Park)\b/gi, (_, c) => c)
+    .replace(/\s+/g, ' ')
+    .replace(/,\s*,/g, ',')
+    .trim();
+  a = a.replace(/\b(St\.?|Street|Ave\.?|Avenue|Rd\.?|Dr\.?|Drive|Blvd\.?)\s+(\d{3,4})\b(?!\d)/gi, '$1 Apt $2');
+  return a;
+}
+
 function isPlausibleAddress(addr) {
+  addr = _cleanAddress(addr || '');
   if (!addr || addr.length < 12) return false;
+  if (_isDirtyAddress(addr)) return false;
   if (/\b(DTW|ORD|IGD)-[\dA-Z]/i.test(addr)) return false;
   if (/\b(ORD|IGD)\b/i.test(addr) && !_STREET_RE.test(addr)) return false;
   if (/,\s*w,\s*AR\b/i.test(addr)) return false;
@@ -1329,12 +1420,21 @@ function isPlausibleAddress(addr) {
 
 function isPlausibleName(name) {
   if (!name || name.length < 3) return false;
-  if (/^(ORD|IGD|SDX|DTW|SPX|A)$/i.test(name.trim())) return false;
-  if (/^[a-z]\s+(ORD|DTW)/i.test(name)) return false;
-  return /[A-Za-z]{2,}/.test(name) && name.split(/\s+/).length >= 1;
+  const t = name.trim();
+  if (/^(ORD|IGD|SDX|DTW|SPX|A)$/i.test(t)) return false;
+  if (/^[a-z]\s+(ORD|DTW)/i.test(t)) return false;
+  if (_looksLikeCityStateZip(t)) return false;
+  if (/^[,.\s]+/.test(t)) return false;
+  if (/\b\d{5}(?:-\d{4})?\b/.test(t)) return false;
+  if (new RegExp('\\b(' + _US_STATES + ')\\s*\\d{5}', 'i').test(t)) return false;
+  if (!_looksLikePersonName(t) && !/\s/.test(t)) return false;
+  return _looksLikePersonName(t) || (/[A-Za-z]{2,}/.test(t) && t.split(/\s+/).length >= 2 && !/\d/.test(t));
 }
 
 function _extractTracking(raw) {
+  const compact = raw.replace(/[\s\-]+/g, '');
+  const spxCompact = compact.match(/SPXDTW\d{12,}/i);
+  if (spxCompact) return spxCompact[0].toUpperCase();
   const spx = raw.match(/SPX[A-Z0-9]{12,}/gi);
   if (spx) return spx.sort((a, b) => b.length - a.length)[0].toUpperCase().replace(/\s/g, '');
   for (const pat of _TRACKING_PATTERNS) {
@@ -1346,7 +1446,7 @@ function _extractTracking(raw) {
 }
 
 function _parseShipToBlock(lines) {
-  const shipIdx = lines.findIndex(l => /ship\s*to/i.test(l));
+  const shipIdx = lines.findIndex(l => _SHIP_TO_RE.test(l));
   if (shipIdx < 0) return null;
   const block = [];
   for (let i = shipIdx + 1; i < lines.length; i++) {
@@ -1410,11 +1510,11 @@ function parseLabelFromOcrText(text) {
       }
       let street = streetLines.join(', ').replace(/,\s*apt\s*(\d+)/i, ' Apt $1');
       street = street.replace(/\b(Apt\s+\d+),\s*\1\b/i, '$1');
-      if (street) address = `${street}, ${city}, ${state} ${zip}`.trim();
-      else address = `${city}, ${state} ${zip}`.trim();
+      street = street.replace(/\b(St\.?|Street|Ave\.?|Rd\.?|Dr\.?)\s+(\d{3,4})\b(?!\d)/gi, '$1 Apt $2');
+      if (street) address = _cleanAddress(`${street}, ${city.replace(/^[,.\s]+/, '')}, ${state} ${zip}`.trim());
+      else address = _cleanAddress(`${city.replace(/^[,.\s]+/, '')}, ${state} ${zip}`.trim());
       const nameCand = block.find((l, i) =>
-        (cityLine === null || i < cityLine) &&
-        !/^\d+\s+/.test(l) && !/\b(apt|unit|suite)\b/i.test(l) && l.length > 2
+        (cityLine === null || i < cityLine) && _looksLikePersonName(l)
       );
       if (nameCand) name = nameCand;
     } else if (block.length >= 2) {
@@ -1440,13 +1540,14 @@ function parseLabelFromOcrText(text) {
     const shipIdx = lines.findIndex(l => /ship\s*to/i.test(l));
     if (shipIdx >= 0) {
       for (let i = shipIdx + 1; i < lines.length; i++) {
-        if (_isJunkLine(lines[i]) || /^\d+\s+/.test(lines[i])) continue;
-        if (lines[i].length > 2) { name = lines[i]; break; }
+        if (_looksLikePersonName(lines[i])) { name = lines[i]; break; }
       }
     }
   }
 
   name = (name || '').replace(/[^\w\s.'-]/g, ' ').replace(/\s+/g, ' ').trim();
+  address = _cleanAddress(address);
+  if (_looksLikeCityStateZip(name)) name = '';
   if (!zip) {
     const zm = (address || raw).match(/\b(\d{5})\b/);
     if (zm) zip = zm[1];
@@ -1500,12 +1601,43 @@ async function getTesseractWorker() {
 async function ocrLabelLocally(blob) {
   const prep = await prepLabelImage(blob);
   const barcode = await tryBarcodeScan(prep);
+  let bestText = '';
+  let bestParsed = { tracking: '', name: '', address: '', zip: '' };
+  let bestScore = -1;
+  const scoreParsed = (p) => {
+    let s = 0;
+    if (p.tracking && p.tracking.length >= 12) s += 3;
+    if (isPlausibleAddress(p.address)) s += 4;
+    if (isPlausibleName(p.name)) s += 2;
+    return s;
+  };
   try {
-    const { data: { text } } = await (await getTesseractWorker()).recognize(prep);
-    const parsed = parseLabelFromOcrText(text);
-    if (barcode && !parsed.tracking) parsed.tracking = barcode.replace(/\s/g, '');
-    return parsed;
+    const worker = await getTesseractWorker();
+    const passes = [
+      { blob: prep },
+      { blob: await prepLabelImage(blob, 1800).catch(() => prep), psm: '6' },
+    ];
+    for (const pass of passes) {
+      try {
+        if (pass.psm) await worker.setParameters({ tessedit_pageseg_mode: pass.psm });
+        const { data: { text } } = await worker.recognize(pass.blob);
+        if (!text || text.length < 8) continue;
+        const parsed = parseLabelFromOcrText(text);
+        if (barcode && !parsed.tracking) parsed.tracking = barcode.replace(/\s/g, '');
+        const sc = scoreParsed(parsed);
+        if (sc > bestScore) {
+          bestScore = sc;
+          bestText = text;
+          bestParsed = parsed;
+        }
+      } catch (e) { /* next pass */ }
+    }
+    try { await worker.setParameters({ tessedit_pageseg_mode: '3' }); } catch (e) {}
+    _lastOcrText = bestText;
+    if (barcode && !bestParsed.tracking) bestParsed.tracking = barcode.replace(/\s/g, '');
+    return bestParsed;
   } catch (e) {
+    _lastOcrText = '';
     return { tracking: (barcode || '').replace(/\s/g, ''), name: '', address: '', zip: '' };
   }
 }
@@ -1525,14 +1657,21 @@ function showPreviewFields(d, source) {
   if (hint) {
     hint.textContent = source === 'local'
       ? '📱 Read on your phone — confirm or edit'
-      : (source === 'ai' ? '✨ AI read label — confirm or edit' : '');
+      : (source === 'memory' ? '🧠 Remembered label — confirm or edit'
+      : (source === 'ai' ? '✨ AI read label — confirm or edit' : ''));
     hint.style.display = hint.textContent ? 'block' : 'none';
   }
 }
 
-function handleProcessResponse(data) {
+function handleProcessResponse(data, localFallback) {
   document.getElementById('loading').style.display = 'none';
   if (!data.ok) {
+    if (localFallback && (localFallback.address || localFallback.tracking)) {
+      document.getElementById('scan-error').style.display = 'none';
+      showPreviewFields(localFallback, 'local');
+      showToast(data.error || 'AI unavailable — confirm on-phone read', true);
+      return;
+    }
     showToast(data.error || 'Could not read label', true);
     const errEl = document.getElementById('scan-error');
     if (errEl) { errEl.style.display = 'block'; errEl.innerHTML = `<b>⚠️ ${data.error || 'Could not read label'}</b>`; }
@@ -1574,7 +1713,9 @@ function handleProcessResponse(data) {
 }
 
 async function checkParsedLabel(parsed, source) {
-  const data = await fetch('/driver/scan/process', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(parsed) }).then(r => r.json());
+  const payload = { ...parsed };
+  if (_lastOcrText) payload.ocr_text = _lastOcrText;
+  const data = await fetch('/driver/scan/process', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }).then(r => r.json());
   data.source = source;
   return data;
 }
@@ -1590,18 +1731,23 @@ function refineWithAiInBackground(blob) {
       if (!_previewOpen || !data.ok || data.mode !== 'confirm') return;
       const curAddr = document.getElementById('p-address').value.trim();
       const curName = document.getElementById('p-name').value.trim();
-      const ai = data.data;
+      const curTrack = document.getElementById('p-tracking').value.trim();
+      const ai = data.data || {};
       const merged = {
-        tracking: ai.tracking || document.getElementById('p-tracking').value,
-        name: isPlausibleName(ai.name) ? ai.name : (isPlausibleName(curName) ? curName : ai.name),
-        address: isPlausibleAddress(ai.address) ? ai.address : curAddr,
+        tracking: (ai.tracking && ai.tracking.length >= (curTrack.length || 0)) ? ai.tracking : (curTrack || ai.tracking || ''),
+        name: isPlausibleName(ai.name) ? ai.name : (isPlausibleName(curName) ? curName : ''),
+        address: isPlausibleAddress(ai.address) ? _cleanAddress(ai.address) : curAddr,
         zip: ai.zip || '',
       };
-      if (isPlausibleAddress(merged.address) && !isPlausibleAddress(curAddr)) {
+      const needsFix = !isPlausibleName(curName) || _looksLikeCityStateZip(curName) ||
+        !isPlausibleAddress(curAddr) || _isDirtyAddress(curAddr) ||
+        !curTrack || curTrack.length < 12;
+      const improved = (isPlausibleAddress(merged.address) && merged.address !== curAddr) ||
+        (isPlausibleName(merged.name) && merged.name !== curName) ||
+        (merged.tracking && merged.tracking.length > curTrack.length);
+      if (needsFix && improved) {
         showPreviewFields(merged, 'ai');
-        showToast('AI read address ✓');
-      } else if (isPlausibleName(merged.name) && !isPlausibleName(curName)) {
-        showPreviewFields(merged, 'ai');
+        showToast('AI read label ✓');
       }
     }).catch(() => clearTimeout(timer));
 }
@@ -1630,65 +1776,81 @@ async function processBlob(blob) {
   try { prepBlob = await prepLabelImage(blob); } catch (e) {}
   let parsed = { tracking: '', name: '', address: '', zip: '' };
   try { parsed = await ocrLabelLocally(prepBlob); } catch (e) {}
+  _lastLocalParsed = parsed;
 
-  const goodLocal = isPlausibleAddress(parsed.address) && isPlausibleName(parsed.name);
-  const hasTracking = parsed.tracking && parsed.tracking.length >= 12;
-
-  // Bad local address (common on SpeedX labels) → use AI for address, keep local tracking
-  if (!goodLocal && navigator.onLine) {
-    setLoadingText(hasTracking ? 'Got tracking — reading address via AI…' : 'Reading address via AI…');
+  const memHit = parsed.tracking ? lookupLocalLabelMemory(parsed.tracking) : null;
+  if (memHit && memHit.address) {
+    parsed = { ...parsed, name: memHit.name || parsed.name, address: memHit.address, zip: memHit.zip || parsed.zip };
+    setLoadingText('Remembered package ✓');
     try {
-      const data = await processWithAi(prepBlob, parsed);
+      const data = await checkParsedLabel(parsed, 'memory');
       handleProcessResponse(data);
+      if (data.ok && data.mode === 'confirm') showToast('Remembered this label ✓');
       return;
-    } catch (e) {
-      /* fall through to local partial */
-    }
+    } catch (e) { /* continue */ }
   }
 
-  if (goodLocal || hasTracking) {
-    if (!goodLocal && hasTracking) {
-      parsed = { ...parsed, name: '', address: '' };
-    }
+  const goodLocal = isPlausibleAddress(parsed.address) && isPlausibleName(parsed.name) && !_isDirtyAddress(parsed.address);
+  const hasTracking = parsed.tracking && parsed.tracking.length >= 12;
+  const partialLocal = isPlausibleAddress(parsed.address) || hasTracking;
+
+  if (goodLocal) {
     setLoadingText('Checking…');
     try {
-      const data = await checkParsedLabel(parsed, goodLocal ? 'local' : 'local');
+      const data = await checkParsedLabel(parsed, 'local');
       handleProcessResponse(data);
       if (data.ok && data.mode === 'confirm') {
-        if (goodLocal) {
-          showToast('Read on your phone ✓');
-          if (navigator.onLine) refineWithAiInBackground(prepBlob);
-        } else {
-          showToast('Got tracking — enter address or wait for AI');
-          if (navigator.onLine) refineWithAiInBackground(prepBlob);
-        }
+        showToast('Read on your phone ✓');
+        if (navigator.onLine) refineWithAiInBackground(prepBlob);
       }
       return;
     } catch (e) {
       document.getElementById('loading').style.display = 'none';
       showPreviewFields(parsed, 'local');
-      showToast(hasTracking ? 'Offline — got tracking, enter address' : 'Offline — confirm and add');
+      showToast('Offline — confirm and add');
       return;
     }
   }
 
-  if (!navigator.onLine) {
+  if (navigator.onLine) {
+    setLoadingText(hasTracking ? 'Got tracking — reading via AI…' : 'Reading label via AI…');
+    try {
+      const data = await processWithAi(prepBlob, parsed);
+      if (data.ok) {
+        handleProcessResponse(data);
+        return;
+      }
+      if (partialLocal) {
+        handleProcessResponse(data, parsed);
+        if (navigator.onLine) refineWithAiInBackground(prepBlob);
+        return;
+      }
+    } catch (e) { /* fall through */ }
+  }
+
+  if (partialLocal) {
+    parsed = {
+      ...parsed,
+      name: isPlausibleName(parsed.name) ? parsed.name : '',
+      address: isPlausibleAddress(parsed.address) ? _cleanAddress(parsed.address) : '',
+    };
     document.getElementById('loading').style.display = 'none';
-    showToast('No connection — try again with signal', true);
+    showPreviewFields(parsed, 'local');
+    showToast(hasTracking ? 'Confirm address or edit' : 'Fill in missing fields');
+    try { await checkParsedLabel(parsed, 'local'); } catch (e) {}
     return;
   }
-  setLoadingText('Reading via AI…');
-  try {
-    const data = await processWithAi(prepBlob, parsed);
-    handleProcessResponse(data);
-  } catch (e) {
-    document.getElementById('loading').style.display = 'none';
-    showToast('Server error — try again', true);
-  }
+
+  document.getElementById('loading').style.display = 'none';
+  showToast(navigator.onLine ? 'Could not read — try again or enter manually' : 'No connection — enter manually', true);
+  showPreviewFields(parsed, 'local');
 }
 
 if (typeof Tesseract !== 'undefined') {
-  document.addEventListener('DOMContentLoaded', () => { getTesseractWorker().catch(() => {}); });
+  document.addEventListener('DOMContentLoaded', () => {
+    getTesseractWorker().catch(() => {});
+    syncLabelMemoryFromServer();
+  });
 }
 
 // ── Navigate Now — scan → geocode → in-app Mapbox navigation → address intel recorded ──
@@ -1794,6 +1956,7 @@ function confirmPackage() {
       zipWarnEl.classList.remove('show');
     }
     showToast('Package added ✓' + (data.geocoded ? ' 📍' : ''));
+    if (tracking && address) rememberLabelLocally(tracking, name, address, zip);
     if (data.scan_order && currentPhase !== 'optimized') {
       showStickerPrompt(data.scan_order);
     }

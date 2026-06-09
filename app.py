@@ -10,13 +10,47 @@ import anthropic
 ANTHROPIC_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
 # Free vision: get a key at https://aistudio.google.com/apikey
 GEMINI_API_KEY  = os.environ.get('GEMINI_API_KEY') or os.environ.get('GOOGLE_API_KEY', '')
-# gemini-2.0-flash is 404 for new keys — use 2.5+ models first
+# gemini-1.5-* and gemini-2.0-* shut down June 2026 — 2.5 only
 GEMINI_MODELS   = [
     'gemini-2.5-flash-lite',
     'gemini-2.5-flash',
-    'gemini-2.0-flash-lite',
-    'gemini-1.5-flash',
 ]
+_GEMINI_MODELS_CACHE = None
+
+
+def _resolve_gemini_models():
+    """Discover vision-capable Gemini models; fall back to GEMINI_MODELS."""
+    global _GEMINI_MODELS_CACHE
+    if _GEMINI_MODELS_CACHE is not None:
+        return _GEMINI_MODELS_CACHE
+    preferred = list(GEMINI_MODELS)
+    if not GEMINI_API_KEY:
+        _GEMINI_MODELS_CACHE = preferred
+        return preferred
+    try:
+        r = requests.get(
+            'https://generativelanguage.googleapis.com/v1beta/models',
+            headers={'x-goog-api-key': GEMINI_API_KEY},
+            params={'pageSize': 100},
+            timeout=12,
+        )
+        if r.ok:
+            live = []
+            for m in r.json().get('models') or []:
+                name = (m.get('name') or '').replace('models/', '')
+                methods = m.get('supportedGenerationMethods') or []
+                if 'generateContent' in methods and 'flash' in name.lower():
+                    live.append(name)
+            ordered = [m for m in preferred if m in live]
+            ordered += [m for m in live if m not in ordered and '2.5' in m]
+            if ordered:
+                log.info(f'[gemini] using models: {ordered[:4]}')
+                _GEMINI_MODELS_CACHE = ordered[:4]
+                return _GEMINI_MODELS_CACHE
+    except Exception as e:
+        log.warning(f'[gemini] model list failed: {e}')
+    _GEMINI_MODELS_CACHE = preferred
+    return preferred
 
 
 def _vision_available():
@@ -65,7 +99,7 @@ def _gemini_vision(prompt, img_bytes, max_tokens=512):
         'generationConfig': {'maxOutputTokens': max_tokens, 'temperature': 0.1},
     }
     last_err = None
-    for model in GEMINI_MODELS:
+    for model in _resolve_gemini_models():
         url = f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent'
         for attempt in range(3):
             try:
@@ -154,6 +188,211 @@ def _vision_extract_text(prompt, img_bytes, max_tokens=512):
     raise ValueError(
         'Vision AI not configured — add GEMINI_API_KEY (free at aistudio.google.com) in Render'
     )
+
+
+# ── Label text parsing (mirrors phone OCR — works offline, no AI) ──
+_US_STATES_RE = (
+    'MI|OH|IL|IN|CA|NY|TX|FL|PA|GA|NC|VA|WA|AZ|CO|MN|WI|MO|TN|MD|MA|NJ|SC|AL|LA|KY|OR|OK|'
+    'CT|UT|IA|NV|AR|MS|KS|NM|NE|WV|ID|HI|NH|ME|MT|RI|DE|SD|ND|AK|VT|WY|DC'
+)
+_TRACKING_RES = [
+    re.compile(r'\b(SPXDTW\d{12,})\b', re.I),
+    re.compile(r'\b(SPX[A-Z0-9]{14,})\b', re.I),
+    re.compile(r'\b(1Z[A-Z0-9]{16,})\b', re.I),
+    re.compile(r'\b(TBA\d{10,})\b', re.I),
+    re.compile(r'\b(YWORD\d{10,})\b', re.I),
+    re.compile(r'\b(VEHO[A-Z0-9]{8,})\b', re.I),
+    re.compile(r'\b(LP\d{10,})\b', re.I),
+    re.compile(r'\b(JJD\d{10,})\b', re.I),
+]
+_SHIP_TO_MARKERS = re.compile(
+    r'ship\s*to|deliver\s*to|recipient|consignee|^to\s*:$', re.I
+)
+
+
+def _extract_tracking_from_text(raw):
+    if not raw:
+        return ''
+    compact = re.sub(r'[\s\-]+', '', raw)
+    m = re.search(r'SPXDTW\d{12,}', compact, re.I)
+    if m:
+        return m.group(0).upper()
+    for pat in _TRACKING_RES:
+        m = pat.search(raw)
+        if m:
+            return m.group(1).upper().replace(' ', '')
+    m = re.search(r'\b(\d{18,})\b', raw)
+    return m.group(1) if m else ''
+
+
+def _is_junk_label_line(line):
+    if not line or len(line) < 2:
+        return True
+    u = line.upper().strip()
+    if re.match(r'^SHIP\s*TO$', line, re.I):
+        return True
+    if u in ('ORD', 'IGD', 'SDX', 'MAY', 'SHEIN', 'SPEEDX', 'FULFILLMENT'):
+        return True
+    if re.match(r'^(DTW|ORD|IGD|SDX)-[\dA-Z]+$', line, re.I):
+        return True
+    if re.match(r'^SPX[A-Z0-9]{8,}$', re.sub(r'\s', '', line), re.I):
+        return True
+    if re.match(r'^C\d{10,}$', re.sub(r'\s', '', line)):
+        return True
+    if re.match(r'^\d+\.\d+\s*(lb|kg)?$', line, re.I):
+        return True
+    if re.match(r'^\d{1,2}$', line):
+        return True
+    return False
+
+
+def _looks_like_city_state_zip(line):
+    if not line:
+        return False
+    t = line.strip()
+    if re.search(r'\b\d{5}(?:-\d{4})?\b', t) and re.search(rf'\b({_US_STATES_RE})\b', t, re.I):
+        return True
+    return bool(re.match(rf'^[,.\s]*[A-Za-z.\s]+\s+({_US_STATES_RE})\s+\d{{5}}', t, re.I))
+
+
+def parse_label_text(text):
+    """Parse shipping label OCR text into tracking, name, address, zip."""
+    if not text:
+        return {'tracking': '', 'name': '', 'address': '', 'zip': ''}
+    raw = text.replace('\r', '\n')
+    lines = [l.strip() for l in raw.split('\n') if l.strip()]
+    tracking = _extract_tracking_from_text(raw)
+    name, address, zip_code = '', '', ''
+
+    ship_idx = next((i for i, l in enumerate(lines) if _SHIP_TO_MARKERS.search(l)), -1)
+    block = []
+    if ship_idx >= 0:
+        for i in range(ship_idx + 1, min(ship_idx + 10, len(lines))):
+            line = lines[i]
+            if not line or _is_junk_label_line(line):
+                continue
+            if re.match(r'^[A-Z]{2,4}-[\dA-Z]', line, re.I):
+                break
+            if re.match(r'^SPX', re.sub(r'\s', '', line), re.I) and len(re.sub(r'\s', '', line)) > 12:
+                break
+            block.append(line)
+            if re.search(rf'\b({_US_STATES_RE})\b\s*\d{{5}}', line, re.I):
+                break
+
+    state_zip_re = re.compile(
+        rf'^(.+?),\s*({_US_STATES_RE})\s*(\d{{5}})(?:-\d{{4}})?\s*$', re.I
+    )
+    state_zip_alt = re.compile(rf'^(.+?)\s+({_US_STATES_RE})\s+(\d{{5}})', re.I)
+
+    if block:
+        city_line = None
+        city, state = '', ''
+        for i, line in enumerate(block):
+            m = state_zip_re.match(line) or state_zip_alt.match(line)
+            if m:
+                city_line = i
+                city = re.sub(r'[,.\s]+$', '', m.group(1)).strip()
+                state = m.group(2).upper()
+                zip_code = m.group(3)
+                break
+        if city_line is not None:
+            before = block[:city_line]
+            streets = [l for l in before if re.match(r'^\d+\s+', l) or re.search(r'\b(apt|unit|suite|ste|#)\b', l, re.I)]
+            if not streets and before:
+                streets = [l for l in before if not re.match(r'^apt\b', l, re.I)]
+            street = ', '.join(streets)
+            street = re.sub(r',\s*apt\s*(\d+)', r' Apt \1', street, flags=re.I)
+            street = re.sub(r'\b(St\.?|Street|Ave\.?|Rd\.?|Dr\.?)\s+(\d{3,4})\b(?!\d)', r'\1 Apt \2', street, flags=re.I)
+            city = re.sub(r'^[,.\s]+', '', city)
+            if street:
+                address = f'{street}, {city}, {state} {zip_code}'.strip()
+            else:
+                address = f'{city}, {state} {zip_code}'.strip()
+            for j, l in enumerate(block):
+                if j < city_line and not re.match(r'^\d+\s+', l) and not _looks_like_city_state_zip(l):
+                    if re.search(r'[A-Za-z]{2,}', l) and not re.search(r'\b(apt|unit|suite)\b', l, re.I):
+                        name = l
+                        break
+
+    if not address:
+        inline = re.search(
+            rf'\b([A-Za-z][A-Za-z\s.\'-]{{1,35}}),\s*({_US_STATES_RE})\s*(\d{{5}})', raw, re.I
+        )
+        if inline:
+            zip_code = inline.group(3)
+            for line in lines:
+                if re.match(r'^\d+\s+[A-Za-z]', line) and len(line) > 8 and not _is_junk_label_line(line):
+                    address = f'{line}, {inline.group(1).strip()}, {inline.group(2).upper()} {zip_code}'
+                    break
+
+    if _looks_like_city_state_zip(name):
+        name = ''
+    name = re.sub(r'[^\w\s.\'-]', ' ', name or '').strip()
+    name = re.sub(r'\s+', ' ', name)
+    if not zip_code and address:
+        zm = re.search(r'\b(\d{5})\b', address)
+        if zm:
+            zip_code = zm.group(1)
+    return {'tracking': tracking, 'name': name, 'address': address, 'zip': zip_code}
+
+
+def _normalize_tracking_key(tracking):
+    return re.sub(r'\s+', '', (tracking or '').upper())
+
+
+def lookup_label_memory(tracking):
+    """Return learned label fields for a tracking number (cross-session)."""
+    key = _normalize_tracking_key(tracking)
+    if not key or len(key) < 8:
+        return None
+    try:
+        db = get_db()
+        row = db.execute(
+            "SELECT customer_name, address, zip_code, read_count FROM label_memory WHERE tracking=?",
+            (key,),
+        ).fetchone()
+        db.close()
+        if row:
+            return {
+                'tracking': key,
+                'name': row['customer_name'] or '',
+                'address': row['address'] or '',
+                'zip': row['zip_code'] or '',
+                'read_count': row['read_count'] or 0,
+            }
+    except Exception as e:
+        log.warning(f'[label_memory] lookup error: {e}')
+    return None
+
+
+def upsert_label_memory(tracking, name='', address='', zip_code='', source='confirm'):
+    """Remember a confirmed label read so future scans are instant."""
+    key = _normalize_tracking_key(tracking)
+    if not key or len(key) < 8:
+        return
+    if not address and not name:
+        return
+    try:
+        db = get_db()
+        existing = db.execute("SELECT id FROM label_memory WHERE tracking=?", (key,)).fetchone()
+        now = datetime.now().isoformat()
+        if existing:
+            db.execute(
+                """UPDATE label_memory SET customer_name=?, address=?, zip_code=?,
+                   read_count=read_count+1, last_source=?, updated_at=? WHERE tracking=?""",
+                (name or '', address or '', zip_code or '', source, now, key),
+            )
+        else:
+            db.execute(
+                """INSERT INTO label_memory (tracking, customer_name, address, zip_code, read_count, last_source, created_at, updated_at)
+                   VALUES (?,?,?,?,1,?,?,?)""",
+                (key, name or '', address or '', zip_code or '', source, now, now),
+            )
+        db.commit()
+        db.close()
+    except Exception as e:
+        log.warning(f'[label_memory] upsert error: {e}')
+
 
 def compress_for_api(img_bytes, max_bytes=4 * 1024 * 1024):
     """Resize + compress image to stay under Anthropic 5MB API limit."""
@@ -270,19 +509,20 @@ def extract_package_label(img_bytes):
         raise ValueError(
             'Vision AI not configured — add GEMINI_API_KEY (free at aistudio.google.com) in Render'
         )
-    prompt = '''This is a shipping label (SpeedX, SHEIN, FedEx, Amazon, etc.). Extract delivery info.
+    prompt = '''This is a shipping label photo. Carriers include SpeedX, SHEIN, FedEx, UPS, Amazon, Veho, OnTrac, etc.
 Return ONLY a JSON object, no markdown, no code blocks.
 
-IMPORTANT — ignore these (NOT the address):
+IMPORTANT — ignore these (NOT the delivery address):
 - Sort/hub codes like ORD, DTW-08B, IGD, SDX
-- Sender/return address (SHEIN Fulfillment, North Aurora IL, etc.)
-- Weight, dates, internal codes
+- Sender/return address (warehouse, fulfillment center, North Aurora IL, etc.)
+- Weight, dates, handwritten route numbers, internal codes
 
-Extract ONLY from the "SHIP TO" / recipient section:
+Extract ONLY from the recipient block (look for "SHIP TO", "DELIVER TO", "TO:", or recipient name above street):
 - tracking: longest barcode number (SpeedX: SPXDTW... 20+ chars). Copy EXACTLY.
-- name: recipient name on SHIP TO line (e.g. "EvaMarie Jordan")
+- name: recipient name on SHIP TO line (e.g. "EvaMarie Jordan") — NOT city/state/zip
 - address: full SHIP TO delivery address as one string: street + apt/unit + city + state + zip
   Example: "888 Pallister St Apt 705, Detroit, MI 48202"
+  If unit appears as trailing number after street (e.g. "1310 Pallister St 807"), format as "1310 Pallister St Apt 807, Detroit, MI 48202"
 - zip: 5-digit zip from SHIP TO only
 
 Example:
@@ -1595,6 +1835,18 @@ def init_db():
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP
         )""",
+        """CREATE TABLE IF NOT EXISTS label_memory (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tracking TEXT UNIQUE NOT NULL,
+            customer_name TEXT,
+            address TEXT,
+            zip_code TEXT,
+            read_count INTEGER DEFAULT 1,
+            last_source TEXT DEFAULT 'confirm',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_label_memory_tracking ON label_memory (tracking)",
         "CREATE INDEX IF NOT EXISTS idx_address_intel_zip ON address_intel (zip_code)",
         "CREATE INDEX IF NOT EXISTS idx_address_intel_latng ON address_intel (lat, lng)",
         """CREATE TABLE IF NOT EXISTS route_manual_log (
@@ -2154,6 +2406,30 @@ def _unlock_stale_scan_session(db, ss):
     return ss
 
 
+@app.route('/driver/scan/label-memory', methods=['GET'])
+def scan_label_memory():
+    """Sync learned label reads to the phone for instant offline recall."""
+    if 'driver_id' not in session:
+        return jsonify({'ok': False, 'error': 'not logged in'}), 401
+    try:
+        db = get_db()
+        rows = db.execute(
+            """SELECT tracking, customer_name, address, zip_code, read_count, updated_at
+               FROM label_memory ORDER BY updated_at DESC LIMIT 800"""
+        ).fetchall()
+        db.close()
+        items = [{
+            'tracking': r['tracking'],
+            'name': r['customer_name'] or '',
+            'address': r['address'] or '',
+            'zip': r['zip_code'] or '',
+            'read_count': r['read_count'] or 1,
+        } for r in rows]
+        return jsonify({'ok': True, 'items': items})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)})
+
+
 @app.route('/driver/scan', methods=['GET'])
 def scan_packages():
     if 'driver_id' not in session:
@@ -2192,13 +2468,36 @@ def scan_process():
     # Fast path: phone already read the label locally (no photo upload / no AI wait)
     if request.is_json:
         data = request.get_json(silent=True) or {}
-        result = {
-            'tracking': (data.get('tracking') or '').strip(),
-            'name':     (data.get('name') or '').strip(),
-            'address':  (data.get('address') or '').strip(),
-            'zip':      (data.get('zip') or '').strip(),
-        }
-        if not result['address'] and not result['tracking']:
+        tracking = (data.get('tracking') or '').strip()
+        ocr_text = (data.get('ocr_text') or '').strip()
+
+        # Instant recall — learned from past confirmed scans
+        if tracking:
+            mem = lookup_label_memory(tracking)
+            if mem and mem.get('address'):
+                mem['source'] = 'memory'
+                return _finish_scan_label_result(mem)
+
+        if ocr_text:
+            result = parse_label_text(ocr_text)
+            result['tracking'] = result.get('tracking') or tracking
+            if result['tracking']:
+                mem = lookup_label_memory(result['tracking'])
+                if mem and mem.get('address'):
+                    if not result.get('name'):
+                        result['name'] = mem.get('name') or ''
+                    if not result.get('address'):
+                        result['address'] = mem.get('address') or ''
+                    result['zip'] = result.get('zip') or mem.get('zip') or ''
+        else:
+            result = {
+                'tracking': tracking,
+                'name':     (data.get('name') or '').strip(),
+                'address':  (data.get('address') or '').strip(),
+                'zip':      (data.get('zip') or '').strip(),
+            }
+
+        if not result.get('address') and not result.get('tracking'):
             return jsonify({'ok': False, 'error': 'No address or tracking in request'})
         return _finish_scan_label_result(result)
 
@@ -2214,12 +2513,26 @@ def scan_process():
         result = extract_package_label(img_bytes)
     except Exception as e:
         log.error(f'scan_process label read failed: {e}')
-        return jsonify({'ok': False, 'error': str(e)})
+        err = str(e)
+        if 'Gemini vision failed' in err or '404' in err or 'not found' in err.lower():
+            err = 'AI temporarily unavailable — use on-phone read or confirm manually'
+        return jsonify({'ok': False, 'error': err, 'ai_failed': True})
     if not result or not isinstance(result, dict):
         return jsonify({'ok': False, 'error': 'Could not read label — try a clearer, well-lit photo'})
     # Empty extraction = unreadable label (rather than a hard error)
     if not (result.get('address') or '').strip() and not (result.get('tracking') or '').strip():
         return jsonify({'ok': False, 'error': 'No address or tracking found — move closer and fill the frame with the label'})
+
+    # Merge with learned memory when AI got tracking but weak address
+    trk = (result.get('tracking') or '').strip()
+    if trk:
+        mem = lookup_label_memory(trk)
+        if mem and mem.get('address'):
+            if not (result.get('address') or '').strip():
+                result['address'] = mem['address']
+            if not (result.get('name') or '').strip():
+                result['name'] = mem.get('name') or ''
+            result['zip'] = result.get('zip') or mem.get('zip') or ''
 
     return _finish_scan_label_result(result)
 
@@ -2383,6 +2696,8 @@ def scan_add():
     db.commit()
     new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
     db.close()
+    if tracking and address:
+        upsert_label_memory(tracking, name, address, zip_code, source='confirm')
     return jsonify({'ok': True, 'count': next_order, 'scan_order': next_order, 'geocoded': lat is not None,
                    'new_item_id': new_id, 'zip_warning': zip_warning})
 
@@ -2943,7 +3258,8 @@ def test_vision():
         return jsonify({'ok': False, 'error': 'No vision key — set GEMINI_API_KEY (free at aistudio.google.com)'})
     try:
         if GEMINI_API_KEY:
-            url = f'https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODELS[0]}:generateContent'
+            model = _resolve_gemini_models()[0]
+            url = f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent'
             r = requests.post(url, headers={
                 'x-goog-api-key': GEMINI_API_KEY, 'Content-Type': 'application/json',
             }, json={
@@ -2953,7 +3269,7 @@ def test_vision():
             if not r.ok:
                 return jsonify({'ok': False, 'error': r.text[:300]})
             text = r.json()['candidates'][0]['content']['parts'][0]['text'].strip()
-            return jsonify({'ok': True, 'response': text, 'provider': 'gemini', 'model': GEMINI_MODELS[0]})
+            return jsonify({'ok': True, 'response': text, 'provider': 'gemini', 'model': model})
         client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
         resp = client.messages.create(
             model='claude-haiku-4-5', max_tokens=50,
