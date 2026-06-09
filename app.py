@@ -2182,6 +2182,20 @@ def scan_process():
     """
     if 'driver_id' not in session:
         return jsonify({'ok': False, 'error': 'not logged in'}), 401
+
+    # Fast path: phone already read the label locally (no photo upload / no AI wait)
+    if request.is_json:
+        data = request.get_json(silent=True) or {}
+        result = {
+            'tracking': (data.get('tracking') or '').strip(),
+            'name':     (data.get('name') or '').strip(),
+            'address':  (data.get('address') or '').strip(),
+            'zip':      (data.get('zip') or '').strip(),
+        }
+        if not result['address'] and not result['tracking']:
+            return jsonify({'ok': False, 'error': 'No address or tracking in request'})
+        return _finish_scan_label_result(result)
+
     file = request.files.get('photo')
     if not file:
         return jsonify({'ok': False, 'error': 'No photo received'})
@@ -2201,8 +2215,12 @@ def scan_process():
     if not (result.get('address') or '').strip() and not (result.get('tracking') or '').strip():
         return jsonify({'ok': False, 'error': 'No address or tracking found — move closer and fill the frame with the label'})
 
-    # ─ Lookup mode: check if tracking already in session ─
-    tracking = result.get('tracking', '').strip()
+    return _finish_scan_label_result(result)
+
+
+def _finish_scan_label_result(result):
+    """Duplicate / lookup / confirm response after label fields are known."""
+    tracking = (result.get('tracking') or '').strip()
     if tracking:
         db = get_db()
         today = datetime.now().strftime('%Y-%m-%d')

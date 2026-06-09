@@ -5,6 +5,7 @@
 {% endblock %}
 {% block extra_js %}
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 {% endblock %}
 {% block content %}
 <style>
@@ -299,7 +300,7 @@
 
   <!-- Phase banner -->
   <div id="phase-banner" class="scanning">
-    📦 SCAN MODE — Write each # on the package, then tap OPTIMIZE
+    📦 SCAN MODE — Write each # on the package · reads on your phone first
   </div>
 
   <!-- Vehicle selector bar -->
@@ -383,7 +384,7 @@
   <!-- Loading -->
   <div id="loading">
     <div class="spinner"></div>
-    <div>Reading label…</div>
+    <div id="loading-text">Reading label…</div>
   </div>
 
   <!-- Lookup card (re-scan existing package) -->
@@ -407,6 +408,7 @@
   <!-- Preview card -->
   <div id="preview-card">
     <h3>Confirm Package</h3>
+    <div id="preview-source-hint" style="display:none;font-size:0.78rem;color:#fbbf24;margin-bottom:10px;"></div>
     <div class="preview-field">
       <label>Recipient Name</label>
       <input type="text" id="p-name" placeholder="Name">
@@ -1283,102 +1285,221 @@ function handleFile(input) {
   }
 }
 
-// ── Process label ──
-function processBlob(blob) {
+// ── Instant local label read (works offline — no photo upload) ──
+let _tesseractWorker = null;
+let _previewOpen = false;
+let _refineAbort = null;
+
+const _TRACKING_PATTERNS = [
+  /\b(SPX[A-Z0-9]{10,})\b/i, /\b(YWORD\d{10,})\b/i, /\b(1Z[A-Z0-9]{16,})\b/i,
+  /\b(TBA\d{10,})\b/i, /\b(VEHO[A-Z0-9]{8,})\b/i, /\b([A-Z]{2,5}\d{12,})\b/,
+];
+
+function parseLabelFromOcrText(text) {
+  if (!text) return { tracking: '', name: '', address: '', zip: '' };
+  const raw = text.replace(/\r/g, '\n');
+  const lines = raw.split('\n').map(l => l.trim()).filter(Boolean);
+  let tracking = '';
+  for (const pat of _TRACKING_PATTERNS) {
+    const m = raw.match(pat);
+    if (m) { tracking = m[1].toUpperCase(); break; }
+  }
+  if (!tracking) { const ln = raw.match(/\b(\d{18,})\b/); if (ln) tracking = ln[1]; }
+  const zipM = raw.match(/\b(\d{5})(?:-\d{4})?\b/);
+  const zip = zipM ? zipM[1] : '';
+  const stateM = raw.match(/\b([A-Za-z\s.'-]{2,40}),?\s*(MI|OH|IL|IN|CA|NY|TX|FL|PA|GA|NC|VA|WA|AZ|CO|MN|WI|MO|TN|MD|MA|NJ|SC|AL|LA|KY|OR|OK|CT|UT|IA|NV|AR|MS|KS|NM|NE|WV|ID|HI|NH|ME|MT|RI|DE|SD|ND|AK|VT|WY|DC)\b\s*(\d{5})?/i);
+  let address = '';
+  for (const line of lines) {
+    if (/^\d+\s+[A-Za-z0-9]/.test(line) && line.length > 6) {
+      if (stateM) {
+        address = `${line}, ${stateM[1].trim().replace(/[,.\s]+$/, '')}, ${stateM[2].toUpperCase()} ${stateM[3] || zip}`.trim();
+      } else if (zip) address = `${line}, ${zip}`;
+      else address = line;
+      break;
+    }
+  }
+  if (!address && stateM) address = `${stateM[1].trim()}, ${stateM[2].toUpperCase()} ${stateM[3] || zip}`.trim();
+  let name = '';
+  const shipIdx = lines.findIndex(l => /ship\s*to/i.test(l));
+  if (shipIdx >= 0) {
+    for (let i = shipIdx + 1; i < lines.length; i++) {
+      if (/^\d+\s+\w/.test(lines[i])) break;
+      if (lines[i].length > 2 && !/^(apt|unit|suite|#)/i.test(lines[i])) { name = lines[i]; break; }
+    }
+  }
+  if (!name) {
+    const ai = lines.findIndex(l => /^\d+\s+[A-Za-z0-9]/.test(l));
+    if (ai > 0 && !/ship/i.test(lines[ai - 1])) name = lines[ai - 1];
+  }
+  name = name.replace(/[^\w\s.'-]/g, ' ').replace(/\s+/g, ' ').trim();
+  return { tracking, name, address, zip: zip || (stateM && stateM[3]) || '' };
+}
+
+async function prepLabelImage(blob, maxDim = 1100) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+      const c = document.createElement('canvas');
+      c.width = Math.max(1, Math.round(img.width * scale));
+      c.height = Math.max(1, Math.round(img.height * scale));
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      c.toBlob(b => b ? resolve(b) : reject(new Error('compress')), 'image/jpeg', 0.82);
+      URL.revokeObjectURL(img.src);
+    };
+    img.onerror = () => reject(new Error('load failed'));
+    img.src = URL.createObjectURL(blob);
+  });
+}
+
+async function tryBarcodeScan(blob) {
+  if (!('BarcodeDetector' in window)) return '';
+  try {
+    const detector = new BarcodeDetector({ formats: ['code_128', 'code_39', 'qr_code', 'ean_13', 'upc_a'] });
+    const codes = await detector.detect(await createImageBitmap(blob));
+    return codes.length ? (codes[0].rawValue || '') : '';
+  } catch (e) { return ''; }
+}
+
+async function getTesseractWorker() {
+  if (!_tesseractWorker) _tesseractWorker = await Tesseract.createWorker('eng', 1, { logger: () => {} });
+  return _tesseractWorker;
+}
+
+async function ocrLabelLocally(blob) {
+  const prep = await prepLabelImage(blob);
+  const barcode = await tryBarcodeScan(prep);
+  try {
+    const { data: { text } } = await (await getTesseractWorker()).recognize(prep);
+    const parsed = parseLabelFromOcrText(text);
+    if (barcode && !parsed.tracking) parsed.tracking = barcode.replace(/\s/g, '');
+    return parsed;
+  } catch (e) {
+    return { tracking: (barcode || '').replace(/\s/g, ''), name: '', address: '', zip: '' };
+  }
+}
+
+function setLoadingText(msg) {
+  const el = document.getElementById('loading-text');
+  if (el) el.textContent = msg;
+}
+
+function showPreviewFields(d, source) {
+  document.getElementById('p-name').value = d.name || '';
+  document.getElementById('p-address').value = d.address || '';
+  document.getElementById('p-tracking').value = d.tracking || '';
+  document.getElementById('preview-card').style.display = 'block';
+  _previewOpen = true;
+  const hint = document.getElementById('preview-source-hint');
+  if (hint) {
+    hint.textContent = source === 'local' ? '📱 Read on your phone — confirm or edit' : (source === 'ai' ? '✨ AI refined' : '');
+    hint.style.display = hint.textContent ? 'block' : 'none';
+  }
+}
+
+function handleProcessResponse(data) {
+  document.getElementById('loading').style.display = 'none';
+  if (!data.ok) {
+    showToast(data.error || 'Could not read label', true);
+    const errEl = document.getElementById('scan-error');
+    if (errEl) { errEl.style.display = 'block'; errEl.innerHTML = `<b>⚠️ ${data.error || 'Could not read label'}</b>`; }
+    return;
+  }
+  document.getElementById('scan-error').style.display = 'none';
+  if (data.mode === 'duplicate') {
+    _previewOpen = false;
+    showToast('Already scanned ✓ — ' + (data.tracking || 'this package'));
+    dismissLookup();
+    setTimeout(refreshLiveSort, 300);
+    return;
+  }
+  if (data.mode === 'lookup') {
+    _previewOpen = false;
+    if (data.zones_locked) {
+      showZoneBanner({ icon: data.zone_emoji || '📦', label: `${data.zone_letter || '?'} — ${data.vehicle_zone_label || ''}`,
+        desc: (data.vehicle_zone_desc || '') + (data.address ? `  •  ${data.address}` : ''), color: data.zone_color || '#3b82f6' });
+      setTimeout(refreshLiveSort, 300);
+    } else showLookupCard(data);
+    return;
+  }
+  const d = data.data;
+  if (zonesLocked && d.tracking) {
+    _previewOpen = false;
+    fetch('/driver/scan/add', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: d.name||'', address: d.address||'', tracking: d.tracking||'', zip: d.zip||'' }) })
+    .then(r => r.json()).then(added => {
+      if (!added.ok) { showToast(added.error||'Error', true); return; }
+      pkgCount = added.count; updateCount();
+      lastAddedItemId = currentPhase === 'optimized' ? (added.new_item_id || null) : null;
+      showToast('Package added ✓' + (added.geocoded ? ' 📍' : ''));
+      if (added.scan_order && currentPhase !== 'optimized') showStickerPrompt(added.scan_order);
+      setTimeout(refreshLiveSort, 400);
+    });
+    return;
+  }
+  showPreviewFields(d, data.source || 'ai');
+}
+
+async function checkParsedLabel(parsed, source) {
+  const data = await fetch('/driver/scan/process', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(parsed) }).then(r => r.json());
+  data.source = source;
+  return data;
+}
+
+function refineWithAiInBackground(blob) {
+  if (_refineAbort) _refineAbort.abort();
+  _refineAbort = new AbortController();
+  const fd = new FormData(); fd.append('photo', blob, 'label.jpg');
+  const timer = setTimeout(() => _refineAbort.abort(), 15000);
+  fetch('/driver/scan/process', { method: 'POST', body: fd, signal: _refineAbort.signal })
+    .then(r => r.json()).then(data => {
+      clearTimeout(timer);
+      if (!_previewOpen || !data.ok || data.mode !== 'confirm') return;
+      const cur = document.getElementById('p-address').value.trim();
+      if (!cur || cur.length < 8) { showPreviewFields(data.data, 'ai'); showToast('AI refined address ✓'); }
+    }).catch(() => clearTimeout(timer));
+}
+
+async function processBlob(blob) {
   if (!blob) { showToast('No image captured — try again', true); return; }
+  _previewOpen = false;
   document.getElementById('loading').style.display = 'block';
   document.getElementById('preview-card').style.display = 'none';
-  const errEl = document.getElementById('scan-error');
-  if (errEl) errEl.style.display = 'none';
-  const fd = new FormData();
-  fd.append('photo', blob, 'label.jpg');
+  document.getElementById('scan-error').style.display = 'none';
+  setLoadingText('Reading on your phone…');
+  let prepBlob = blob;
+  try { prepBlob = await prepLabelImage(blob); } catch (e) {}
+  let parsed = { tracking: '', name: '', address: '', zip: '' };
+  try { parsed = await ocrLabelLocally(prepBlob); } catch (e) {}
+  if ((parsed.address && parsed.address.length > 5) || (parsed.tracking && parsed.tracking.length > 8)) {
+    setLoadingText('Checking…');
+    try {
+      const data = await checkParsedLabel(parsed, 'local');
+      handleProcessResponse(data);
+      if (data.ok && data.mode === 'confirm') { showToast('Read on your phone ✓'); if (navigator.onLine) refineWithAiInBackground(prepBlob); }
+      return;
+    } catch (e) {
+      document.getElementById('loading').style.display = 'none';
+      showPreviewFields(parsed, 'local');
+      showToast('Offline — confirm and add');
+      return;
+    }
+  }
+  if (!navigator.onLine) {
+    document.getElementById('loading').style.display = 'none';
+    showToast('No connection — fill in address manually or retry with signal', true);
+    showPreviewFields(parsed, 'local');
+    return;
+  }
+  setLoadingText('Reading via AI…');
+  const fd = new FormData(); fd.append('photo', prepBlob, 'label.jpg');
   fetch('/driver/scan/process', { method: 'POST', body: fd })
-    .then(r => r.json())
-    .then(data => {
-      document.getElementById('loading').style.display = 'none';
-      if (!data.ok) {
-        const errMsg = data.error || 'Could not read label';
-        showToast(errMsg, true);
-        const errEl = document.getElementById('scan-error');
-        if (errEl) {
-          errEl.style.display = 'block';
-          errEl.innerHTML = `<b>⚠️ ${errMsg}</b>` +
-            (errMsg.includes('configured') || errMsg.includes('API') || errMsg.includes('GEMINI')
-              ? '<div style="color:#9ca3af;font-size:0.8rem;margin-top:6px;">Add GEMINI_API_KEY in Render — free at aistudio.google.com/apikey</div>' : '');
-        }
-        return;
-      }
-      const errEl = document.getElementById('scan-error');
-      if (errEl) errEl.style.display = 'none';
+    .then(r => r.json()).then(data => { data.source = 'ai'; handleProcessResponse(data); })
+    .catch(() => { document.getElementById('loading').style.display = 'none'; showToast('Server error — try again', true); });
+}
 
-      // ─ Duplicate: already scanned today (scan phase) ─
-      if (data.mode === 'duplicate') {
-        showToast('Already scanned ✓ — ' + (data.tracking || 'this package'));
-        dismissLookup();
-        setTimeout(refreshLiveSort, 300);
-        return;
-      }
-
-      // ─ Lookup mode: package already in session (zones locked) ─
-      if (data.mode === 'lookup') {
-        if (data.zones_locked) {
-          // ─ ZONES LOCKED: zero taps — flash zone banner instantly, no card ─
-          showZoneBanner({
-            icon:  data.zone_emoji  || '📦',
-            label: `${data.zone_letter || '?'} — ${data.vehicle_zone_label || ''}`,
-            desc:  (data.vehicle_zone_desc || '') + (data.address ? `  •  ${data.address}` : ''),
-            color: data.zone_color || '#3b82f6',
-          });
-          setTimeout(refreshLiveSort, 300);
-        } else {
-          // Zones still calibrating — show card so driver knows zone is tentative
-          showLookupCard(data);
-        }
-        return;
-      }
-
-      const d = data.data;
-
-      // ─ If zones locked + tracking present: auto-add, skip confirm card ─
-      if (zonesLocked && d.tracking) {
-        fetch('/driver/scan/add', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: d.name||'', address: d.address||'', tracking: d.tracking||'', zip: d.zip||'' })
-        })
-        .then(r => r.json())
-        .then(added => {
-          if (!added.ok) { showToast(added.error||'Error', true); return; }
-          pkgCount = added.count;
-          updateCount();
-          lastScannedZone  = null;
-          lastAddedItemId  = currentPhase === 'optimized' ? (added.new_item_id || null) : null;
-          showToast('Package added ✓' + (added.geocoded ? ' 📍' : ''));
-          if (added.scan_order && currentPhase !== 'optimized') showStickerPrompt(added.scan_order);
-          if (currentPhase === 'scanning') {
-            const obtn = document.getElementById('optimize-btn');
-            if (obtn && pkgCount >= 1) obtn.classList.add('visible');
-          }
-          if (added.zip_warning) {
-            document.getElementById('zip-warn-text').textContent = added.zip_warning;
-            document.getElementById('zip-warn-banner').classList.add('show');
-            setTimeout(() => document.getElementById('zip-warn-banner').classList.remove('show'), 8000);
-          }
-          setTimeout(refreshLiveSort, 400);
-        });
-        return;
-      }
-
-      // ─ Default: show confirm card (zones not locked or no tracking) ─
-      document.getElementById('p-name').value     = d.name || '';
-      document.getElementById('p-address').value   = d.address || '';
-      document.getElementById('p-tracking').value  = d.tracking || '';
-      document.getElementById('preview-card').style.display = 'block';
-    })
-    .catch(() => {
-      document.getElementById('loading').style.display = 'none';
-      showToast('Server error — try again', true);
-    });
+if (typeof Tesseract !== 'undefined') {
+  document.addEventListener('DOMContentLoaded', () => { getTesseractWorker().catch(() => {}); });
 }
 
 // ── Navigate Now — scan → geocode → in-app Mapbox navigation → address intel recorded ──
@@ -1418,6 +1539,8 @@ function navigateNow() {
 }
 
 function discardPreview() {
+  _previewOpen = false;
+  if (_refineAbort) _refineAbort.abort();
   document.getElementById('preview-card').style.display = 'none';
 }
 
