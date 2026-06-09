@@ -1798,8 +1798,45 @@ async function getTesseractWorker() {
 }
 
 async function detectRecipientBox(blob) {
-  _recipientBox = { left: 4, top: 34, width: 58, height: 30 };
-  return _recipientBox;
+  try {
+    const img = await createImageBitmap(blob);
+    const iw = img.width, ih = img.height;
+    const worker = await getTesseractWorker();
+    const { data } = await worker.recognize(blob);
+    const lines = data.lines || [];
+    let shipIdx = -1;
+    for (let i = 0; i < lines.length; i++) {
+      if (_SHIP_TO_RE.test(lines[i].text || '')) { shipIdx = i; break; }
+    }
+    if (shipIdx < 0) {
+      _recipientBox = { left: 4, top: 34, width: 58, height: 30 };
+      return _recipientBox;
+    }
+    let x0 = iw, y0 = ih, x1 = 0, y1 = 0;
+    for (let i = shipIdx; i < lines.length; i++) {
+      const l = lines[i];
+      const b = l.bbox;
+      if (!b) continue;
+      if (i > shipIdx && (/^ORD\b/i.test(l.text) || /^SPX[A-Z0-9]{10}/i.test((l.text || '').replace(/\s/g, '')))) break;
+      x0 = Math.min(x0, b.x0); y0 = Math.min(y0, b.y0);
+      x1 = Math.max(x1, b.x1); y1 = Math.max(y1, b.y1);
+      if (new RegExp('\\b(' + _US_STATES + ')\\s*\\d{5}').test(l.text || '') && i > shipIdx) break;
+    }
+    if (x1 <= x0) {
+      _recipientBox = { left: 4, top: 34, width: 58, height: 30 };
+      return _recipientBox;
+    }
+    _recipientBox = {
+      left: Math.max(0, (x0 / iw) * 100 - 2),
+      top: Math.max(0, (y0 / ih) * 100 - 2),
+      width: Math.min(96, ((x1 - x0) / iw) * 100 + 4),
+      height: Math.min(50, ((y1 - y0) / ih) * 100 + 4),
+    };
+    return _recipientBox;
+  } catch (e) {
+    _recipientBox = { left: 4, top: 34, width: 58, height: 30 };
+    return _recipientBox;
+  }
 }
 
 function scanReadOk(d) {
@@ -1818,10 +1855,13 @@ function hideLabelTapPanel() {
   if (box) box.style.display = 'none';
 }
 
+let _labelFixReadToken = 0;
+
 function showLabelFixPanel() {
   const panel = document.getElementById('label-tap-panel');
   const imgEl = document.getElementById('label-tap-img');
   if (!panel || !imgEl || !_lastLabelBlob) return;
+  const token = ++_labelFixReadToken;
   if (!_recipientBox) _recipientBox = { left: 4, top: 34, width: 58, height: 30 };
   if (imgEl._prevUrl) URL.revokeObjectURL(imgEl._prevUrl);
   imgEl._prevUrl = URL.createObjectURL(_lastLabelBlob);
@@ -1830,6 +1870,18 @@ function showLabelFixPanel() {
   renderRecipientBox();
   const marker = document.getElementById('label-tap-marker');
   if (marker) marker.style.display = 'none';
+
+  const runDetectAndRead = async () => {
+    if (token !== _labelFixReadToken) return;
+    try {
+      await detectRecipientBox(_lastLabelBlob);
+      if (token !== _labelFixReadToken) return;
+      renderRecipientBox();
+      await rereadFromRecipientBox();
+    } catch (e) { /* keep default box */ }
+  };
+  if (imgEl.complete && imgEl.naturalWidth) runDetectAndRead();
+  else imgEl.onload = () => runDetectAndRead();
 }
 
 function renderRecipientBox() {
@@ -2058,34 +2110,50 @@ function showLabelTapImage(blob) {
 }
 
 function _applyTapParse(parsed, normY) {
+  if (!parsed) return false;
   const curTrack = document.getElementById('p-tracking').value.trim();
+  const curAddr = document.getElementById('p-address').value.trim();
   const keepTopSender = normY < 0.35;
-  if (parsed.address && isPlausibleAddress(parsed.address)) {
-    document.getElementById('p-address').value = _cleanAddress(parsed.address);
-    if (isPlausibleName(parsed.name)) document.getElementById('p-name').value = parsed.name;
-    if (parsed.tracking && !curTrack) document.getElementById('p-tracking').value = parsed.tracking;
-    const merged = {
-      name: document.getElementById('p-name').value.trim(),
-      address: document.getElementById('p-address').value.trim(),
-      tracking: document.getElementById('p-tracking').value.trim(),
-    };
-    if (scanReadOk(merged)) {
-      hideLabelTapPanel();
-      hideAddressSuggestions();
-      showToast('Read label ✓');
-    } else {
-      showToast('Updated — adjust box or confirm');
-      deferAddressSuggestions();
-    }
-    return true;
+  let updated = false;
+
+  if (parsed.tracking && parsed.tracking.length >= 8 &&
+      (!curTrack || parsed.tracking.length >= curTrack.length)) {
+    document.getElementById('p-tracking').value = parsed.tracking;
+    updated = true;
   }
-  if (keepTopSender) {
-    showToast('Top is usually sender — try Recipient (middle)', true);
+
+  const cleanedAddr = parsed.address ? _cleanAddress(parsed.address) : '';
+  if (cleanedAddr && !isSenderAddress(cleanedAddr) && (!curAddr || cleanedAddr.length >= curAddr.length)) {
+    document.getElementById('p-address').value = cleanedAddr;
+    updated = true;
+  }
+
+  if (parsed.name && isPlausibleName(parsed.name)) {
+    document.getElementById('p-name').value = parsed.name;
+    updated = true;
+  }
+
+  if (!updated) {
+    if (keepTopSender) showToast('Top is usually sender — try Recipient (middle)', true);
+    else showToast('Could not read that area — adjust the green box', true);
+    deferAddressSuggestions();
+    return false;
+  }
+
+  const merged = {
+    name: document.getElementById('p-name').value.trim(),
+    address: document.getElementById('p-address').value.trim(),
+    tracking: document.getElementById('p-tracking').value.trim(),
+  };
+  if (scanReadOk(merged)) {
+    hideLabelTapPanel();
+    hideAddressSuggestions();
+    showToast('Read label ✓');
   } else {
-    showToast('Could not read that area — tap the SHIP TO block', true);
+    showToast('Partial read — adjust box or tap a suggestion');
+    deferAddressSuggestions();
   }
-  fetchAddressSuggestions();
-  return false;
+  return true;
 }
 
 async function readLabelZone(zone) {
@@ -2485,8 +2553,8 @@ async function processBlob(blob) {
   if (partialLocal) {
     parsed = {
       ...parsed,
-      name: isPlausibleName(parsed.name) ? parsed.name : '',
-      address: isPlausibleAddress(parsed.address) ? _cleanAddress(parsed.address) : '',
+      name: parsed.name && !isSenderAddress(parsed.name) ? parsed.name.trim() : '',
+      address: parsed.address ? _cleanAddress(parsed.address) : '',
     };
     document.getElementById('loading').style.display = 'none';
     showPreviewFields(parsed, 'local');
@@ -2546,6 +2614,7 @@ function navigateNow() {
 
 function discardPreview() {
   _previewOpen = false;
+  _labelFixReadToken++;
   if (_refineAbort) _refineAbort.abort();
   if (_inferAbort) _inferAbort.abort();
   hideLabelTapPanel();
