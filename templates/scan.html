@@ -75,6 +75,15 @@
                     border: 1px solid #4b5563; background: #111827; color: #d1d5db; cursor: pointer; }
   .label-zone-btn:active { background: #374151; }
   .label-zone-btn.mid { border-color: #f59e0b; color: #fbbf24; }
+  #address-suggest-panel { margin-bottom: 10px; display: none; }
+  #address-suggest-panel .suggest-hdr { font-size: 0.72rem; color: #93c5fd; margin-bottom: 6px; line-height: 1.35; }
+  #address-suggest-panel .suggest-detected { font-size: 0.68rem; color: #6b7280; margin-bottom: 8px; }
+  .addr-suggest-btn { display: block; width: 100%; text-align: left; padding: 10px 12px; margin-bottom: 6px;
+                      background: #111827; border: 1px solid #374151; border-radius: 10px; color: #e5e7eb;
+                      cursor: pointer; font-size: 0.82rem; line-height: 1.35; }
+  .addr-suggest-btn:active { background: #1f2937; border-color: #60a5fa; }
+  .addr-suggest-btn .s-meta { font-size: 0.68rem; color: #9ca3af; margin-top: 3px; }
+  .addr-suggest-btn .s-conf { float: right; font-size: 0.65rem; color: #34d399; font-weight: 700; }
 
   /* Loading spinner */
   #loading { display: none; text-align: center; padding: 24px; color: #9ca3af; }
@@ -441,6 +450,11 @@
     <div class="preview-field">
       <label>Delivery Address</label>
       <input type="text" id="p-address" placeholder="Full address">
+    </div>
+    <div id="address-suggest-panel">
+      <div class="suggest-hdr">💡 Suggested addresses — pieced together from what's visible on the label</div>
+      <div class="suggest-detected" id="address-suggest-detected"></div>
+      <div id="address-suggest-list"></div>
     </div>
     <div class="preview-field">
       <label>Tracking Number</label>
@@ -1321,6 +1335,8 @@ let _tapReading = false;
 let _addInFlight = false;
 let _lastAddKey = '';
 let _lastAddTime = 0;
+let _addressSuggestions = [];
+let _inferAbort = null;
 const _LABEL_CACHE_KEY = 'unit_label_memory_v1';
 
 const _TRACKING_PATTERNS = [
@@ -1734,6 +1750,7 @@ function _applyTapParse(parsed, normY) {
     if (isPlausibleName(parsed.name)) document.getElementById('p-name').value = parsed.name;
     if (parsed.tracking && !curTrack) document.getElementById('p-tracking').value = parsed.tracking;
     showToast('Updated from label ✓');
+    fetchAddressSuggestions();
     return true;
   }
   if (keepTopSender) {
@@ -1741,6 +1758,7 @@ function _applyTapParse(parsed, normY) {
   } else {
     showToast('Could not read that area — tap the SHIP TO block', true);
   }
+  fetchAddressSuggestions();
   return false;
 }
 
@@ -1835,6 +1853,83 @@ function setLoadingText(msg) {
   if (el) el.textContent = msg;
 }
 
+function needsAddressSuggestions(addr) {
+  if (isPlausibleAddress(addr)) return false;
+  const combined = ((addr || '') + ' ' + (_lastOcrText || '')).trim();
+  if (combined.length < 5) return false;
+  return /\d/.test(combined) || _STREET_RE.test(combined) || /\b\d{5}\b/.test(combined);
+}
+
+function hideAddressSuggestions() {
+  const panel = document.getElementById('address-suggest-panel');
+  if (panel) panel.style.display = 'none';
+}
+
+function applyAddressSuggestion(idx) {
+  const s = _addressSuggestions[idx];
+  if (!s) return;
+  document.getElementById('p-address').value = s.address;
+  if (s.name && !isPlausibleName(document.getElementById('p-name').value.trim())) {
+    document.getElementById('p-name').value = s.name;
+  }
+  showToast('Applied suggested address ✓');
+  hideAddressSuggestions();
+}
+
+function showAddressSuggestions(suggestions, detected) {
+  const panel = document.getElementById('address-suggest-panel');
+  const list = document.getElementById('address-suggest-list');
+  const det = document.getElementById('address-suggest-detected');
+  if (!panel || !list) return;
+  _addressSuggestions = suggestions || [];
+  if (!_addressSuggestions.length) {
+    panel.style.display = 'none';
+    return;
+  }
+  if (det) {
+    det.textContent = detected && detected.length
+      ? 'Detected on label: ' + detected.join(' · ')
+      : '';
+  }
+  list.innerHTML = _addressSuggestions.map((s, i) => `
+    <button type="button" class="addr-suggest-btn" onclick="applyAddressSuggestion(${i})">
+      <span class="s-conf">${s.confidence}% match</span>
+      ${s.address.replace(/</g, '&lt;')}
+      <div class="s-meta">${s.reason || s.source}${s.name ? ' · ' + s.name.replace(/</g, '&lt;') : ''}</div>
+    </button>`).join('');
+  panel.style.display = 'block';
+}
+
+async function fetchAddressSuggestions() {
+  const address = document.getElementById('p-address').value.trim();
+  const tracking = document.getElementById('p-tracking').value.trim();
+  const name = document.getElementById('p-name').value.trim();
+  if (!needsAddressSuggestions(address) && !(_lastOcrText && _lastOcrText.length > 12)) {
+    hideAddressSuggestions();
+    return;
+  }
+  if (_inferAbort) _inferAbort.abort();
+  _inferAbort = new AbortController();
+  try {
+    const data = await fetch('/driver/scan/infer-address', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: _inferAbort.signal,
+      body: JSON.stringify({
+        address, tracking, name, zip: (address.match(/\b(\d{5})\b/) || ['',''])[1],
+        ocr_text: _lastOcrText || '',
+      }),
+    }).then(r => r.json());
+    if (data.ok && data.suggestions && data.suggestions.length) {
+      showAddressSuggestions(data.suggestions, data.detected);
+    } else {
+      hideAddressSuggestions();
+    }
+  } catch (e) {
+    if (e.name !== 'AbortError') hideAddressSuggestions();
+  }
+}
+
 function showPreviewFields(d, source) {
   document.getElementById('p-name').value = d.name || '';
   document.getElementById('p-address').value = d.address || '';
@@ -1850,6 +1945,7 @@ function showPreviewFields(d, source) {
       : (source === 'ai' ? '✨ AI read label — confirm or edit' : ''));
     hint.style.display = hint.textContent ? 'block' : 'none';
   }
+  fetchAddressSuggestions();
 }
 
 function handleProcessResponse(data, localFallback) {
@@ -2082,6 +2178,8 @@ function navigateNow() {
 function discardPreview() {
   _previewOpen = false;
   if (_refineAbort) _refineAbort.abort();
+  if (_inferAbort) _inferAbort.abort();
+  hideAddressSuggestions();
   document.getElementById('preview-card').style.display = 'none';
   const panel = document.getElementById('label-tap-panel');
   if (panel) panel.style.display = 'none';

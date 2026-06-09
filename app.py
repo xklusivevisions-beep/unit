@@ -394,7 +394,227 @@ def upsert_label_memory(tracking, name='', address='', zip_code='', source='conf
         log.warning(f'[label_memory] upsert error: {e}')
 
 
-def compress_for_api(img_bytes, max_bytes=4 * 1024 * 1024):
+_ADDR_FRAG_SKIP = {
+    'SHIP', 'TO', 'FROM', 'THE', 'AND', 'APT', 'UNIT', 'SUITE', 'STE', 'FLOOR', 'FL',
+    'SPEEDX', 'SHEIN', 'FEDEX', 'AMAZON', 'DETROIT', 'MICHIGAN', 'ILLINOIS', 'FULFILLMENT',
+    'NORTH', 'AURORA', 'OVERLAND', 'ORD', 'IGD', 'SDX', 'MAY', 'STREET', 'AVENUE', 'ROAD',
+    'DRIVE', 'LANE', 'COURT', 'PLACE', 'BOULEVARD',
+}
+
+
+def _extract_address_fragments(*texts):
+    """Pull partial address pieces from OCR / form fields for inference."""
+    combined = ' '.join(t for t in texts if t).strip()
+    fr = {
+        'street_num': '', 'street_name': '', 'unit': '', 'city': '',
+        'state': '', 'zip': '', 'street_tokens': [],
+    }
+    if not combined:
+        return fr
+
+    zm = re.search(r'\b(\d{5})(?:-\d{4})?\b', combined)
+    if zm:
+        fr['zip'] = zm.group(1)
+    sm = re.search(rf'\b({_US_STATES_RE})\b', combined, re.I)
+    if sm:
+        fr['state'] = sm.group(1).upper()
+
+    csz = re.search(
+        rf'([A-Za-z][A-Za-z\s.\'-]{{2,28}}),?\s*({_US_STATES_RE})\s+(\d{{5}})',
+        combined, re.I,
+    )
+    if csz:
+        fr['city'] = csz.group(1).strip(' ,.')
+        fr['state'] = csz.group(2).upper()
+        fr['zip'] = csz.group(3)
+
+    street = re.search(
+        r'\b(\d{1,6})\s+([A-Za-z0-9][A-Za-z0-9\s.\'-]{2,40}?'
+        r'(?:\s+(?:St\.?|Street|Ave\.?|Avenue|Rd\.?|Road|Dr\.?|Drive|Blvd\.?|Ln\.?|Lane|Ct\.?|Court|Pl\.?|Place|Way|Pkwy\.?))?',
+        combined, re.I,
+    )
+    if street:
+        fr['street_num'] = street.group(1)
+        fr['street_name'] = re.sub(r'\s+', ' ', street.group(2)).strip(' ,.')
+
+    unit = re.search(r'(?:apt|apartment|unit|suite|ste|#)\s*([A-Za-z0-9-]+)', combined, re.I)
+    if unit:
+        fr['unit'] = unit.group(1)
+    elif fr['street_name']:
+        tail = re.search(r'\b(?:St\.?|Street|Ave\.?|Rd\.?|Dr\.?)\s+(\d{3,4})\b', combined, re.I)
+        if tail:
+            fr['unit'] = tail.group(1)
+
+    words = re.findall(r'[A-Za-z]{4,}', combined)
+    fr['street_tokens'] = [
+        w for w in words
+        if w.upper() not in _ADDR_FRAG_SKIP and w.upper() != fr.get('city', '').upper()
+    ][:10]
+    return fr
+
+
+def _score_inferred_address(addr, fr, name_hint=''):
+    """Higher score = better match to visible label fragments."""
+    if not addr:
+        return 0
+    u = addr.upper()
+    score = 0
+    reasons = []
+    if fr.get('zip') and fr['zip'] in addr:
+        score += 28
+        reasons.append('zip')
+    if fr.get('street_num') and re.search(r'\b' + re.escape(fr['street_num']) + r'\b', addr):
+        score += 32
+        reasons.append('street #')
+    for tok in fr.get('street_tokens') or []:
+        if len(tok) >= 4 and tok.upper() in u:
+            score += 14
+            reasons.append(tok.lower())
+    if fr.get('city') and fr['city'].upper() in u:
+        score += 18
+        reasons.append('city')
+    if fr.get('state') and re.search(rf'\b{re.escape(fr["state"])}\b', u):
+        score += 8
+        reasons.append('state')
+    if fr.get('unit') and fr['unit'].upper() in u:
+        score += 16
+        reasons.append('unit')
+    if name_hint and len(name_hint) > 2 and name_hint.upper() in u:
+        score += 6
+    return score, reasons
+
+
+def infer_address_suggestions(tracking='', partial_address='', ocr_text='', name='', zip_code='', limit=5):
+    """
+    Combine partial label fragments with delivery history to suggest full addresses.
+    Used when labels are warped, torn, or weathered.
+    """
+    parsed = parse_label_text(ocr_text or partial_address or '')
+    fr = _extract_address_fragments(partial_address, ocr_text, parsed.get('address', ''))
+    if zip_code:
+        fr['zip'] = zip_code
+    elif parsed.get('zip'):
+        fr['zip'] = parsed['zip']
+    if not fr.get('street_num') and parsed.get('address'):
+        pfr = _extract_address_fragments(parsed['address'])
+        for k in ('street_num', 'street_name', 'unit', 'city', 'state', 'zip'):
+            if not fr.get(k) and pfr.get(k):
+                fr[k] = pfr[k]
+
+    candidates = {}
+
+    def _add(addr, nm='', source='history', base=0):
+        if not addr or len(addr) < 8:
+            return
+        key = _normalize_addr_key(addr)
+        sc, reasons = _score_inferred_address(addr, fr, name)
+        sc += base
+        if sc < 12:
+            return
+        prev = candidates.get(key)
+        if not prev or sc > prev['confidence']:
+            label = source
+            if source == 'label_memory':
+                label = 'past scan'
+            elif source == 'address_intel':
+                label = 'delivered here before'
+            elif source == 'scan_items':
+                label = 'recent scan'
+            elif source == 'stops':
+                label = 'route history'
+            elif source == 'geocoder':
+                label = 'address lookup'
+            reason = 'Matched ' + ', '.join(dict.fromkeys(reasons[:4])) if reasons else 'partial match'
+            candidates[key] = {
+                'address': addr,
+                'name': nm or '',
+                'zip': _extract_zip(addr) or fr.get('zip') or '',
+                'confidence': min(99, sc),
+                'source': label,
+                'reason': reason,
+            }
+
+    trk = _normalize_tracking_key(tracking)
+    if trk:
+        mem = lookup_label_memory(trk)
+        if mem and mem.get('address'):
+            _add(mem['address'], mem.get('name', ''), 'label_memory', base=40)
+
+    tokens = [t for t in fr.get('street_tokens') or [] if len(t) >= 4][:5]
+    zip_c = fr.get('zip')
+    if not tokens and not zip_c and not fr.get('street_num'):
+        return sorted(candidates.values(), key=lambda x: -x['confidence'])[:limit]
+
+    try:
+        db = get_db()
+        searches = []
+        if zip_c and tokens:
+            for tok in tokens[:3]:
+                like = f'%{tok}%'
+                searches.extend([
+                    ("SELECT address, customer_name AS nm FROM label_memory WHERE zip_code=? AND UPPER(address) LIKE UPPER(?) LIMIT 8", (zip_c, like), 'label_memory'),
+                    ("SELECT address, customer_name AS nm FROM scan_items WHERE zip_code=? AND UPPER(address) LIKE UPPER(?) ORDER BY id DESC LIMIT 8", (zip_c, like), 'scan_items'),
+                    ("SELECT address, '' AS nm FROM address_intel WHERE zip_code=? AND UPPER(address) LIKE UPPER(?) ORDER BY delivery_count DESC LIMIT 8", (zip_c, like), 'address_intel'),
+                    ("SELECT address, customer_name AS nm FROM stops WHERE UPPER(address) LIKE UPPER(?) AND address LIKE ? ORDER BY id DESC LIMIT 8", (like, f'%{zip_c}%'), 'stops'),
+                ])
+        if fr.get('street_num') and tokens:
+            num = fr['street_num']
+            for tok in tokens[:2]:
+                like = f'%{num}%{tok}%'
+                searches.append(
+                    ("SELECT address, customer_name AS nm FROM scan_items WHERE UPPER(address) LIKE UPPER(?) ORDER BY id DESC LIMIT 6", (like,), 'scan_items')
+                )
+        if zip_c and fr.get('street_num'):
+            like = f"{fr['street_num']}%"
+            searches.append(
+                ("SELECT address, customer_name AS nm FROM scan_items WHERE zip_code=? AND UPPER(address) LIKE UPPER(?) ORDER BY id DESC LIMIT 6", (zip_c, like), 'scan_items')
+            )
+        for sql, params, src in searches:
+            try:
+                for row in db.execute(sql, params).fetchall():
+                    _add(row['address'], row['nm'] or '', src)
+            except Exception:
+                pass
+        db.close()
+    except Exception as e:
+        log.warning(f'[infer_address] db search: {e}')
+
+    # Try assembling a best-guess and validating via Census geocoder
+    if fr.get('street_num') and (fr.get('street_name') or tokens) and fr.get('zip'):
+        street_part = fr.get('street_name') or tokens[0]
+        city = fr.get('city') or ''
+        state = fr.get('state') or 'MI'
+        unit = fr.get('unit')
+        base_addr = f"{fr['street_num']} {street_part}"
+        if unit:
+            base_addr += f" Apt {unit}"
+        if city:
+            guess = f"{base_addr}, {city}, {state} {fr['zip']}"
+        else:
+            guess = f"{base_addr}, {state} {fr['zip']}"
+        lat, lng = _census_geocode(guess)
+        if lat and lng:
+            _add(guess, name, 'geocoder', base=22)
+        elif city:
+            guess2 = f"{base_addr}, {state} {fr['zip']}"
+            lat2, lng2 = _census_geocode(guess2)
+            if lat2 and lng2:
+                _add(guess, name, 'geocoder', base=18)
+
+    out = sorted(candidates.values(), key=lambda x: -x['confidence'])
+    seen = set()
+    deduped = []
+    for item in out:
+        k = _normalize_addr_key(item['address'])
+        if k in seen:
+            continue
+        seen.add(k)
+        partial_key = _normalize_addr_key(partial_address or '')
+        if partial_key and k == partial_key and item['confidence'] < 50:
+            continue
+        deduped.append(item)
+    return deduped[:limit]
+
     """Resize + compress image to stay under Anthropic 5MB API limit."""
     try:
         img = Image.open(io.BytesIO(img_bytes)).convert('RGB')
@@ -2428,6 +2648,43 @@ def scan_label_memory():
         return jsonify({'ok': True, 'items': items})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)})
+
+
+@app.route('/driver/scan/infer-address', methods=['POST'])
+def scan_infer_address():
+    """Suggest full addresses from partial/warped label fragments + delivery history."""
+    if 'driver_id' not in session:
+        return jsonify({'ok': False, 'error': 'not logged in'}), 401
+    data = request.get_json() or {}
+    partial = (data.get('address') or '').strip()
+    ocr_text = (data.get('ocr_text') or '').strip()
+    fr = _extract_address_fragments(partial, ocr_text)
+    hints = []
+    if fr.get('street_num'):
+        hints.append(f"#{fr['street_num']}")
+    if fr.get('street_name'):
+        hints.append(fr['street_name'])
+    elif fr.get('street_tokens'):
+        hints.append(fr['street_tokens'][0])
+    if fr.get('unit'):
+        hints.append(f"Apt {fr['unit']}")
+    if fr.get('city'):
+        hints.append(fr['city'])
+    if fr.get('zip'):
+        hints.append(fr['zip'])
+    suggestions = infer_address_suggestions(
+        tracking=(data.get('tracking') or '').strip(),
+        partial_address=partial,
+        ocr_text=ocr_text,
+        name=(data.get('name') or '').strip(),
+        zip_code=(data.get('zip') or '').strip(),
+        limit=6,
+    )
+    return jsonify({
+        'ok': True,
+        'suggestions': suggestions,
+        'detected': hints,
+    })
 
 
 @app.route('/driver/scan', methods=['GET'])
