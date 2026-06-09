@@ -1291,51 +1291,170 @@ let _previewOpen = false;
 let _refineAbort = null;
 
 const _TRACKING_PATTERNS = [
-  /\b(SPX[A-Z0-9]{10,})\b/i, /\b(YWORD\d{10,})\b/i, /\b(1Z[A-Z0-9]{16,})\b/i,
-  /\b(TBA\d{10,})\b/i, /\b(VEHO[A-Z0-9]{8,})\b/i, /\b([A-Z]{2,5}\d{12,})\b/,
+  /\b(SPXDTW\d{12,})\b/i,
+  /\b(SPX[A-Z0-9]{14,})\b/i,
+  /\b(YWORD\d{10,})\b/i,
+  /\b(1Z[A-Z0-9]{16,})\b/i,
+  /\b(TBA\d{10,})\b/i,
+  /\b(VEHO[A-Z0-9]{8,})\b/i,
 ];
+
+const _US_STATES = 'MI|OH|IL|IN|CA|NY|TX|FL|PA|GA|NC|VA|WA|AZ|CO|MN|WI|MO|TN|MD|MA|NJ|SC|AL|LA|KY|OR|OK|CT|UT|IA|NV|AR|MS|KS|NM|NE|WV|ID|HI|NH|ME|MT|RI|DE|SD|ND|AK|VT|WY|DC';
+const _STREET_RE = /\b(st|street|ave|avenue|rd|road|dr|drive|blvd|boulevard|way|ln|lane|ct|court|pl|place|pkwy|parkway|st\.|dr\.|ave\.|rd\.|pallister|woodward|cass|gratiot|michigan|warren|jefferson|fort|canfield|brush|eliot|alfred|winder|selden|third|second|first)\b/i;
+
+function _isJunkLine(line) {
+  if (!line || line.length < 2) return true;
+  const u = line.toUpperCase().trim();
+  if (/^SHIP\s*TO$/i.test(line)) return true;
+  if (/^(ORD|IGD|SDX|MAY|SHEIN|SPEEDX|SPEED\s*X|FULFILLMENT)$/i.test(u)) return true;
+  if (/^(DTW|ORD|IGD|SDX)-[\dA-Z]+$/i.test(line)) return true;
+  if (/^SPX[A-Z0-9]{8,}$/i.test(line.replace(/\s/g, ''))) return true;
+  if (/^C\d{10,}$/.test(line.replace(/\s/g, ''))) return true;
+  if (/^\d+\.\d+\s*(lb|kg)?$/i.test(line)) return true;
+  if (/^\d{1,2}$/.test(line)) return true;
+  if (/^(NORTH|OVERLAND|AURORA)\b/i.test(line) && /60542|IL/.test(line)) return true;
+  return false;
+}
+
+function isPlausibleAddress(addr) {
+  if (!addr || addr.length < 12) return false;
+  if (/\b(DTW|ORD|IGD)-[\dA-Z]/i.test(addr)) return false;
+  if (/\b(ORD|IGD)\b/i.test(addr) && !_STREET_RE.test(addr)) return false;
+  if (/,\s*w,\s*AR\b/i.test(addr)) return false;
+  const hasZip = /\b\d{5}\b/.test(addr);
+  const hasState = new RegExp('\\b(' + _US_STATES + ')\\b', 'i').test(addr);
+  const hasStreet = /^\d+\s+[A-Za-z]/.test(addr) || _STREET_RE.test(addr);
+  return hasStreet && (hasZip || hasState);
+}
+
+function isPlausibleName(name) {
+  if (!name || name.length < 3) return false;
+  if (/^(ORD|IGD|SDX|DTW|SPX|A)$/i.test(name.trim())) return false;
+  if (/^[a-z]\s+(ORD|DTW)/i.test(name)) return false;
+  return /[A-Za-z]{2,}/.test(name) && name.split(/\s+/).length >= 1;
+}
+
+function _extractTracking(raw) {
+  const spx = raw.match(/SPX[A-Z0-9]{12,}/gi);
+  if (spx) return spx.sort((a, b) => b.length - a.length)[0].toUpperCase().replace(/\s/g, '');
+  for (const pat of _TRACKING_PATTERNS) {
+    const m = raw.match(pat);
+    if (m) return m[1].toUpperCase().replace(/\s/g, '');
+  }
+  const ln = raw.match(/\b(\d{18,})\b/);
+  return ln ? ln[1] : '';
+}
+
+function _parseShipToBlock(lines) {
+  const shipIdx = lines.findIndex(l => /ship\s*to/i.test(l));
+  if (shipIdx < 0) return null;
+  const block = [];
+  for (let i = shipIdx + 1; i < lines.length; i++) {
+    let line = lines[i].trim();
+    if (!line || _isJunkLine(line)) continue;
+    if (/^[A-Z]{2,4}-[\dA-Z]/i.test(line)) break;
+    if (/^SPX/i.test(line.replace(/\s/g, '')) && line.replace(/\s/g, '').length > 12) break;
+    block.push(line);
+    if (new RegExp('\\b(' + _US_STATES + ')\\b\\s*\\d{5}', 'i').test(line)) break;
+    if (block.length >= 8) break;
+  }
+  return block.length ? block : null;
+}
 
 function parseLabelFromOcrText(text) {
   if (!text) return { tracking: '', name: '', address: '', zip: '' };
   const raw = text.replace(/\r/g, '\n');
   const lines = raw.split('\n').map(l => l.trim()).filter(Boolean);
-  let tracking = '';
-  for (const pat of _TRACKING_PATTERNS) {
-    const m = raw.match(pat);
-    if (m) { tracking = m[1].toUpperCase(); break; }
-  }
-  if (!tracking) { const ln = raw.match(/\b(\d{18,})\b/); if (ln) tracking = ln[1]; }
-  const zipM = raw.match(/\b(\d{5})(?:-\d{4})?\b/);
-  const zip = zipM ? zipM[1] : '';
-  const stateM = raw.match(/\b([A-Za-z\s.'-]{2,40}),?\s*(MI|OH|IL|IN|CA|NY|TX|FL|PA|GA|NC|VA|WA|AZ|CO|MN|WI|MO|TN|MD|MA|NJ|SC|AL|LA|KY|OR|OK|CT|UT|IA|NV|AR|MS|KS|NM|NE|WV|ID|HI|NH|ME|MT|RI|DE|SD|ND|AK|VT|WY|DC)\b\s*(\d{5})?/i);
-  let address = '';
-  for (const line of lines) {
-    if (/^\d+\s+[A-Za-z0-9]/.test(line) && line.length > 6) {
-      if (stateM) {
-        address = `${line}, ${stateM[1].trim().replace(/[,.\s]+$/, '')}, ${stateM[2].toUpperCase()} ${stateM[3] || zip}`.trim();
-      } else if (zip) address = `${line}, ${zip}`;
-      else address = line;
-      break;
+  const tracking = _extractTracking(raw);
+
+  const stateZipRe = new RegExp(
+    '^(.+?),\\s*(' + _US_STATES + ')\\s*(\\d{5})(?:-\\d{4})?\\s*$', 'i'
+  );
+  const stateZipInline = new RegExp(
+    '\\b([A-Za-z][A-Za-z\\s.\'-]{1,35}),\\s*(' + _US_STATES + ')\\s*(\\d{5})', 'i'
+  );
+
+  let name = '', address = '', zip = '';
+  const block = _parseShipToBlock(lines);
+
+  if (block) {
+    let cityLine = null, city = '', state = '', streetParts = [];
+    for (let i = 0; i < block.length; i++) {
+      const m = block[i].match(stateZipRe) || block[i].match(
+        new RegExp('^(.+?)\\s+(' + _US_STATES + ')\\s*(\\d{5})', 'i')
+      );
+      if (m) {
+        cityLine = i;
+        city = m[1].replace(/[,.\s]+$/, '').trim();
+        state = m[2].toUpperCase();
+        zip = m[3];
+        break;
+      }
+    }
+    if (cityLine === null) {
+      const inline = block.join(' ').match(stateZipInline);
+      if (inline) {
+        city = inline[1].trim();
+        state = inline[2].toUpperCase();
+        zip = inline[3];
+        cityLine = block.length;
+      }
+    }
+    if (cityLine !== null) {
+      const beforeCity = cityLine > 0 ? block.slice(0, cityLine) : [];
+      const streetLines = beforeCity.filter(l =>
+        /^\d+\s+/.test(l) || /\b(apt|unit|suite|ste|#)\b/i.test(l)
+      );
+      if (!streetLines.length && beforeCity.length) {
+        streetLines.push(...beforeCity.filter(l => !/^apt\b/i.test(l) || beforeCity.length === 1));
+      }
+      let street = streetLines.join(', ').replace(/,\s*apt\s*(\d+)/i, ' Apt $1');
+      street = street.replace(/\b(Apt\s+\d+),\s*\1\b/i, '$1');
+      if (street) address = `${street}, ${city}, ${state} ${zip}`.trim();
+      else address = `${city}, ${state} ${zip}`.trim();
+      const nameCand = block.find((l, i) =>
+        (cityLine === null || i < cityLine) &&
+        !/^\d+\s+/.test(l) && !/\b(apt|unit|suite)\b/i.test(l) && l.length > 2
+      );
+      if (nameCand) name = nameCand;
+    } else if (block.length >= 2) {
+      name = block[0];
+      address = block.slice(1).join(', ');
     }
   }
-  if (!address && stateM) address = `${stateM[1].trim()}, ${stateM[2].toUpperCase()} ${stateM[3] || zip}`.trim();
-  let name = '';
-  const shipIdx = lines.findIndex(l => /ship\s*to/i.test(l));
-  if (shipIdx >= 0) {
-    for (let i = shipIdx + 1; i < lines.length; i++) {
-      if (/^\d+\s+\w/.test(lines[i])) break;
-      if (lines[i].length > 2 && !/^(apt|unit|suite|#)/i.test(lines[i])) { name = lines[i]; break; }
+
+  if (!address) {
+    const sm = raw.match(stateZipInline);
+    if (sm) {
+      zip = sm[3];
+      for (const line of lines) {
+        if (/^\d+\s+[A-Za-z]/.test(line) && line.length > 8 && !_isJunkLine(line)) {
+          address = `${line}, ${sm[1].trim()}, ${sm[2].toUpperCase()} ${sm[3]}`;
+          break;
+        }
+      }
     }
   }
+
   if (!name) {
-    const ai = lines.findIndex(l => /^\d+\s+[A-Za-z0-9]/.test(l));
-    if (ai > 0 && !/ship/i.test(lines[ai - 1])) name = lines[ai - 1];
+    const shipIdx = lines.findIndex(l => /ship\s*to/i.test(l));
+    if (shipIdx >= 0) {
+      for (let i = shipIdx + 1; i < lines.length; i++) {
+        if (_isJunkLine(lines[i]) || /^\d+\s+/.test(lines[i])) continue;
+        if (lines[i].length > 2) { name = lines[i]; break; }
+      }
+    }
   }
-  name = name.replace(/[^\w\s.'-]/g, ' ').replace(/\s+/g, ' ').trim();
-  return { tracking, name, address, zip: zip || (stateM && stateM[3]) || '' };
+
+  name = (name || '').replace(/[^\w\s.'-]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!zip) {
+    const zm = (address || raw).match(/\b(\d{5})\b/);
+    if (zm) zip = zm[1];
+  }
+  return { tracking, name, address, zip };
 }
 
-async function prepLabelImage(blob, maxDim = 1100) {
+async function prepLabelImage(blob, maxDim = 1400) {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => {
@@ -1343,8 +1462,20 @@ async function prepLabelImage(blob, maxDim = 1100) {
       const c = document.createElement('canvas');
       c.width = Math.max(1, Math.round(img.width * scale));
       c.height = Math.max(1, Math.round(img.height * scale));
-      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
-      c.toBlob(b => b ? resolve(b) : reject(new Error('compress')), 'image/jpeg', 0.82);
+      const ctx = c.getContext('2d');
+      ctx.drawImage(img, 0, 0, c.width, c.height);
+      // Boost contrast for OCR on glossy labels
+      try {
+        const id = ctx.getImageData(0, 0, c.width, c.height);
+        const d = id.data;
+        for (let i = 0; i < d.length; i += 4) {
+          const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+          const v = g > 175 ? 255 : g < 95 ? 0 : g < 128 ? g * 0.5 : Math.min(255, g * 1.15);
+          d[i] = d[i + 1] = d[i + 2] = v;
+        }
+        ctx.putImageData(id, 0, 0);
+      } catch (e) { /* skip */ }
+      c.toBlob(b => b ? resolve(b) : reject(new Error('compress')), 'image/jpeg', 0.88);
       URL.revokeObjectURL(img.src);
     };
     img.onerror = () => reject(new Error('load failed'));
@@ -1392,7 +1523,9 @@ function showPreviewFields(d, source) {
   _previewOpen = true;
   const hint = document.getElementById('preview-source-hint');
   if (hint) {
-    hint.textContent = source === 'local' ? '📱 Read on your phone — confirm or edit' : (source === 'ai' ? '✨ AI refined' : '');
+    hint.textContent = source === 'local'
+      ? '📱 Read on your phone — confirm or edit'
+      : (source === 'ai' ? '✨ AI read label — confirm or edit' : '');
     hint.style.display = hint.textContent ? 'block' : 'none';
   }
 }
@@ -1455,9 +1588,35 @@ function refineWithAiInBackground(blob) {
     .then(r => r.json()).then(data => {
       clearTimeout(timer);
       if (!_previewOpen || !data.ok || data.mode !== 'confirm') return;
-      const cur = document.getElementById('p-address').value.trim();
-      if (!cur || cur.length < 8) { showPreviewFields(data.data, 'ai'); showToast('AI refined address ✓'); }
+      const curAddr = document.getElementById('p-address').value.trim();
+      const curName = document.getElementById('p-name').value.trim();
+      const ai = data.data;
+      const merged = {
+        tracking: ai.tracking || document.getElementById('p-tracking').value,
+        name: isPlausibleName(ai.name) ? ai.name : (isPlausibleName(curName) ? curName : ai.name),
+        address: isPlausibleAddress(ai.address) ? ai.address : curAddr,
+        zip: ai.zip || '',
+      };
+      if (isPlausibleAddress(merged.address) && !isPlausibleAddress(curAddr)) {
+        showPreviewFields(merged, 'ai');
+        showToast('AI read address ✓');
+      } else if (isPlausibleName(merged.name) && !isPlausibleName(curName)) {
+        showPreviewFields(merged, 'ai');
+      }
     }).catch(() => clearTimeout(timer));
+}
+
+async function processWithAi(prepBlob, localParsed) {
+  const fd = new FormData();
+  fd.append('photo', prepBlob, 'label.jpg');
+  const data = await fetch('/driver/scan/process', { method: 'POST', body: fd }).then(r => r.json());
+  data.source = 'ai';
+  if (data.ok && data.data && localParsed) {
+    if (localParsed.tracking && (!data.data.tracking || data.data.tracking.length < localParsed.tracking.length)) {
+      data.data.tracking = localParsed.tracking;
+    }
+  }
+  return data;
 }
 
 async function processBlob(blob) {
@@ -1471,31 +1630,61 @@ async function processBlob(blob) {
   try { prepBlob = await prepLabelImage(blob); } catch (e) {}
   let parsed = { tracking: '', name: '', address: '', zip: '' };
   try { parsed = await ocrLabelLocally(prepBlob); } catch (e) {}
-  if ((parsed.address && parsed.address.length > 5) || (parsed.tracking && parsed.tracking.length > 8)) {
+
+  const goodLocal = isPlausibleAddress(parsed.address) && isPlausibleName(parsed.name);
+  const hasTracking = parsed.tracking && parsed.tracking.length >= 12;
+
+  // Bad local address (common on SpeedX labels) → use AI for address, keep local tracking
+  if (!goodLocal && navigator.onLine) {
+    setLoadingText(hasTracking ? 'Got tracking — reading address via AI…' : 'Reading address via AI…');
+    try {
+      const data = await processWithAi(prepBlob, parsed);
+      handleProcessResponse(data);
+      return;
+    } catch (e) {
+      /* fall through to local partial */
+    }
+  }
+
+  if (goodLocal || hasTracking) {
+    if (!goodLocal && hasTracking) {
+      parsed = { ...parsed, name: '', address: '' };
+    }
     setLoadingText('Checking…');
     try {
-      const data = await checkParsedLabel(parsed, 'local');
+      const data = await checkParsedLabel(parsed, goodLocal ? 'local' : 'local');
       handleProcessResponse(data);
-      if (data.ok && data.mode === 'confirm') { showToast('Read on your phone ✓'); if (navigator.onLine) refineWithAiInBackground(prepBlob); }
+      if (data.ok && data.mode === 'confirm') {
+        if (goodLocal) {
+          showToast('Read on your phone ✓');
+          if (navigator.onLine) refineWithAiInBackground(prepBlob);
+        } else {
+          showToast('Got tracking — enter address or wait for AI');
+          if (navigator.onLine) refineWithAiInBackground(prepBlob);
+        }
+      }
       return;
     } catch (e) {
       document.getElementById('loading').style.display = 'none';
       showPreviewFields(parsed, 'local');
-      showToast('Offline — confirm and add');
+      showToast(hasTracking ? 'Offline — got tracking, enter address' : 'Offline — confirm and add');
       return;
     }
   }
+
   if (!navigator.onLine) {
     document.getElementById('loading').style.display = 'none';
-    showToast('No connection — fill in address manually or retry with signal', true);
-    showPreviewFields(parsed, 'local');
+    showToast('No connection — try again with signal', true);
     return;
   }
   setLoadingText('Reading via AI…');
-  const fd = new FormData(); fd.append('photo', prepBlob, 'label.jpg');
-  fetch('/driver/scan/process', { method: 'POST', body: fd })
-    .then(r => r.json()).then(data => { data.source = 'ai'; handleProcessResponse(data); })
-    .catch(() => { document.getElementById('loading').style.display = 'none'; showToast('Server error — try again', true); });
+  try {
+    const data = await processWithAi(prepBlob, parsed);
+    handleProcessResponse(data);
+  } catch (e) {
+    document.getElementById('loading').style.display = 'none';
+    showToast('Server error — try again', true);
+  }
 }
 
 if (typeof Tesseract !== 'undefined') {

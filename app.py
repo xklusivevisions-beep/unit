@@ -270,19 +270,25 @@ def extract_package_label(img_bytes):
         raise ValueError(
             'Vision AI not configured — add GEMINI_API_KEY (free at aistudio.google.com) in Render'
         )
-    prompt = '''This is a shipping label. Extract the delivery information.
+    prompt = '''This is a shipping label (SpeedX, SHEIN, FedEx, Amazon, etc.). Extract delivery info.
 Return ONLY a JSON object, no markdown, no code blocks.
 
-Extract:
-- tracking: the main tracking/barcode number (usually at bottom, longest number)
-- name: recipient name ("Ship To" field)
-- address: full delivery address as one string (street, city, state, zip)
-- zip: just the 5-digit zip code
+IMPORTANT — ignore these (NOT the address):
+- Sort/hub codes like ORD, DTW-08B, IGD, SDX
+- Sender/return address (SHEIN Fulfillment, North Aurora IL, etc.)
+- Weight, dates, internal codes
 
-Example output:
-{"tracking": "YWORD010176279569", "name": "Skye Scaglione", "address": "5750 Woodward Avenue 6, Detroit, MI 48202", "zip": "48202"}
+Extract ONLY from the "SHIP TO" / recipient section:
+- tracking: longest barcode number (SpeedX: SPXDTW... 20+ chars). Copy EXACTLY.
+- name: recipient name on SHIP TO line (e.g. "EvaMarie Jordan")
+- address: full SHIP TO delivery address as one string: street + apt/unit + city + state + zip
+  Example: "888 Pallister St Apt 705, Detroit, MI 48202"
+- zip: 5-digit zip from SHIP TO only
 
-If a field is not visible, use an empty string.
+Example:
+{"tracking": "SPXDTW013662606010010144", "name": "EvaMarie Jordan", "address": "888 Pallister St Apt 705, Detroit, MI 48202", "zip": "48202"}
+
+If a field is not visible, use empty string.
 Return ONLY the JSON object.'''
     try:
         text = _vision_extract_text(prompt, img_bytes, max_tokens=512)
