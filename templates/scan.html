@@ -71,10 +71,21 @@
                       border: 2px solid #f59e0b; border-radius: 50%; background: rgba(245,158,11,0.35);
                       pointer-events: none; display: none; box-shadow: 0 0 0 4px rgba(245,158,11,0.15); }
   #label-recipient-box { position: absolute; border: 3px solid #22c55e; border-radius: 6px;
-                         background: rgba(34,197,94,0.12); pointer-events: none; display: none;
-                         box-shadow: 0 0 0 2px rgba(34,197,94,0.35); }
-  #label-recipient-box::before { content: 'SHIP TO'; position: absolute; top: -18px; left: 0;
-                                 font-size: 0.62rem; font-weight: 800; color: #22c55e; letter-spacing: 0.04em; }
+                         background: rgba(34,197,94,0.12); pointer-events: auto; display: none;
+                         box-shadow: 0 0 0 2px rgba(34,197,94,0.35); touch-action: none; z-index: 2; }
+  #label-recipient-box::before { content: 'SHIP TO — drag to move'; position: absolute; top: -18px; left: 0;
+                                 font-size: 0.58rem; font-weight: 800; color: #22c55e; letter-spacing: 0.02em;
+                                 white-space: nowrap; pointer-events: none; }
+  #label-recipient-box .rb-drag-bar { position: absolute; inset: 0; cursor: move; touch-action: none; }
+  #label-recipient-box .rb-resize-handle { position: absolute; right: -10px; bottom: -10px; width: 26px; height: 26px;
+                         background: #22c55e; border: 2px solid #fff; border-radius: 50%; cursor: nwse-resize;
+                         touch-action: none; z-index: 3; box-shadow: 0 2px 6px rgba(0,0,0,0.35); }
+  #label-recipient-box .rb-resize-handle::after { content: '⤡'; position: absolute; inset: 0; display: flex;
+                         align-items: center; justify-content: center; font-size: 0.75rem; color: #fff; font-weight: 900; }
+  .rb-size-row { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+  .rb-size-btn { flex: 1; min-width: 72px; padding: 7px 4px; font-size: 0.68rem; font-weight: 700; border-radius: 8px;
+                 border: 1px solid #4b5563; background: #111827; color: #a7f3d0; cursor: pointer; }
+  .rb-size-btn:active { background: #374151; }
   .label-zone-btns { display: flex; gap: 6px; margin-top: 8px; }
   .label-zone-btn { flex: 1; padding: 8px 4px; font-size: 0.72rem; font-weight: 700; border-radius: 8px;
                     border: 1px solid #4b5563; background: #111827; color: #d1d5db; cursor: pointer; }
@@ -450,11 +461,20 @@
     <h3>Confirm Package</h3>
     <div id="preview-source-hint" style="display:none;font-size:0.78rem;color:#fbbf24;margin-bottom:10px;"></div>
     <div id="label-tap-panel">
-      <div class="tap-hint">Wrong address? Tap the <b>delivery address</b> on the label (usually middle — not sender at top)</div>
+      <div class="tap-hint">Green box = recipient area · <b>drag corner to resize</b> · drag box to move · re-reads when you release</div>
       <div id="label-tap-wrap">
         <img id="label-tap-img" alt="Label" onclick="onLabelTap(event)" ontouchend="onLabelTapTouch(event)">
-        <div id="label-recipient-box"></div>
+        <div id="label-recipient-box">
+          <div class="rb-drag-bar" id="rb-move-handle"></div>
+          <div class="rb-resize-handle" id="rb-resize-handle"></div>
+        </div>
         <div id="label-tap-marker"></div>
+      </div>
+      <div class="rb-size-row">
+        <button type="button" class="rb-size-btn" onclick="nudgeRecipientBox('w', 4)">↔ Wider</button>
+        <button type="button" class="rb-size-btn" onclick="nudgeRecipientBox('w', -4)">↔ Narrower</button>
+        <button type="button" class="rb-size-btn" onclick="nudgeRecipientBox('h', 4)">↕ Taller</button>
+        <button type="button" class="rb-size-btn" onclick="nudgeRecipientBox('h', -4)">↕ Shorter</button>
       </div>
       <div class="label-zone-btns">
         <button type="button" class="label-zone-btn" onclick="readLabelZone('top')">↑ Sender (top)</button>
@@ -1823,6 +1843,144 @@ function renderRecipientBox() {
   box.style.display = 'block';
 }
 
+function _clampRecipientBox() {
+  if (!_recipientBox) return;
+  _recipientBox.width = Math.max(12, Math.min(_recipientBox.width, 98 - _recipientBox.left));
+  _recipientBox.height = Math.max(8, Math.min(_recipientBox.height, 98 - _recipientBox.top));
+  _recipientBox.left = Math.max(0, Math.min(_recipientBox.left, 98 - _recipientBox.width));
+  _recipientBox.top = Math.max(0, Math.min(_recipientBox.top, 98 - _recipientBox.height));
+}
+
+let _rbDrag = null;
+let _rbRereadTimer = null;
+
+function _rbPoint(e) {
+  return e.touches && e.touches.length ? e.touches[0] : (e.changedTouches && e.changedTouches[0] ? e.changedTouches[0] : e);
+}
+
+function onRecipientBoxPointerDown(e, mode) {
+  if (!_recipientBox) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const pt = _rbPoint(e);
+  _rbDrag = { mode, startX: pt.clientX, startY: pt.clientY, orig: { ..._recipientBox } };
+  document.addEventListener('mousemove', onRecipientBoxPointerMove);
+  document.addEventListener('mouseup', onRecipientBoxPointerUp);
+  document.addEventListener('touchmove', onRecipientBoxPointerMove, { passive: false });
+  document.addEventListener('touchend', onRecipientBoxPointerUp);
+}
+
+function onRecipientBoxPointerMove(e) {
+  if (!_rbDrag || !_recipientBox) return;
+  e.preventDefault();
+  const wrap = document.getElementById('label-tap-wrap');
+  if (!wrap) return;
+  const rect = wrap.getBoundingClientRect();
+  const pt = _rbPoint(e);
+  const dx = ((pt.clientX - _rbDrag.startX) / rect.width) * 100;
+  const dy = ((pt.clientY - _rbDrag.startY) / rect.height) * 100;
+  const o = _rbDrag.orig;
+  if (_rbDrag.mode === 'move') {
+    _recipientBox.left = o.left + dx;
+    _recipientBox.top = o.top + dy;
+  } else {
+    _recipientBox.width = o.width + dx;
+    _recipientBox.height = o.height + dy;
+  }
+  _clampRecipientBox();
+  renderRecipientBox();
+}
+
+function onRecipientBoxPointerUp() {
+  document.removeEventListener('mousemove', onRecipientBoxPointerMove);
+  document.removeEventListener('mouseup', onRecipientBoxPointerUp);
+  document.removeEventListener('touchmove', onRecipientBoxPointerMove);
+  document.removeEventListener('touchend', onRecipientBoxPointerUp);
+  if (!_rbDrag) return;
+  _rbDrag = null;
+  clearTimeout(_rbRereadTimer);
+  _rbRereadTimer = setTimeout(rereadFromRecipientBox, 280);
+}
+
+function nudgeRecipientBox(axis, delta) {
+  if (!_recipientBox) {
+    _recipientBox = { left: 4, top: 30, width: 58, height: 32 };
+  }
+  if (axis === 'w') _recipientBox.width += delta;
+  else _recipientBox.height += delta;
+  _clampRecipientBox();
+  renderRecipientBox();
+  clearTimeout(_rbRereadTimer);
+  _rbRereadTimer = setTimeout(rereadFromRecipientBox, 350);
+}
+
+async function ocrLabelRect(blob, box) {
+  if (!box) return { tracking: '', name: '', address: '', zip: '' };
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = async () => {
+      const x = Math.max(0, (box.left / 100) * img.width);
+      const y = Math.max(0, (box.top / 100) * img.height);
+      const w = Math.max(40, (box.width / 100) * img.width);
+      const h = Math.max(30, (box.height / 100) * img.height);
+      const c = document.createElement('canvas');
+      c.width = Math.round(Math.min(w, img.width - x));
+      c.height = Math.round(Math.min(h, img.height - y));
+      const ctx = c.getContext('2d');
+      ctx.drawImage(img, x, y, c.width, c.height, 0, 0, c.width, c.height);
+      try {
+        const id = ctx.getImageData(0, 0, c.width, c.height);
+        const d = id.data;
+        for (let i = 0; i < d.length; i += 4) {
+          const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+          const v = g > 175 ? 255 : g < 95 ? 0 : g < 128 ? g * 0.5 : Math.min(255, g * 1.15);
+          d[i] = d[i + 1] = d[i + 2] = v;
+        }
+        ctx.putImageData(id, 0, 0);
+      } catch (e) { /* skip */ }
+      c.toBlob(async (b) => {
+        URL.revokeObjectURL(img.src);
+        if (!b) return reject(new Error('crop'));
+        try {
+          const worker = await getTesseractWorker();
+          const { data: { text } } = await worker.recognize(b);
+          resolve(parseLabelFromOcrText(text));
+        } catch (e) { reject(e); }
+      }, 'image/jpeg', 0.9);
+    };
+    img.onerror = () => reject(new Error('load'));
+    img.src = URL.createObjectURL(blob);
+  });
+}
+
+async function rereadFromRecipientBox() {
+  if (!_lastLabelBlob || !_recipientBox || _tapReading) return;
+  _tapReading = true;
+  showToast('Reading box…');
+  try {
+    const parsed = await ocrLabelRect(_lastLabelBlob, _recipientBox);
+    _applyTapParse(parsed, (_recipientBox.top + _recipientBox.height / 2) / 100);
+  } catch (e) {
+    showToast('Could not read box — adjust size', true);
+  }
+  _tapReading = false;
+}
+
+function initRecipientBoxHandles() {
+  if (window._rbHandlesInit) return;
+  window._rbHandlesInit = true;
+  const move = document.getElementById('rb-move-handle');
+  const resize = document.getElementById('rb-resize-handle');
+  if (move) {
+    move.addEventListener('mousedown', e => onRecipientBoxPointerDown(e, 'move'));
+    move.addEventListener('touchstart', e => onRecipientBoxPointerDown(e, 'move'), { passive: false });
+  }
+  if (resize) {
+    resize.addEventListener('mousedown', e => onRecipientBoxPointerDown(e, 'resize'));
+    resize.addEventListener('touchstart', e => onRecipientBoxPointerDown(e, 'resize'), { passive: false });
+  }
+}
+
 async function ocrLabelLocally(blob) {
   const prep = await prepLabelImage(blob, 1200);
   const scoreParsed = (p) => {
@@ -1935,14 +2093,17 @@ function _applyTapParse(parsed, normY) {
 
 async function readLabelZone(zone) {
   if (!_lastLabelBlob || _tapReading) return;
-  const zones = { top: [0.5, 0.22], middle: [0.5, 0.52], bottom: [0.5, 0.78] };
-  const [nx, ny] = zones[zone] || zones.middle;
-  _placeTapMarker(nx, ny);
+  const zones = { top: [0.5, 0.22, 58, 22], middle: [0.5, 0.50, 58, 32], bottom: [0.5, 0.78, 58, 18] };
+  const z = zones[zone] || zones.middle;
+  _recipientBox = { left: z[0] * 100 - z[2] / 2, top: z[1] * 100 - z[3] / 2, width: z[2], height: z[3] };
+  _clampRecipientBox();
+  _placeTapMarker(z[0], z[1]);
+  renderRecipientBox();
   _tapReading = true;
   showToast(zone === 'middle' ? 'Reading recipient block…' : 'Reading selected area…');
   try {
-    const parsed = await ocrLabelRegion(_lastLabelBlob, nx, ny);
-    _applyTapParse(parsed, ny);
+    const parsed = await ocrLabelRect(_lastLabelBlob, _recipientBox);
+    _applyTapParse(parsed, z[1]);
   } catch (e) {
     showToast('Read failed — try again', true);
   }
@@ -1966,16 +2127,20 @@ function onLabelTapTouch(ev) {
 }
 
 async function onLabelTap(ev) {
-  if (!_lastLabelBlob || _tapReading) return;
+  if (!_lastLabelBlob || _tapReading || _rbDrag) return;
   const img = ev.currentTarget;
   const rect = img.getBoundingClientRect();
   const normX = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
   const normY = Math.max(0, Math.min(1, (ev.clientY - rect.top) / rect.height));
   _placeTapMarker(normX, normY);
+  if (!_recipientBox) _recipientBox = { left: 4, top: 30, width: 58, height: 32 };
+  _recipientBox.left = Math.max(0, Math.min(98 - _recipientBox.width, (normX * 100) - _recipientBox.width / 2));
+  _recipientBox.top = Math.max(0, Math.min(98 - _recipientBox.height, (normY * 100) - _recipientBox.height / 2));
+  renderRecipientBox();
   _tapReading = true;
   showToast('Reading tapped area…');
   try {
-    const parsed = await ocrLabelRegion(_lastLabelBlob, normX, normY);
+    const parsed = await ocrLabelRect(_lastLabelBlob, _recipientBox);
     _applyTapParse(parsed, normY);
   } catch (e) {
     showToast('Tap read failed — try again', true);
@@ -2333,6 +2498,7 @@ if (typeof Tesseract !== 'undefined') {
   document.addEventListener('DOMContentLoaded', () => {
     getTesseractWorker().catch(() => {});
     syncLabelMemoryFromServer();
+    initRecipientBoxHandles();
   });
 }
 
