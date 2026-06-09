@@ -1559,8 +1559,133 @@ def compute_centroids(sorted_pkgs):
             'color':  pts[0].get('zone_color',  '#3b82f6'),
             'emoji':  pts[0].get('zone_emoji',  '⚪'),
         }
-        for letter, pts in zone_pts.items()
+        for letter, pts in sorted(zone_pts.items())
     ]
+
+
+def reconstruct_scan_pkg_meta(items, vehicle_type='suv_midsize'):
+    """Rebuild zone colors, nums, and vehicle spots from locked scan_items."""
+    pkgs = []
+    for item in items:
+        pkgs.append({
+            'id': item['id'],
+            'tracking': _ss_val(item, 'tracking', ''),
+            'name': _ss_val(item, 'customer_name', ''),
+            'address': _ss_val(item, 'address', ''),
+            'lat': _ss_val(item, 'dest_lat'),
+            'lng': _ss_val(item, 'dest_lng'),
+            'zone_letter': _ss_val(item, 'zone_letter', '?'),
+            'delivery_order': _ss_val(item, 'delivery_order', 0),
+            'scan_order': _ss_val(item, 'scan_order', 0),
+        })
+    zone_counters = {}
+    for p in pkgs:
+        letter = p.get('zone_letter') or '?'
+        zone_counters[letter] = zone_counters.get(letter, 0) + 1
+        p['zone_num'] = zone_counters[letter]
+        ci = ZONE_COLORS.get(letter, {'hex': '#6b7280', 'emoji': '⚪'})
+        p['zone_color'] = ci['hex']
+        p['zone_emoji'] = ci['emoji']
+        p['zone_label_full'] = f"{letter}-{p['zone_num']}" if letter != '?' else '?'
+    return assign_vehicle_zones(pkgs, vehicle_type)
+
+
+def build_route_zone_context(stops, route=None, vehicle_type='suv_midsize', db=None):
+    """
+    Enrich delivery stops with zone/sticker metadata for dashboard + maps.
+    Returns (stops_list, zone_summary, zone_centroids, current_zone, next_stop).
+    """
+    stops_list = [dict(s) for s in stops] if stops else []
+
+    if db:
+        for s in stops_list:
+            if s.get('tracking') and (not s.get('scan_order') or not s.get('zone_letter')):
+                item = db.execute(
+                    "SELECT scan_order, zone_letter FROM scan_items WHERE tracking=? ORDER BY id DESC LIMIT 1",
+                    (s['tracking'],)
+                ).fetchone()
+                if item:
+                    if not s.get('scan_order'):
+                        s['scan_order'] = _ss_val(item, 'scan_order')
+                    if not s.get('zone_letter'):
+                        s['zone_letter'] = _ss_val(item, 'zone_letter')
+
+    zone_counters = {}
+    unique_letters = []
+    v_zones = VEHICLE_ZONES.get(vehicle_type, VEHICLE_ZONES['suv_midsize'])
+    for s in stops_list:
+        letter = s.get('zone_letter') or '?'
+        if letter not in zone_counters:
+            zone_counters[letter] = 0
+            if letter != '?':
+                unique_letters.append(letter)
+        if not s.get('zone_num'):
+            zone_counters[letter] += 1
+            s['zone_num'] = zone_counters[letter]
+        ci = ZONE_COLORS.get(letter, {'hex': '#6b7280', 'emoji': '⚪'})
+        s['zone_color'] = s.get('zone_color') or ci['hex']
+        s['zone_emoji'] = s.get('zone_emoji') or ci['emoji']
+        s['zone_label_full'] = f"{letter}-{s.get('zone_num', 1)}" if letter != '?' else '?'
+        s['scan_order'] = s.get('scan_order') or s.get('stop_number', 0)
+        if not s.get('vehicle_zone_label') and letter in unique_letters:
+            idx = unique_letters.index(letter)
+            vz = v_zones[min(idx, len(v_zones) - 1)]
+            s['vehicle_zone_label'] = vz.get('label', '')
+
+    zone_summary = {}
+    for s in stops_list:
+        letter = s.get('zone_letter') or '?'
+        if letter == '?':
+            continue
+        if letter not in zone_summary:
+            idx = unique_letters.index(letter) if letter in unique_letters else 0
+            vz = v_zones[min(idx, len(v_zones) - 1)]
+            zone_summary[letter] = {
+                'letter': letter,
+                'color': s['zone_color'],
+                'emoji': s['zone_emoji'],
+                'count': 0,
+                'delivered': 0,
+                'pending': 0,
+                'vehicle_spot': s.get('vehicle_zone_label') or vz.get('label', ''),
+            }
+        zone_summary[letter]['count'] += 1
+        if s.get('status') == 'delivered':
+            zone_summary[letter]['delivered'] += 1
+        elif s.get('status') in ('pending', 'en_route'):
+            zone_summary[letter]['pending'] += 1
+
+    zone_summary_list = [zone_summary[l] for l in sorted(zone_summary.keys())]
+
+    zone_centroids = []
+    if route and _ss_val(route, 'zone_centroids'):
+        try:
+            zone_centroids = json.loads(route['zone_centroids'])
+        except Exception:
+            pass
+    if not zone_centroids:
+        zone_centroids = compute_centroids([
+            {
+                'zone_letter': s.get('zone_letter'),
+                'lat': s.get('dest_lat'),
+                'lng': s.get('dest_lng'),
+                'zone_color': s.get('zone_color'),
+                'zone_emoji': s.get('zone_emoji'),
+            }
+            for s in stops_list if s.get('dest_lat')
+        ])
+
+    current_zone = None
+    next_stop = None
+    for s in stops_list:
+        if s.get('status') in ('pending', 'en_route'):
+            if not next_stop:
+                next_stop = s
+            if not current_zone and s.get('zone_letter'):
+                current_zone = s.get('zone_letter')
+
+    return stops_list, zone_summary_list, zone_centroids, current_zone, next_stop
+
 
 def centroids_stable(old_c, new_c):
     """True when all zone centroids moved < ZONE_STABLE_MILES since last scan."""
@@ -2042,6 +2167,12 @@ def init_db():
         "ALTER TABLE routes ADD COLUMN est_duration_mins REAL",
         "ALTER TABLE routes ADD COLUMN route_started_at TEXT",
         "ALTER TABLE routes ADD COLUMN first_delivery_at TEXT",
+        "ALTER TABLE routes ADD COLUMN zone_centroids TEXT",
+        "ALTER TABLE stops ADD COLUMN scan_order INTEGER",
+        "ALTER TABLE stops ADD COLUMN zone_num INTEGER",
+        "ALTER TABLE stops ADD COLUMN zone_color TEXT",
+        "ALTER TABLE stops ADD COLUMN zone_emoji TEXT",
+        "ALTER TABLE stops ADD COLUMN vehicle_zone_label TEXT",
         # ── QR Building Access feature ──
         "ALTER TABLE buildings ADD COLUMN building_code TEXT",
         "ALTER TABLE buildings ADD COLUMN name TEXT",
@@ -2533,6 +2664,18 @@ def driver_dashboard():
     week_earnings   = round(week_stop_count  * pay_rate, 2)
     month_earnings  = round(month_stop_count * pay_rate, 2)
 
+    vehicle_type = _ss_val(driver_row, 'vehicle_type', 'suv_midsize') or 'suv_midsize'
+    zone_summary = []
+    zone_centroids = []
+    current_zone = None
+    next_stop = None
+    if route and stops:
+        db2 = get_db()
+        stops, zone_summary, zone_centroids, current_zone, next_stop = build_route_zone_context(
+            stops, route, vehicle_type, db2
+        )
+        db2.close()
+
     return render_template('driver_dashboard.html',
         route=route, stops=stops, driver=session['driver_name'],
         gmaps_key=GOOGLE_MAPS_KEY, mapbox_token=MAPBOX_TOKEN,
@@ -2545,6 +2688,11 @@ def driver_dashboard():
         month_stop_count=month_stop_count,
         month_earnings=month_earnings,
         week_history=week_history,
+        zone_summary=zone_summary,
+        zone_centroids=zone_centroids,
+        current_zone=current_zone,
+        next_stop=next_stop,
+        vehicle_type=vehicle_type,
     )
 
 
@@ -4027,6 +4175,14 @@ def scan_build_route():
         db.close()
         return jsonify({'ok': False, 'error': 'No packages scanned yet'})
 
+    driver_row = db.execute(
+        "SELECT vehicle_type FROM drivers WHERE id=?", (session['driver_id'],)
+    ).fetchone()
+    vehicle_type = _ss_val(driver_row, 'vehicle_type', 'suv_midsize') or 'suv_midsize'
+    pkg_meta = {p['id']: p for p in reconstruct_scan_pkg_meta(items, vehicle_type)}
+    centroids = compute_centroids(list(pkg_meta.values()))
+    stored_cents = json.loads(ss['zone_centroids']) if _ss_val(ss, 'zone_centroids') else centroids
+
     # Create a new route
     route_name = f'Scan Route {today}'
     db.execute(
@@ -4039,6 +4195,14 @@ def scan_build_route():
         (session['driver_id'], today)
     ).fetchone()
     route_id = route['id']
+
+    try:
+        db.execute(
+            "UPDATE routes SET zone_centroids=? WHERE id=?",
+            (json.dumps(stored_cents or centroids), route_id)
+        )
+    except Exception:
+        pass
 
     # Geocode and insert stops
     geocoded = 0
@@ -4059,22 +4223,30 @@ def scan_build_route():
                 failed_addresses.append(item['address'])
         import secrets as _sec
         token = _sec.token_urlsafe(12)
-        zone_letter = _ss_val(item, 'zone_letter')
+        meta = pkg_meta.get(item['id'], {})
+        zone_letter = meta.get('zone_letter') or _ss_val(item, 'zone_letter')
+        scan_order = meta.get('scan_order') or _ss_val(item, 'scan_order') or (i + 1)
+        zone_num = meta.get('zone_num')
+        zone_color = meta.get('zone_color')
+        zone_emoji = meta.get('zone_emoji')
+        vehicle_zone_label = meta.get('vehicle_zone_label', '')
         try:
+            db.execute(
+                """INSERT INTO stops
+                   (route_id, stop_number, address, customer_name, tracking, dest_lat, dest_lng,
+                    status, token, zone_letter, scan_order, zone_num, zone_color, zone_emoji, vehicle_zone_label)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (route_id, i + 1, item['address'], item['customer_name'],
+                 item['tracking'], lat, lng, 'pending', token, zone_letter, scan_order,
+                 zone_num, zone_color, zone_emoji, vehicle_zone_label)
+            )
+        except Exception:
             db.execute(
                 """INSERT INTO stops
                    (route_id, stop_number, address, customer_name, tracking, dest_lat, dest_lng, status, token, zone_letter)
                    VALUES (?,?,?,?,?,?,?,?,?,?)""",
                 (route_id, i + 1, item['address'], item['customer_name'],
                  item['tracking'], lat, lng, 'pending', token, zone_letter)
-            )
-        except Exception:
-            db.execute(
-                """INSERT INTO stops
-                   (route_id, stop_number, address, customer_name, tracking, dest_lat, dest_lng, status, token)
-                   VALUES (?,?,?,?,?,?,?,?,?)""",
-                (route_id, i + 1, item['address'], item['customer_name'],
-                 item['tracking'], lat, lng, 'pending', token)
             )
     db.commit()
 
@@ -4428,18 +4600,26 @@ def route_detail(route_id):
     db = get_db()
     route = db.execute("SELECT * FROM routes WHERE id=?", (route_id,)).fetchone()
     stops = db.execute("SELECT * FROM stops WHERE route_id=? ORDER BY stop_number", (route_id,)).fetchall()
-    driver_row = db.execute("SELECT pay_rate FROM drivers WHERE id=?", (session['driver_id'],)).fetchone()
+    driver_row = db.execute(
+        "SELECT pay_rate, vehicle_type FROM drivers WHERE id=?", (session['driver_id'],)
+    ).fetchone()
+    vehicle_type = _ss_val(driver_row, 'vehicle_type', 'suv_midsize') or 'suv_midsize'
+    stops, zone_summary, zone_centroids, current_zone, next_stop = build_route_zone_context(
+        stops, route, vehicle_type, db
+    )
     db.close()
     pay_rate   = float(driver_row['pay_rate']) if driver_row and driver_row['pay_rate'] else 1.50
     total      = len(stops)
-    with_phone = sum(1 for s in stops if s['phone'])
-    delivered  = sum(1 for s in stops if s['status'] == 'delivered')
+    with_phone = sum(1 for s in stops if s.get('phone'))
+    delivered  = sum(1 for s in stops if s.get('status') == 'delivered')
     potential  = round(total * pay_rate, 2)
     earned     = round(delivered * pay_rate, 2)
     return render_template('route_detail.html', route=route, stops=stops, total=total,
                            with_phone=with_phone, mapbox_token=MAPBOX_TOKEN,
                            pay_rate=pay_rate, potential=potential, earned=earned,
-                           delivered=delivered)
+                           delivered=delivered,
+                           zone_summary=zone_summary, zone_centroids=zone_centroids,
+                           current_zone=current_zone, next_stop=next_stop)
 
 @app.route('/driver/route/<int:route_id>/add-stop', methods=['POST'])
 def route_add_stop(route_id):
@@ -4629,6 +4809,22 @@ def stop_active(stop_id):
     if not stop:
         db.close()
         return redirect(url_for('driver_dashboard'))
+    route = db.execute("SELECT * FROM routes WHERE id=?", (stop['route_id'],)).fetchone()
+    driver_row = db.execute(
+        "SELECT vehicle_type FROM drivers WHERE id=?", (session['driver_id'],)
+    ).fetchone()
+    vehicle_type = _ss_val(driver_row, 'vehicle_type', 'suv_midsize') or 'suv_midsize'
+    all_stops = db.execute(
+        "SELECT * FROM stops WHERE route_id=? ORDER BY stop_number", (stop['route_id'],)
+    ).fetchall()
+    stops_enriched, zone_summary, zone_centroids, current_zone, next_stop = build_route_zone_context(
+        all_stops, route, vehicle_type, db
+    )
+    stop_dict = next((s for s in stops_enriched if s['id'] == stop_id), dict(stop))
+    zone_letter = stop_dict.get('zone_letter')
+    zone_stops = [s for s in stops_enriched if s.get('zone_letter') == zone_letter] if zone_letter else []
+    zone_position = next((i + 1 for i, s in enumerate(zone_stops) if s['id'] == stop_id), 0)
+    zone_delivered = sum(1 for s in zone_stops if s.get('status') == 'delivered')
     # Lazy geocode — if no pin yet, geocode now so map loads correctly
     if not stop['dest_lat']:
         lat, lng = geocode_address(stop['address'])
@@ -4636,8 +4832,12 @@ def stop_active(stop_id):
             db.execute("UPDATE stops SET dest_lat=?, dest_lng=? WHERE id=?", (lat, lng, stop_id))
             db.commit()
             stop = db.execute("SELECT * FROM stops WHERE id=?", (stop_id,)).fetchone()
+            stop_dict = next((s for s in stops_enriched if s['id'] == stop_id), dict(stop))
     db.close()
-    return render_template('stop_active.html', stop=stop, gmaps_key=GOOGLE_MAPS_KEY, mapbox_token=MAPBOX_TOKEN)
+    return render_template('stop_active.html', stop=stop, stop_meta=stop_dict,
+        zone_summary=zone_summary, zone_stops=zone_stops,
+        zone_position=zone_position, zone_delivered=zone_delivered,
+        current_zone=current_zone, gmaps_key=GOOGLE_MAPS_KEY, mapbox_token=MAPBOX_TOKEN)
 
 @app.route('/driver/stop/<int:stop_id>/pin', methods=['POST'])
 def stop_pin(stop_id):

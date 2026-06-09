@@ -127,6 +127,25 @@
   </div>
   {% endif %}
 
+  {% if zone_summary %}
+  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;">
+    {% for z in zone_summary %}
+    <div style="background:{{ z.color }}22;border:2px solid {{ z.color }};border-radius:10px;padding:8px 12px;flex:1;min-width:72px;text-align:center;">
+      <div style="font-size:1.1rem;font-weight:900;color:{{ z.color }}">{{ z.emoji }} {{ z.letter }}</div>
+      <div style="font-size:0.7rem;font-weight:700;color:{{ z.color }}">{{ z.delivered }}/{{ z.count }}</div>
+      <div style="font-size:0.62rem;color:{{ z.color }};opacity:.8;">{{ z.vehicle_spot }}</div>
+    </div>
+    {% endfor %}
+  </div>
+  {% if next_stop %}
+  <a href="/driver/stop/{{ next_stop.id }}" class="btn w-100 py-3 fw-bold mb-3"
+     style="background:linear-gradient(135deg,#00ff88,#059669);color:#000;border-radius:12px;">
+    <i class="fas fa-play me-2"></i>{% if current_zone %}Continue Zone {{ current_zone }}{% else %}Start Delivery{% endif %}
+    · #{{ next_stop.scan_order or next_stop.stop_number }}
+  </a>
+  {% endif %}
+  {% endif %}
+
   <!-- Search Bar -->
   <div class="mb-3">
     <div style="position:relative;">
@@ -163,7 +182,7 @@
       {% set next_pending = stops | selectattr('status','equalto','pending') | list | first %}
       {% if next_pending %}
       <a href="/driver/stop/{{ next_pending.id }}" class="btn w-100 py-3 fw-bold" style="background:#00ff88;color:#000;border-radius:12px;font-size:0.85rem;">
-        <i class="fas fa-play me-2"></i>Start Delivery
+        <i class="fas fa-play me-2"></i>{% if current_zone %}Zone {{ current_zone }}{% else %}Start{% endif %}
       </a>
       {% else %}
       <button class="btn w-100 py-3 fw-bold" style="background:#1a1a1a;color:#555;border-radius:12px;font-size:0.85rem;" disabled>
@@ -194,7 +213,11 @@
        data-search="{{ (stop.stop_number|string + ' ' + (stop.customer_name or '') + ' ' + stop.address + ' ' + (stop.tracking or ''))|lower }}"
        style="border-color:{% if stop.status=='delivered' %}#00ff8844{% elif stop.status=='failed' %}#ff333344{% elif stop.status=='en_route' %}#0088ff44{% else %}#222{% endif %};">
     <div class="d-flex align-items-start gap-2">
-      <span style="background:#1a1a1a;color:#aaa;border-radius:8px;padding:4px 8px;font-size:0.8rem;font-weight:700;min-width:32px;text-align:center;flex-shrink:0;">{{ stop.stop_number }}</span>
+      <span style="background:#f59e0b;color:#000;border-radius:8px;padding:4px 8px;font-size:0.75rem;font-weight:900;min-width:32px;text-align:center;flex-shrink:0;">#{{ stop.scan_order or stop.stop_number }}</span>
+      {% if stop.zone_letter %}
+      <span style="background:{{ stop.zone_color or '#6b7280' }};color:#fff;border-radius:8px;padding:4px 8px;font-size:0.72rem;font-weight:800;flex-shrink:0;">{{ stop.zone_emoji or '' }} {{ stop.zone_label_full or stop.zone_letter }}</span>
+      {% endif %}
+      <span style="background:#1a1a1a;color:#aaa;border-radius:8px;padding:4px 8px;font-size:0.75rem;font-weight:700;min-width:32px;text-align:center;flex-shrink:0;">{{ stop.stop_number }}</span>
       <div style="flex:1;min-width:0;">
         <div class="fw-bold" style="font-size:0.9rem;">{{ (stop.customer_name or 'Unknown')|name_short }}</div>
         <div class="text-secondary small text-truncate">{{ stop.address }}</div>
@@ -407,16 +430,22 @@ const STOPS_GEO = [
   {% if stop.dest_lat and stop.dest_lng %}{
     id: {{ stop.id }},
     num: {{ stop.stop_number }},
+    sticker: {{ stop.scan_order or stop.stop_number }},
     name: {{ (stop.customer_name or 'Unknown') | tojson }},
     address: {{ stop.address | tojson }},
     unit: {{ (stop.unit or '') | tojson }},
     phone: {{ (stop.phone or '') | tojson }},
     status: {{ stop.status | tojson }},
     lat: {{ stop.dest_lat }},
-    lng: {{ stop.dest_lng }}
+    lng: {{ stop.dest_lng }},
+    zone: {{ (stop.zone_letter or '') | tojson }},
+    zoneColor: {{ (stop.zone_color or '#3b82f6') | tojson }},
+    zoneLabel: {{ (stop.zone_label_full or '') | tojson }},
+    zoneEmoji: {{ (stop.zone_emoji or '') | tojson }}
   },{% endif %}
   {% endfor %}
 ];
+const ZONE_CENTROIDS = {{ zone_centroids | default([]) | tojson }};
 
 const MAPBOX_TOKEN = {{ mapbox_token | tojson }};
 let routeMap = null;
@@ -446,7 +475,24 @@ function initRouteMap() {
   routeMap.addControl(new mapboxgl.NavigationControl(), 'top-right');
 
   routeMap.on('load', () => {
-    // Route line connecting stops in order
+    const zoneGroups = {};
+    STOPS_GEO.forEach(s => {
+      const z = s.zone || 'A';
+      if (!zoneGroups[z]) zoneGroups[z] = { coords: [], color: s.zoneColor };
+      zoneGroups[z].coords.push([s.lng, s.lat]);
+    });
+    Object.entries(zoneGroups).forEach(([z, g]) => {
+      if (g.coords.length < 2) return;
+      const srcId = 'zone-line-' + z;
+      routeMap.addSource(srcId, {
+        type: 'geojson',
+        data: { type: 'Feature', geometry: { type: 'LineString', coordinates: g.coords } }
+      });
+      routeMap.addLayer({
+        id: srcId, type: 'line', source: srcId,
+        paint: { 'line-color': g.color, 'line-width': 3, 'line-opacity': 0.75, 'line-dasharray': [2, 2] }
+      });
+    });
     if (STOPS_GEO.length > 1) {
       const coords = STOPS_GEO.map(s => [s.lng, s.lat]);
       routeMap.addSource('route-line', {
@@ -456,16 +502,25 @@ function initRouteMap() {
       routeMap.addLayer({
         id: 'route-line', type: 'line', source: 'route-line',
         layout: {'line-join':'round','line-cap':'round'},
-        paint: {'line-color':'#3b82f6','line-width':2,'line-opacity':0.6,'line-dasharray':[2,2]}
+        paint: {'line-color':'#475569','line-width':1.5,'line-opacity':0.4}
       });
     }
+    ZONE_CENTROIDS.forEach(z => {
+      if (!z.lat || !z.lng) return;
+      const el = document.createElement('div');
+      el.style.cssText = `background:${z.color};color:#fff;font-weight:900;font-size:10px;padding:3px 7px;border-radius:8px;border:2px solid #fff;`;
+      el.textContent = (z.emoji || '') + ' ' + z.letter;
+      new mapboxgl.Marker({ element: el }).setLngLat([z.lng, z.lat]).addTo(routeMap);
+    });
 
-    // Numbered stop pins
+    // Numbered stop pins — zone color + sticker #
     STOPS_GEO.forEach(stop => {
+      const pinColor = stop.status === 'delivered' ? '#10b981' : stop.status === 'failed' ? '#ef4444' : stop.status === 'en_route' ? '#f59e0b' : (stop.zoneColor || '#3b82f6');
       const el = document.createElement('div');
       el.className = 'stop-pin ' + stop.status;
-      el.textContent = stop.num;
-      el.title = stop.address;
+      el.style.background = pinColor;
+      el.textContent = stop.sticker;
+      el.title = (stop.zoneEmoji || '') + ' ' + (stop.zoneLabel || '') + ' · ' + stop.address;
       el.addEventListener('click', () => openSheet(stop));
       new mapboxgl.Marker({element: el, anchor:'center'})
         .setLngLat([stop.lng, stop.lat])

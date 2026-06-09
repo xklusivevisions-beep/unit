@@ -79,7 +79,19 @@
     </a>
     <div class="text-center">
       <div class="unit-logo" style="font-size:1.1rem;">UNIT<span>.</span></div>
+      {% if stop_meta.zone_letter %}
+      <div style="margin-top:4px;">
+        <span style="background:{{ stop_meta.zone_color or '#3b82f6' }};color:#fff;font-weight:800;font-size:0.78rem;padding:3px 10px;border-radius:8px;">
+          {{ stop_meta.zone_emoji or '' }} Zone {{ stop_meta.zone_letter }} · {{ zone_position }}/{{ zone_stops|length }}
+        </span>
+      </div>
+      <small class="text-secondary d-block mt-1">
+        Sticker #{{ stop_meta.scan_order or stop.stop_number }} · Stop #{{ stop.stop_number }}
+        {% if zone_delivered is defined %} · {{ zone_delivered }}/{{ zone_stops|length }} in zone done{% endif %}
+      </small>
+      {% else %}
       <small class="text-secondary">Stop #{{ stop.stop_number }}</small>
+      {% endif %}
     </div>
     <!-- Open in Apple Maps -->
     <a id="nav-btn" href="#" onclick="openNav(event)" style="color:#0088ff;font-size:0.8rem;font-weight:700;text-decoration:none;">

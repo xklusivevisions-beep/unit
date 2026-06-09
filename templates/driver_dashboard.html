@@ -9,6 +9,27 @@
   100% { box-shadow: 0 0 0 0 rgba(0,136,255,0); }
 }
 #route-map { height: 280px; border-radius: 14px; overflow: hidden; border: 2px solid #1a1a1a; margin-bottom: 16px; }
+.zone-strip { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+.zone-chip { border-radius: 10px; padding: 8px 12px; flex: 1; min-width: 72px; text-align: center; cursor: pointer; transition: transform .15s; }
+.zone-chip:active { transform: scale(0.97); }
+.zone-chip-letter { font-size: 1.2rem; font-weight: 900; }
+.zone-chip-count { font-size: 0.7rem; font-weight: 700; opacity: .85; }
+.zone-chip-spot { font-size: 0.62rem; opacity: .7; margin-top: 2px; }
+.zone-chip.active { outline: 2px solid #fff; outline-offset: 2px; }
+.route-stats-bar { display: flex; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+.route-stat { background: #1e293b; border-radius: 10px; padding: 8px 12px; flex: 1; min-width: 80px; text-align: center; }
+.route-stat-val { font-size: 1rem; font-weight: 800; color: #e2e8f0; }
+.route-stat-lbl { font-size: 0.65rem; color: #64748b; text-transform: uppercase; }
+.list-tabs { display: flex; gap: 6px; margin-bottom: 12px; }
+.list-tab { flex: 1; padding: 8px; border-radius: 10px; border: 1px solid #334155; background: #111827;
+  color: #94a3b8; font-size: 0.75rem; font-weight: 700; cursor: pointer; text-align: center; }
+.list-tab.active { background: #1e293b; color: #fff; border-color: #475569; }
+.zone-section-hdr { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 10px;
+  margin: 14px 0 8px; font-weight: 800; font-size: 0.85rem; }
+.sticker-badge { background: #f59e0b; color: #000; font-weight: 900; border-radius: 8px;
+  padding: 2px 8px; font-size: 0.72rem; min-width: 28px; text-align: center; }
+.zone-route-badge { font-weight: 900; border-radius: 8px; padding: 2px 8px; font-size: 0.72rem; color: #fff; }
+.map-legend { font-size: 0.7rem; color: #64748b; margin: -8px 0 12px; }
 </style>
 {% endblock %}
 {% block content %}
@@ -105,6 +126,55 @@
       <div style="background:#0a0a0a;border-radius:8px;height:8px;overflow:hidden;">
         <div style="background:#00ff88;height:100%;width:{{ (delivered/total*100)|int if total else 0 }}%;transition:width 0.3s;"></div>
       </div>
+
+      {% if zone_summary %}
+      <!-- Zone overview — matches scan optimize view -->
+      <div class="route-stats-bar mt-3">
+        {% if route.est_distance_miles %}
+        <div class="route-stat">
+          <div class="route-stat-val">{{ '%.1f'|format(route.est_distance_miles) }} mi</div>
+          <div class="route-stat-lbl">Route</div>
+        </div>
+        {% endif %}
+        {% if route.est_duration_mins %}
+        <div class="route-stat">
+          <div class="route-stat-val">{% if route.est_duration_mins >= 60 %}{{ (route.est_duration_mins // 60)|int }}h {{ (route.est_duration_mins % 60)|int }}m{% else %}{{ route.est_duration_mins|int }}m{% endif %}</div>
+          <div class="route-stat-lbl">Drive</div>
+        </div>
+        {% endif %}
+        <div class="route-stat">
+          <div class="route-stat-val">{{ zone_summary|length }}</div>
+          <div class="route-stat-lbl">Zones</div>
+        </div>
+      </div>
+      <div class="zone-strip" id="zone-strip">
+        {% for z in zone_summary %}
+        <div class="zone-chip{% if z.letter == current_zone %} active{% endif %}" data-zone="{{ z.letter }}"
+             style="background:{{ z.color }}22;border:2px solid {{ z.color }};"
+             onclick="filterZone('{{ z.letter }}')">
+          <div class="zone-chip-letter" style="color:{{ z.color }}">{{ z.emoji }} {{ z.letter }}</div>
+          <div class="zone-chip-count" style="color:{{ z.color }}">{{ z.delivered }}/{{ z.count }} done</div>
+          <div class="zone-chip-spot" style="color:{{ z.color }}">{{ z.vehicle_spot }}</div>
+        </div>
+        {% endfor %}
+      </div>
+      {% if next_stop %}
+      <a href="/driver/stop/{{ next_stop.id }}" class="btn w-100 py-3 fw-bold mb-2"
+         style="background:linear-gradient(135deg,#00ff88,#059669);color:#000;border-radius:12px;font-size:0.95rem;">
+        <i class="fas fa-play me-2"></i>
+        {% if current_zone %}Continue Zone {{ current_zone }}{% else %}Start Delivery{% endif %}
+        · Stop #{{ next_stop.stop_number }}
+        {% if next_stop.scan_order %}· Sticker #{{ next_stop.scan_order }}{% endif %}
+      </a>
+      {% endif %}
+      {% endif %}
+
+      {% if next_stop and not zone_summary %}
+      <a href="/driver/stop/{{ next_stop.id }}" class="btn w-100 py-3 fw-bold mb-2 mt-3"
+         style="background:#00ff88;color:#000;border-radius:12px;">
+        <i class="fas fa-play me-2"></i>Start Delivery · Stop #{{ next_stop.stop_number }}
+      </a>
+      {% endif %}
     </div>
 
     <!-- Building Access (QR) -->
@@ -165,16 +235,32 @@
   <!-- Route Map -->
   {% if stops %}
   <div id="route-map"></div>
+  <div class="map-legend">Marker color = zone · number = warehouse sticker # · dashed lines = zone paths</div>
   {% endif %}
 
-  <!-- Stop List -->
-    <h6 class="text-secondary mb-3" style="letter-spacing:0.1em;font-size:0.75rem;">YOUR STOPS</h6>
+  <!-- List view toggle -->
+  {% if zone_summary %}
+  <div class="list-tabs">
+    <button type="button" class="list-tab active" id="tab-route" onclick="setDashView('route')">🚗 Route Order</button>
+    <button type="button" class="list-tab" id="tab-zone" onclick="setDashView('zone')">🗺️ By Zone</button>
+    <button type="button" class="list-tab" id="tab-sticker" onclick="setDashView('sticker')">#️⃣ Sticker #</button>
+  </div>
+  {% endif %}
+
+  <!-- Stop List — route order -->
+  <div id="stops-route-view">
+    <h6 class="text-secondary mb-3" style="letter-spacing:0.1em;font-size:0.75rem;">YOUR STOPS — OPTIMIZED ORDER</h6>
     {% for stop in stops %}
-    <div class="card p-3 mb-2" style="border-color:{% if stop.status=='delivered' %}#00ff8844{% elif stop.status=='failed' %}#ff333344{% elif stop.status=='en_route' %}#0088ff44{% else %}#222{% endif %};">
+    <div class="card p-3 mb-2 dash-stop" data-zone="{{ stop.zone_letter or '' }}"
+       style="border-color:{% if stop.status=='delivered' %}#00ff8844{% elif stop.status=='failed' %}#ff333344{% elif stop.status=='en_route' %}#0088ff44{% else %}{{ stop.zone_color or '#222' }}44{% endif %};">
       <div class="d-flex justify-content-between align-items-start">
         <div style="flex:1;">
-          <div class="d-flex align-items-center gap-2 mb-1">
-            <span style="background:#1a1a1a;color:#aaa;border-radius:8px;padding:2px 8px;font-size:0.75rem;font-weight:700;">#{{ stop.stop_number }}</span>
+          <div class="d-flex align-items-center gap-2 mb-1 flex-wrap">
+            <span class="sticker-badge">#{{ stop.scan_order or stop.stop_number }}</span>
+            {% if stop.zone_letter %}
+            <span class="zone-route-badge" style="background:{{ stop.zone_color or '#6b7280' }};">{{ stop.zone_emoji or '' }} {{ stop.zone_label_full or stop.zone_letter }}</span>
+            {% endif %}
+            <span style="background:#1a1a1a;color:#aaa;border-radius:8px;padding:2px 8px;font-size:0.7rem;font-weight:700;">Stop {{ stop.stop_number }}</span>
             {% if stop.sms_blast_sent %}<span style="color:#00ff88;font-size:0.7rem;"><i class="fas fa-sms"></i></span>{% endif %}
           </div>
           <a href="/driver/stop/{{ stop.id }}/edit" class="text-decoration-none">
@@ -202,6 +288,63 @@
       </div>
     </div>
     {% endfor %}
+  </div>
+
+  <!-- Stop List — grouped by zone -->
+  {% if zone_summary %}
+  <div id="stops-zone-view" style="display:none;">
+    <h6 class="text-secondary mb-2" style="letter-spacing:0.1em;font-size:0.75rem;">BY ZONE — DELIVER A → B → C</h6>
+    {% for z in zone_summary %}
+    <div class="zone-section-hdr" style="background:{{ z.color }}18;border:1px solid {{ z.color }}55;color:{{ z.color }};">
+      <span>{{ z.emoji }} Zone {{ z.letter }}</span>
+      <span style="opacity:.85;font-size:0.75rem;">{{ z.delivered }}/{{ z.count }} · {{ z.vehicle_spot }}</span>
+    </div>
+    {% for stop in stops if stop.zone_letter == z.letter %}
+    <div class="card p-3 mb-2 dash-stop" data-zone="{{ stop.zone_letter }}"
+       style="border-color:{% if stop.status=='delivered' %}#00ff8844{% elif stop.status=='failed' %}#ff333344{% else %}{{ z.color }}55{% endif %};">
+      <div class="d-flex justify-content-between align-items-start">
+        <div style="flex:1;">
+          <div class="d-flex align-items-center gap-2 mb-1">
+            <span class="sticker-badge">#{{ stop.scan_order or stop.stop_number }}</span>
+            <span class="zone-route-badge" style="background:{{ z.color }};">{{ z.emoji }} {{ stop.zone_label_full or z.letter }}</span>
+          </div>
+          <div class="fw-bold" style="font-size:0.9rem;color:#fff;">{{ stop.address[:40] }}</div>
+          {% if stop.customer_name %}<small class="text-secondary d-block">{{ stop.customer_name }}</small>{% endif %}
+        </div>
+        <div class="text-end ms-2">
+          {% if stop.status == 'pending' %}
+          <a href="/driver/stop/{{ stop.id }}" class="btn btn-sm fw-bold" style="background:{{ z.color }};color:#fff;border-radius:10px;">Go</a>
+          {% elif stop.status == 'en_route' %}
+          <a href="/driver/stop/{{ stop.id }}" class="btn btn-sm" style="background:#0088ff;border-radius:10px;">Active</a>
+          {% else %}
+          <span class="status-pill pill-{{ stop.status }}">{{ stop.status.upper() }}</span>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+    {% endfor %}
+    {% endfor %}
+  </div>
+
+  <!-- Stop List — sticker sort order -->
+  <div id="stops-sticker-view" style="display:none;">
+    <h6 class="text-secondary mb-2" style="letter-spacing:0.1em;font-size:0.75rem;">BY STICKER # — WAREHOUSE SORT</h6>
+    {% for stop in stops|sort(attribute='scan_order') %}
+    <div class="card p-3 mb-2 dash-stop" style="border-color:{{ stop.zone_color or '#222' }}44;">
+      <div class="d-flex align-items-center gap-10">
+        <span class="sticker-badge" style="font-size:0.9rem;padding:4px 10px;">#{{ stop.scan_order or stop.stop_number }}</span>
+        <div style="flex:1;">
+          <div style="color:{{ stop.zone_color or '#94a3b8' }};font-weight:800;font-size:0.8rem;">{{ stop.zone_emoji or '' }} {{ stop.zone_label_full or '?' }} · Stop {{ stop.stop_number }}</div>
+          <div class="fw-bold" style="font-size:0.85rem;">{{ stop.address[:36] }}</div>
+        </div>
+        {% if stop.status == 'pending' %}
+        <a href="/driver/stop/{{ stop.id }}" class="btn btn-sm" style="background:#00ff88;color:#000;border-radius:8px;">Go</a>
+        {% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
 
   {% else %}
     <!-- No Route Yet -->
@@ -273,10 +416,46 @@ let driverMapMarker = null;
 
 const STOP_DATA = [
   {% for s in stops if s.dest_lat and s.dest_lng %}
-  { id: {{ s.id }}, num: {{ s.stop_number }}, lat: {{ s.dest_lat }}, lng: {{ s.dest_lng }},
-    addr: {{ (s.address or '') | tojson }}, status: {{ (s.status or 'pending') | tojson }} },
+  { id: {{ s.id }}, num: {{ s.stop_number }}, sticker: {{ s.scan_order or s.stop_number }},
+    lat: {{ s.dest_lat }}, lng: {{ s.dest_lng }},
+    addr: {{ (s.address or '') | tojson }}, status: {{ (s.status or 'pending') | tojson }},
+    zone: {{ (s.zone_letter or '') | tojson }}, zoneColor: {{ (s.zone_color or '#3b82f6') | tojson }},
+    zoneLabel: {{ (s.zone_label_full or '') | tojson }}, zoneEmoji: {{ (s.zone_emoji or '') | tojson }} },
   {% endfor %}
 ];
+const ZONE_CENTROIDS = {{ zone_centroids | default([]) | tojson }};
+
+function setDashView(mode) {
+  ['route', 'zone', 'sticker'].forEach(m => {
+    const el = document.getElementById('stops-' + m + '-view');
+    const tab = document.getElementById('tab-' + m);
+    if (el) el.style.display = m === mode ? 'block' : 'none';
+    if (tab) tab.classList.toggle('active', m === mode);
+  });
+}
+
+function filterZone(letter) {
+  document.querySelectorAll('.zone-chip').forEach(c => c.classList.toggle('active', c.dataset.zone === letter));
+  setDashView('zone');
+  document.querySelectorAll('#stops-zone-view .dash-stop').forEach(card => {
+    card.style.opacity = card.dataset.zone === letter ? '1' : '0.35';
+  });
+  if (routeMap && routeMap.getSource('zone-highlight')) {
+    routeMap.getSource('zone-highlight').setData({
+      type: 'Feature', properties: {},
+      geometry: { type: 'Point', coordinates: (ZONE_CENTROIDS.find(z => z.letter === letter) || {}).lng
+        ? [ZONE_CENTROIDS.find(z => z.letter === letter).lng, ZONE_CENTROIDS.find(z => z.letter === letter).lat]
+        : [STOP_DATA[0]?.lng, STOP_DATA[0]?.lat] }
+    });
+  }
+}
+
+function pinColor(stop) {
+  if (stop.status === 'delivered') return '#10b981';
+  if (stop.status === 'failed') return '#ef4444';
+  if (stop.status === 'en_route') return '#f59e0b';
+  return stop.zoneColor || '#3b82f6';
+}
 
 // Init route map with Mapbox GL
 document.addEventListener('DOMContentLoaded', () => {
@@ -312,12 +491,55 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     });
 
-    // Plot all stops
+    // Per-zone dashed paths (gas-efficient zone order)
+    const zoneGroups = {};
     STOP_DATA.forEach(s => {
-      const color = s.status === 'delivered' ? '#00ff88' : s.status === 'failed' ? '#ff3333' : '#ffaa00';
+      const z = s.zone || 'A';
+      if (!zoneGroups[z]) zoneGroups[z] = { coords: [], color: s.zoneColor };
+      zoneGroups[z].coords.push([s.lng, s.lat]);
+    });
+    Object.entries(zoneGroups).forEach(([z, g], i) => {
+      if (g.coords.length < 2) return;
+      const srcId = 'zone-line-' + z;
+      routeMap.addSource(srcId, {
+        type: 'geojson',
+        data: { type: 'Feature', geometry: { type: 'LineString', coordinates: g.coords } }
+      });
+      routeMap.addLayer({
+        id: srcId, type: 'line', source: srcId,
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        paint: { 'line-color': g.color, 'line-width': 3, 'line-opacity': 0.75, 'line-dasharray': [2, 2] }
+      });
+    });
+
+    // Full optimized route (thin gray)
+    if (STOP_DATA.length > 1) {
+      routeMap.addSource('full-route', {
+        type: 'geojson',
+        data: { type: 'Feature', geometry: { type: 'LineString', coordinates: STOP_DATA.map(s => [s.lng, s.lat]) } }
+      });
+      routeMap.addLayer({
+        id: 'full-route', type: 'line', source: 'full-route',
+        paint: { 'line-color': '#475569', 'line-width': 1.5, 'line-opacity': 0.4 }
+      });
+    }
+
+    // Zone centroid labels
+    ZONE_CENTROIDS.forEach(z => {
+      if (!z.lat || !z.lng) return;
       const el = document.createElement('div');
-      el.style.cssText = `width:28px;height:28px;border-radius:50%;background:${color};color:#000;font-size:10px;font-weight:900;display:flex;align-items:center;justify-content:center;border:2px solid #000;cursor:pointer;box-shadow:0 0 8px ${color}88;`;
-      el.textContent = s.num;
+      el.style.cssText = `background:${z.color || '#3b82f6'};color:#fff;font-weight:900;font-size:11px;padding:4px 8px;border-radius:8px;border:2px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,.5);white-space:nowrap;`;
+      el.textContent = (z.emoji || '') + ' Zone ' + z.letter;
+      new mapboxgl.Marker({ element: el, anchor: 'center' }).setLngLat([z.lng, z.lat]).addTo(routeMap);
+    });
+
+    // Plot all stops — sticker # on pin, zone color
+    STOP_DATA.forEach(s => {
+      const color = pinColor(s);
+      const el = document.createElement('div');
+      el.style.cssText = `width:30px;height:30px;border-radius:50%;background:${color};color:#fff;font-size:10px;font-weight:900;display:flex;align-items:center;justify-content:center;border:2px solid #fff;cursor:pointer;box-shadow:0 0 8px ${color}88;`;
+      el.textContent = s.sticker;
+      el.title = (s.zoneEmoji || '') + ' ' + (s.zoneLabel || '') + ' · Stop ' + s.num;
       el.addEventListener('click', () => { window.location.href = '/driver/stop/' + s.id; });
       new mapboxgl.Marker({element:el}).setLngLat([s.lng,s.lat]).addTo(routeMap);
     });
