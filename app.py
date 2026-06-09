@@ -2367,8 +2367,13 @@ def geocode_address(address):
 
 TEXTBELT_KEY = os.environ.get('TEXTBELT_KEY', '')
 
-def send_sms(to_phone, message):
-    # Use Textbelt if key provided (no A2P registration needed)
+def send_sms(to_phone, message, media_url=None):
+    """
+    Send SMS (or MMS when media_url is provided).
+    - Textbelt: SMS only (no MMS support) — used when TEXTBELT_KEY is set
+    - Twilio: MMS when media_url provided, SMS otherwise
+    """
+    # Use Textbelt if key provided (no A2P registration needed, SMS only)
     if TEXTBELT_KEY:
         try:
             resp = requests.post('https://textbelt.com/text', {
@@ -2386,14 +2391,17 @@ def send_sms(to_phone, message):
             log.error(f'Textbelt error: {e}')
             return False, str(e)
 
-    # Fallback to Twilio
+    # Fallback to Twilio (supports MMS via media_url)
     if not TWILIO_SID or not TWILIO_TOKEN:
         log.info(f'[SMS MOCK] To: {to_phone} | {message[:80]}')
         return True, 'mock'
     try:
         client = Client(TWILIO_SID, TWILIO_TOKEN)
-        msg = client.messages.create(body=message, from_=TWILIO_PHONE, to=to_phone)
-        log.info(f'SMS sent to {to_phone}: {msg.sid}')
+        kwargs = dict(body=message, from_=TWILIO_PHONE, to=to_phone)
+        if media_url:
+            kwargs['media_url'] = [media_url]
+        msg = client.messages.create(**kwargs)
+        log.info(f'{"MMS" if media_url else "SMS"} sent to {to_phone}: {msg.sid}')
         return True, msg.sid
     except Exception as e:
         log.error(f'SMS failed to {to_phone}: {e}')
@@ -4771,7 +4779,8 @@ def route_blast(route_id):
         msg = (f"{name_part}Your SpeedX delivery is out today. "
                f"Your driver will notify you when they're heading to your stop.\n"
                f"Track here: {track_url}")
-        ok, _ = send_sms(format_phone(stop['phone']), msg)
+        mms_img = f"{get_base_url()}/static/speedx_mms.jpg" if (TWILIO_SID and not TEXTBELT_KEY) else None
+        ok, _ = send_sms(format_phone(stop['phone']), msg, media_url=mms_img)
         if ok:
             db.execute("UPDATE stops SET sms_blast_sent=1 WHERE id=?", (stop['id'],))
             sent += 1
@@ -5153,7 +5162,8 @@ def update_location():
                 msg = (f"Hey {name_part}! Your SpeedX driver is {mins} min away"
                        f"{' — Unit ' + stop['unit'] if stop['unit'] else ''}.\n"
                        f"Track live: {track_url}")
-                ok, _ = send_sms(format_phone(stop['phone']), msg)
+                mms_img = f"{get_base_url()}/static/speedx_mms.jpg" if (TWILIO_SID and not TEXTBELT_KEY) else None
+                ok, _ = send_sms(format_phone(stop['phone']), msg, media_url=mms_img)
                 if ok:
                     db.execute("UPDATE stops SET approach_sms_sent=1 WHERE id=?", (stop_id,))
                     result['sms_triggered'] = True
