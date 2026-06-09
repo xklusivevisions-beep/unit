@@ -461,7 +461,7 @@
     <h3>Confirm Package</h3>
     <div id="preview-source-hint" style="display:none;font-size:0.78rem;color:#fbbf24;margin-bottom:10px;"></div>
     <div id="label-tap-panel">
-      <div class="tap-hint">Green box = recipient area · <b>drag corner to resize</b> · drag box to move · re-reads when you release</div>
+      <div class="tap-hint">Couldn't read the label — drag the green box over <b>SHIP TO</b>, resize with the corner, then release to re-read</div>
       <div id="label-tap-wrap">
         <img id="label-tap-img" alt="Label" onclick="onLabelTap(event)" ontouchend="onLabelTapTouch(event)">
         <div id="label-recipient-box">
@@ -1798,39 +1798,38 @@ async function getTesseractWorker() {
 }
 
 async function detectRecipientBox(blob) {
-  try {
-    const img = await createImageBitmap(blob);
-    const iw = img.width, ih = img.height;
-    const worker = await getTesseractWorker();
-    const { data } = await worker.recognize(blob);
-    const lines = data.lines || [];
-    let shipIdx = -1;
-    for (let i = 0; i < lines.length; i++) {
-      if (_SHIP_TO_RE.test(lines[i].text || '')) { shipIdx = i; break; }
-    }
-    if (shipIdx < 0) {
-      _recipientBox = { left: 4, top: 30, width: 58, height: 32 };
-      return _recipientBox;
-    }
-    let x0 = iw, y0 = ih, x1 = 0, y1 = 0;
-    for (let i = shipIdx; i < lines.length; i++) {
-      const l = lines[i];
-      const b = l.bbox;
-      if (!b) continue;
-      if (i > shipIdx && (/^ORD\b/i.test(l.text) || /^SPX[A-Z0-9]{10}/i.test((l.text||'').replace(/\s/g,'')))) break;
-      x0 = Math.min(x0, b.x0); y0 = Math.min(y0, b.y0);
-      x1 = Math.max(x1, b.x1); y1 = Math.max(y1, b.y1);
-      if (new RegExp('\\b(' + _US_STATES + ')\\s*\\d{5}').test(l.text || '') && i > shipIdx) break;
-    }
-    if (x1 <= x0) return null;
-    _recipientBox = {
-      left: Math.max(0, (x0 / iw) * 100 - 2),
-      top: Math.max(0, (y0 / ih) * 100 - 2),
-      width: Math.min(96, ((x1 - x0) / iw) * 100 + 4),
-      height: Math.min(50, ((y1 - y0) / ih) * 100 + 4),
-    };
-    return _recipientBox;
-  } catch (e) { return null; }
+  _recipientBox = { left: 4, top: 34, width: 58, height: 30 };
+  return _recipientBox;
+}
+
+function scanReadOk(d) {
+  if (!d) return false;
+  const addr = _cleanAddress(d.address || '');
+  if (!addr || !isPlausibleAddress(addr) || _isDirtyAddress(addr) || isSenderAddress(addr)) return false;
+  const name = (d.name || '').trim();
+  if (name && (_looksLikeCityStateZip(name) || isSenderAddress(name))) return false;
+  return true;
+}
+
+function hideLabelTapPanel() {
+  const panel = document.getElementById('label-tap-panel');
+  if (panel) panel.style.display = 'none';
+  const box = document.getElementById('label-recipient-box');
+  if (box) box.style.display = 'none';
+}
+
+function showLabelFixPanel() {
+  const panel = document.getElementById('label-tap-panel');
+  const imgEl = document.getElementById('label-tap-img');
+  if (!panel || !imgEl || !_lastLabelBlob) return;
+  if (!_recipientBox) _recipientBox = { left: 4, top: 34, width: 58, height: 30 };
+  if (imgEl._prevUrl) URL.revokeObjectURL(imgEl._prevUrl);
+  imgEl._prevUrl = URL.createObjectURL(_lastLabelBlob);
+  imgEl.src = imgEl._prevUrl;
+  panel.style.display = 'block';
+  renderRecipientBox();
+  const marker = document.getElementById('label-tap-marker');
+  if (marker) marker.style.display = 'none';
 }
 
 function renderRecipientBox() {
@@ -1994,7 +1993,6 @@ async function ocrLabelLocally(blob) {
     tryBarcodeScan(prep),
     ocrLabelRegion(prep, 0.48, 0.50).catch(() => ({ tracking: '', name: '', address: '', zip: '' })),
   ]);
-  detectRecipientBox(prep).then(() => renderRecipientBox()).catch(() => {});
   let parsed = midParsed;
   if (barcode && !parsed.tracking) parsed.tracking = barcode.replace(/\s/g, '');
   if (scoreParsed(parsed) >= 5) {
@@ -2010,8 +2008,6 @@ async function ocrLabelLocally(blob) {
       if (barcode && !fullParsed.tracking) fullParsed.tracking = barcode.replace(/\s/g, '');
       if (scoreParsed(fullParsed) > scoreParsed(parsed)) parsed = fullParsed;
     }
-    await detectRecipientBox(prep);
-    renderRecipientBox();
   } catch (e) { /* keep mid */ }
   return parsed;
 }
@@ -2057,18 +2053,8 @@ async function ocrLabelRegion(blob, normX, normY) {
 }
 
 function showLabelTapImage(blob) {
-  const panel = document.getElementById('label-tap-panel');
-  const imgEl = document.getElementById('label-tap-img');
-  if (!panel || !imgEl) return;
-  if (!blob) { panel.style.display = 'none'; return; }
-  if (imgEl._prevUrl) URL.revokeObjectURL(imgEl._prevUrl);
-  const url = URL.createObjectURL(blob);
-  imgEl._prevUrl = url;
-  imgEl.src = url;
-  panel.style.display = 'block';
-  renderRecipientBox();
-  const marker = document.getElementById('label-tap-marker');
-  if (marker) marker.style.display = 'none';
+  /* Legacy helper — panel only shown via showLabelFixPanel when read fails. */
+  if (blob) _lastLabelBlob = blob;
 }
 
 function _applyTapParse(parsed, normY) {
@@ -2078,8 +2064,19 @@ function _applyTapParse(parsed, normY) {
     document.getElementById('p-address').value = _cleanAddress(parsed.address);
     if (isPlausibleName(parsed.name)) document.getElementById('p-name').value = parsed.name;
     if (parsed.tracking && !curTrack) document.getElementById('p-tracking').value = parsed.tracking;
-    showToast('Updated from label ✓');
-    fetchAddressSuggestions();
+    const merged = {
+      name: document.getElementById('p-name').value.trim(),
+      address: document.getElementById('p-address').value.trim(),
+      tracking: document.getElementById('p-tracking').value.trim(),
+    };
+    if (scanReadOk(merged)) {
+      hideLabelTapPanel();
+      hideAddressSuggestions();
+      showToast('Read label ✓');
+    } else {
+      showToast('Updated — adjust box or confirm');
+      deferAddressSuggestions();
+    }
     return true;
   }
   if (keepTopSender) {
@@ -2272,16 +2269,25 @@ function showPreviewFields(d, source) {
   document.getElementById('p-tracking').value = d.tracking || '';
   document.getElementById('preview-card').style.display = 'block';
   _previewOpen = true;
-  showLabelTapImage(_lastLabelBlob);
   const hint = document.getElementById('preview-source-hint');
-  if (hint) {
-    hint.textContent = source === 'local'
-      ? '📱 Read on your phone — confirm or edit'
-      : (source === 'memory' ? '🧠 Remembered label — confirm or edit'
-      : (source === 'ai' ? '✨ AI read label — confirm or edit' : ''));
-    hint.style.display = hint.textContent ? 'block' : 'none';
+  const readOk = scanReadOk(d);
+  if (readOk) {
+    hideLabelTapPanel();
+    hideAddressSuggestions();
+    if (hint) {
+      hint.textContent = source === 'memory' ? '🧠 Remembered label — confirm or edit'
+        : source === 'ai' ? '✨ AI read label — confirm or edit'
+        : '📱 Read on your phone — confirm or edit';
+      hint.style.display = 'block';
+    }
+  } else {
+    showLabelFixPanel();
+    if (hint) {
+      hint.textContent = '⚠️ Couldn\'t read clearly — use green box or suggestions below';
+      hint.style.display = 'block';
+    }
+    deferAddressSuggestions();
   }
-  deferAddressSuggestions();
 }
 
 function deferAddressSuggestions() {
@@ -2438,7 +2444,7 @@ async function processBlob(blob) {
     } catch (e) { /* continue */ }
   }
 
-  const goodLocal = isPlausibleAddress(parsed.address) && isPlausibleName(parsed.name) && !_isDirtyAddress(parsed.address);
+  const goodLocal = scanReadOk(parsed);
   const hasTracking = parsed.tracking && parsed.tracking.length >= 12;
   const partialLocal = isPlausibleAddress(parsed.address) || hasTracking;
 
@@ -2542,10 +2548,9 @@ function discardPreview() {
   _previewOpen = false;
   if (_refineAbort) _refineAbort.abort();
   if (_inferAbort) _inferAbort.abort();
+  hideLabelTapPanel();
   hideAddressSuggestions();
   document.getElementById('preview-card').style.display = 'none';
-  const panel = document.getElementById('label-tap-panel');
-  if (panel) panel.style.display = 'none';
   _resetAddButton();
 }
 
