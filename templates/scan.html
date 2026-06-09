@@ -70,6 +70,11 @@
   #label-tap-marker { position: absolute; width: 18px; height: 18px; margin: -9px 0 0 -9px;
                       border: 2px solid #f59e0b; border-radius: 50%; background: rgba(245,158,11,0.35);
                       pointer-events: none; display: none; box-shadow: 0 0 0 4px rgba(245,158,11,0.15); }
+  #label-recipient-box { position: absolute; border: 3px solid #22c55e; border-radius: 6px;
+                         background: rgba(34,197,94,0.12); pointer-events: none; display: none;
+                         box-shadow: 0 0 0 2px rgba(34,197,94,0.35); }
+  #label-recipient-box::before { content: 'SHIP TO'; position: absolute; top: -18px; left: 0;
+                                 font-size: 0.62rem; font-weight: 800; color: #22c55e; letter-spacing: 0.04em; }
   .label-zone-btns { display: flex; gap: 6px; margin-top: 8px; }
   .label-zone-btn { flex: 1; padding: 8px 4px; font-size: 0.72rem; font-weight: 700; border-radius: 8px;
                     border: 1px solid #4b5563; background: #111827; color: #d1d5db; cursor: pointer; }
@@ -84,6 +89,19 @@
   .addr-suggest-btn:active { background: #1f2937; border-color: #60a5fa; }
   .addr-suggest-btn .s-meta { font-size: 0.68rem; color: #9ca3af; margin-top: 3px; }
   .addr-suggest-btn .s-conf { float: right; font-size: 0.65rem; color: #34d399; font-weight: 700; }
+  #addr-review-bg { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.75); z-index: 9999;
+                    align-items: flex-end; justify-content: center; padding: 0; }
+  #addr-review-bg.open { display: flex; }
+  #addr-review-modal { background: #1f2937; border-radius: 20px 20px 0 0; width: 100%; max-width: 520px;
+                       max-height: 85vh; overflow-y: auto; padding: 18px 16px 24px; }
+  #addr-review-modal h2 { margin: 0 0 6px; font-size: 1.05rem; color: #fbbf24; }
+  .ar-item { background: #111827; border: 1px solid #ef4444; border-radius: 12px; padding: 12px; margin-bottom: 10px; }
+  .ar-item .ar-addr { font-size: 0.85rem; color: #e5e7eb; margin: 4px 0; }
+  .ar-item .ar-issues { font-size: 0.72rem; color: #fca5a5; margin-bottom: 8px; }
+  .ar-fix-btn { display: block; width: 100%; text-align: left; padding: 8px 10px; margin-top: 4px;
+                background: #0f172a; border: 1px solid #374151; border-radius: 8px; color: #93c5fd;
+                font-size: 0.78rem; cursor: pointer; }
+  .pkg-edit { background: none; border: none; color: #60a5fa; font-size: 0.75rem; cursor: pointer; padding: 4px 8px; }
 
   /* Loading spinner */
   #loading { display: none; text-align: center; padding: 24px; color: #9ca3af; }
@@ -435,6 +453,7 @@
       <div class="tap-hint">Wrong address? Tap the <b>delivery address</b> on the label (usually middle — not sender at top)</div>
       <div id="label-tap-wrap">
         <img id="label-tap-img" alt="Label" onclick="onLabelTap(event)" ontouchend="onLabelTapTouch(event)">
+        <div id="label-recipient-box"></div>
         <div id="label-tap-marker"></div>
       </div>
       <div class="label-zone-btns">
@@ -547,6 +566,7 @@
             {% endif %}
             <span class="sticker-badge">#{{ item.scan_order or loop.index }}</span>
           </div>
+          <button class="pkg-edit" onclick="editPackageAddress({{ item.id }})">Edit</button>
           <button class="pkg-remove" onclick="removeItem({{ item.id }}, this)">✕</button>
         </div>
         {% endfor %}
@@ -561,6 +581,9 @@
   <button class="optimize-btn" id="optimize-btn" onclick="optimizeRoute()">
     ⚡ OPTIMIZE ROUTE — Lock Zones &amp; Get Loading Plan
   </button>
+  <button class="optimize-btn" id="review-addr-btn" onclick="reviewAddresses()" style="display:none;background:linear-gradient(135deg,#2563eb,#1d4ed8);margin-top:8px;">
+    🔍 Review Addresses Before Optimize
+  </button>
 
   <button class="build-btn" id="build-btn" onclick="buildRoute()" {% if not items %}disabled{% endif %} style="display:none">
     🗺️ Build Optimized Route ({{ items|length }} stops)
@@ -568,6 +591,17 @@
   {% if items %}
   <button class="clear-btn" onclick="clearAll()">Clear All Packages</button>
   {% endif %}
+
+  <!-- Address review before optimize -->
+  <div id="addr-review-bg" onclick="if(event.target===this)closeAddressReview()">
+    <div id="addr-review-modal">
+      <h2>⚠️ Fix addresses before optimizing</h2>
+      <p style="font-size:0.78rem;color:#9ca3af;margin:0 0 14px;">These stops may not exist or look wrong. Tap a suggestion to auto-correct.</p>
+      <div id="addr-review-list"></div>
+      <button onclick="closeAddressReview()" style="width:100%;padding:14px;margin-top:8px;background:#374151;color:#fff;border:none;border-radius:12px;font-weight:700;">Done reviewing</button>
+      <button onclick="closeAddressReview(); runOptimize();" style="width:100%;padding:14px;margin-top:8px;background:#10b981;color:#fff;border:none;border-radius:12px;font-weight:700;">Optimize anyway →</button>
+    </div>
+  </div>
 
   <!-- Loading Plan Modal -->
   <div class="loading-plan-bg" id="loading-plan-bg">
@@ -772,7 +806,79 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // ── Optimize Route (Phase 2) ──
+function reviewAddresses() {
+  fetch('/driver/scan/validate-addresses', { method: 'POST' })
+    .then(r => r.json())
+    .then(data => {
+      if (!data.ok) { showToast(data.error || 'Error', true); return; }
+      if (!data.flagged || !data.flagged.length) {
+        showToast('All addresses look good ✓');
+        return;
+      }
+      showAddressReviewModal(data.flagged);
+    })
+    .catch(() => showToast('Could not check addresses', true));
+}
+
+function showAddressReviewModal(flagged) {
+  const list = document.getElementById('addr-review-list');
+  list.innerHTML = flagged.map(item => `
+    <div class="ar-item" id="ar-item-${item.id}">
+      <div style="font-weight:700;color:#f59e0b;">#${item.scan_order || '?'}</div>
+      <div class="ar-addr">${(item.name ? item.name + ' — ' : '')}${item.address.replace(/</g,'&lt;')}</div>
+      <div class="ar-issues">${(item.issue_labels || item.issues || []).join(' · ')}</div>
+      ${(item.suggestions || []).map((s, i) => `
+        <button type="button" class="ar-fix-btn" onclick="applyRouteAddressFix(${item.id}, ${i})">
+          ✓ ${s.confidence}% — ${s.address.replace(/</g,'&lt;')}
+        </button>`).join('') || '<div style="font-size:0.72rem;color:#6b7280;">No suggestions — tap package in list to edit</div>'}
+    </div>`).join('');
+  window._flaggedAddressData = flagged;
+  document.getElementById('addr-review-bg').classList.add('open');
+}
+
+function applyRouteAddressFix(itemId, sugIdx) {
+  const item = (window._flaggedAddressData || []).find(x => x.id === itemId);
+  const sug = item && item.suggestions && item.suggestions[sugIdx];
+  if (!sug) return;
+  fetch(`/driver/scan/item/${itemId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ address: sug.address, name: sug.name || item.name, tracking: item.tracking }),
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (!data.ok) { showToast(data.error || 'Error', true); return; }
+    const el = document.getElementById('item-' + itemId);
+    if (el) {
+      const addrEl = el.querySelector('.pkg-addr');
+      if (addrEl) addrEl.textContent = sug.address;
+    }
+    showToast('Address updated ✓');
+    const ar = document.getElementById('ar-item-' + itemId);
+    if (ar) ar.style.borderColor = '#10b981';
+    setTimeout(refreshLiveSort, 400);
+  });
+}
+
+function closeAddressReview() {
+  document.getElementById('addr-review-bg').classList.remove('open');
+}
+
 function optimizeRoute() {
+  fetch('/driver/scan/validate-addresses', { method: 'POST' })
+    .then(r => r.json())
+    .then(data => {
+      if (data.ok && data.flagged && data.flagged.length) {
+        showAddressReviewModal(data.flagged);
+        showToast(`${data.flagged.length} address(es) need review`, true);
+        return;
+      }
+      runOptimize();
+    })
+    .catch(() => runOptimize());
+}
+
+function runOptimize() {
   const btn = document.getElementById('optimize-btn');
   btn.disabled = true;
   btn.textContent = '⏳ Optimizing…';
@@ -1275,6 +1381,8 @@ function updateCount() {
     if (pkgCount >= 1 && currentPhase === 'scanning') obtn.classList.add('visible');
     else if (currentPhase === 'optimized') obtn.classList.remove('visible');
   }
+  const rab = document.getElementById('review-addr-btn');
+  if (rab) rab.style.display = (pkgCount >= 1 && currentPhase === 'scanning') ? 'block' : 'none';
 }
 
 // ── Camera ──
@@ -1337,7 +1445,14 @@ let _lastAddKey = '';
 let _lastAddTime = 0;
 let _addressSuggestions = [];
 let _inferAbort = null;
+let _recipientBox = null;
 const _LABEL_CACHE_KEY = 'unit_label_memory_v1';
+
+const _SENDER_MARKERS = /SHEIN Fulfillment|North Aurora|Compton, CA|Artesia Blvd|City Of Industry|Coiner Ct|Wilmington, MA|Ontario, CA|Jurupa St|Overland Drive|Return:|Return Merchant|Point2Point|Temu|60542|90220|91748|91761|01887/i;
+
+function isSenderAddress(addr) {
+  return addr && _SENDER_MARKERS.test(addr);
+}
 
 const _TRACKING_PATTERNS = [
   /\b(SPXDTW\d{12,})\b/i,
@@ -1454,6 +1569,7 @@ function _cleanAddress(addr) {
 function isPlausibleAddress(addr) {
   addr = _cleanAddress(addr || '');
   if (!addr || addr.length < 12) return false;
+  if (isSenderAddress(addr)) return false;
   if (_isDirtyAddress(addr)) return false;
   if (/\b(DTW|ORD|IGD)-[\dA-Z]/i.test(addr)) return false;
   if (/\b(ORD|IGD)\b/i.test(addr) && !_STREET_RE.test(addr)) return false;
@@ -1489,6 +1605,15 @@ function _extractTracking(raw) {
   }
   const ln = raw.match(/\b(\d{18,})\b/);
   return ln ? ln[1] : '';
+}
+
+function _normalizeInformalStreet(line) {
+  if (!line) return line;
+  line = line.trim();
+  if (_STREET_RE.test(line)) return line;
+  const m = line.match(/^(\d+\s*[A-Za-z]?\s*\d*)\s+([A-Za-z][A-Za-z\s.'-]+)$/);
+  if (m) return `${m[1].trim()} ${m[2].trim().replace(/\b\w/g, c => c.toUpperCase())} St`;
+  return line;
 }
 
 function _parseShipToBlock(lines) {
@@ -1548,11 +1673,18 @@ function parseLabelFromOcrText(text) {
     }
     if (cityLine !== null) {
       const beforeCity = cityLine > 0 ? block.slice(0, cityLine) : [];
-      const streetLines = beforeCity.filter(l =>
-        /^\d+\s+/.test(l) || /\b(apt|unit|suite|ste|#)\b/i.test(l)
-      );
+      const streetLines = [];
+      for (const l of beforeCity) {
+        if (/^\d{2,5}$/.test(l) && streetLines.length) {
+          streetLines[streetLines.length - 1] += ' Apt ' + l;
+        } else if (/^\d/.test(l) || /\b(apt|unit|suite|ste|#)\b/i.test(l)) {
+          streetLines.push(_normalizeInformalStreet(l));
+        } else if (!name && _looksLikePersonName(l)) {
+          name = l;
+        }
+      }
       if (!streetLines.length && beforeCity.length) {
-        streetLines.push(...beforeCity.filter(l => !/^apt\b/i.test(l) || beforeCity.length === 1));
+        streetLines.push(...beforeCity.filter(l => !/^apt\b/i.test(l) || beforeCity.length === 1).map(_normalizeInformalStreet));
       }
       let street = streetLines.join(', ').replace(/,\s*apt\s*(\d+)/i, ' Apt $1');
       street = street.replace(/\b(Apt\s+\d+),\s*\1\b/i, '$1');
@@ -1594,6 +1726,7 @@ function parseLabelFromOcrText(text) {
   name = (name || '').replace(/[^\w\s.'-]/g, ' ').replace(/\s+/g, ' ').trim();
   address = _cleanAddress(address);
   if (_looksLikeCityStateZip(name)) name = '';
+  if (isSenderAddress(address)) { address = ''; }
   if (!zip) {
     const zm = (address || raw).match(/\b(\d{5})\b/);
     if (zm) zip = zm[1];
@@ -1644,48 +1777,85 @@ async function getTesseractWorker() {
   return _tesseractWorker;
 }
 
+async function detectRecipientBox(blob) {
+  try {
+    const img = await createImageBitmap(blob);
+    const iw = img.width, ih = img.height;
+    const worker = await getTesseractWorker();
+    const { data } = await worker.recognize(blob);
+    const lines = data.lines || [];
+    let shipIdx = -1;
+    for (let i = 0; i < lines.length; i++) {
+      if (_SHIP_TO_RE.test(lines[i].text || '')) { shipIdx = i; break; }
+    }
+    if (shipIdx < 0) {
+      _recipientBox = { left: 4, top: 30, width: 58, height: 32 };
+      return _recipientBox;
+    }
+    let x0 = iw, y0 = ih, x1 = 0, y1 = 0;
+    for (let i = shipIdx; i < lines.length; i++) {
+      const l = lines[i];
+      const b = l.bbox;
+      if (!b) continue;
+      if (i > shipIdx && (/^ORD\b/i.test(l.text) || /^SPX[A-Z0-9]{10}/i.test((l.text||'').replace(/\s/g,'')))) break;
+      x0 = Math.min(x0, b.x0); y0 = Math.min(y0, b.y0);
+      x1 = Math.max(x1, b.x1); y1 = Math.max(y1, b.y1);
+      if (new RegExp('\\b(' + _US_STATES + ')\\s*\\d{5}').test(l.text || '') && i > shipIdx) break;
+    }
+    if (x1 <= x0) return null;
+    _recipientBox = {
+      left: Math.max(0, (x0 / iw) * 100 - 2),
+      top: Math.max(0, (y0 / ih) * 100 - 2),
+      width: Math.min(96, ((x1 - x0) / iw) * 100 + 4),
+      height: Math.min(50, ((y1 - y0) / ih) * 100 + 4),
+    };
+    return _recipientBox;
+  } catch (e) { return null; }
+}
+
+function renderRecipientBox() {
+  const box = document.getElementById('label-recipient-box');
+  if (!box || !_recipientBox) { if (box) box.style.display = 'none'; return; }
+  box.style.left = _recipientBox.left + '%';
+  box.style.top = _recipientBox.top + '%';
+  box.style.width = _recipientBox.width + '%';
+  box.style.height = _recipientBox.height + '%';
+  box.style.display = 'block';
+}
+
 async function ocrLabelLocally(blob) {
-  const prep = await prepLabelImage(blob);
-  const barcode = await tryBarcodeScan(prep);
-  let bestText = '';
-  let bestParsed = { tracking: '', name: '', address: '', zip: '' };
-  let bestScore = -1;
+  const prep = await prepLabelImage(blob, 1200);
   const scoreParsed = (p) => {
     let s = 0;
     if (p.tracking && p.tracking.length >= 12) s += 3;
-    if (isPlausibleAddress(p.address)) s += 4;
+    if (isPlausibleAddress(p.address)) s += 5;
     if (isPlausibleName(p.name)) s += 2;
     return s;
   };
+  const [barcode, midParsed] = await Promise.all([
+    tryBarcodeScan(prep),
+    ocrLabelRegion(prep, 0.48, 0.50).catch(() => ({ tracking: '', name: '', address: '', zip: '' })),
+  ]);
+  detectRecipientBox(prep).then(() => renderRecipientBox()).catch(() => {});
+  let parsed = midParsed;
+  if (barcode && !parsed.tracking) parsed.tracking = barcode.replace(/\s/g, '');
+  if (scoreParsed(parsed) >= 5) {
+    _lastOcrText = '';
+    return parsed;
+  }
   try {
     const worker = await getTesseractWorker();
-    const passes = [
-      { blob: prep },
-      { blob: await prepLabelImage(blob, 1800).catch(() => prep), psm: '6' },
-    ];
-    for (const pass of passes) {
-      try {
-        if (pass.psm) await worker.setParameters({ tessedit_pageseg_mode: pass.psm });
-        const { data: { text } } = await worker.recognize(pass.blob);
-        if (!text || text.length < 8) continue;
-        const parsed = parseLabelFromOcrText(text);
-        if (barcode && !parsed.tracking) parsed.tracking = barcode.replace(/\s/g, '');
-        const sc = scoreParsed(parsed);
-        if (sc > bestScore) {
-          bestScore = sc;
-          bestText = text;
-          bestParsed = parsed;
-        }
-      } catch (e) { /* next pass */ }
+    const { data: { text } } = await worker.recognize(prep);
+    _lastOcrText = text || '';
+    if (text && text.length >= 8) {
+      const fullParsed = parseLabelFromOcrText(text);
+      if (barcode && !fullParsed.tracking) fullParsed.tracking = barcode.replace(/\s/g, '');
+      if (scoreParsed(fullParsed) > scoreParsed(parsed)) parsed = fullParsed;
     }
-    try { await worker.setParameters({ tessedit_pageseg_mode: '3' }); } catch (e) {}
-    _lastOcrText = bestText;
-    if (barcode && !bestParsed.tracking) bestParsed.tracking = barcode.replace(/\s/g, '');
-    return bestParsed;
-  } catch (e) {
-    _lastOcrText = '';
-    return { tracking: (barcode || '').replace(/\s/g, ''), name: '', address: '', zip: '' };
-  }
+    await detectRecipientBox(prep);
+    renderRecipientBox();
+  } catch (e) { /* keep mid */ }
+  return parsed;
 }
 
 async function ocrLabelRegion(blob, normX, normY) {
@@ -1738,6 +1908,7 @@ function showLabelTapImage(blob) {
   imgEl._prevUrl = url;
   imgEl.src = url;
   panel.style.display = 'block';
+  renderRecipientBox();
   const marker = document.getElementById('label-tap-marker');
   if (marker) marker.style.display = 'none';
 }
@@ -1945,7 +2116,33 @@ function showPreviewFields(d, source) {
       : (source === 'ai' ? '✨ AI read label — confirm or edit' : ''));
     hint.style.display = hint.textContent ? 'block' : 'none';
   }
-  fetchAddressSuggestions();
+  deferAddressSuggestions();
+}
+
+function deferAddressSuggestions() {
+  setTimeout(fetchAddressSuggestions, 80);
+}
+
+function editPackageAddress(itemId) {
+  const el = document.getElementById('item-' + itemId);
+  if (!el) return;
+  const curAddr = (el.querySelector('.pkg-addr') || {}).textContent || '';
+  const curName = (el.querySelector('.pkg-name') || {}).textContent || '';
+  const addr = prompt('Fix delivery address:', curAddr);
+  if (!addr || addr.trim() === curAddr) return;
+  fetch(`/driver/scan/item/${itemId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ address: addr.trim(), name: curName || '' }),
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (!data.ok) { showToast(data.error || 'Error', true); return; }
+    const el = document.getElementById('item-' + itemId);
+    if (el) el.querySelector('.pkg-addr').textContent = addr.trim();
+    showToast('Address updated ✓');
+    setTimeout(refreshLiveSort, 400);
+  });
 }
 
 function handleProcessResponse(data, localFallback) {
@@ -2098,8 +2295,8 @@ async function processBlob(blob) {
     }
   }
 
-  if (navigator.onLine) {
-    setLoadingText(hasTracking ? 'Got tracking — reading via AI…' : 'Reading label via AI…');
+  if (navigator.onLine && !isPlausibleAddress(parsed.address) && !partialLocal) {
+    setLoadingText('Reading label via AI…');
     try {
       const data = await processWithAi(prepBlob, parsed);
       if (data.ok) {
@@ -2266,6 +2463,7 @@ function appendPackageToList(pkg) {
       ${pkg.tracking ? `<div class="pkg-tracking">${pkg.tracking}</div>` : ''}
       <span class="pkg-num">#${pkgCount}</span>
     </div>
+    <button class="pkg-edit" onclick="editPackageAddress(${pkg.id})">Edit</button>
     <button class="pkg-remove" onclick="removeItem(${pkg.id}, this)">✕</button>`;
   document.getElementById('pkg-list-inner').appendChild(el);
 }

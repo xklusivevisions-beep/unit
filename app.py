@@ -297,9 +297,15 @@ def parse_label_text(text):
                 break
         if city_line is not None:
             before = block[:city_line]
-            streets = [l for l in before if re.match(r'^\d+\s+', l) or re.search(r'\b(apt|unit|suite|ste|#)\b', l, re.I)]
-            if not streets and before:
-                streets = [l for l in before if not re.match(r'^apt\b', l, re.I)]
+            streets = []
+            for bi, l in enumerate(before):
+                if re.match(r'^\d{2,5}$', l) and streets:
+                    streets[-1] = streets[-1] + f' Apt {l}'
+                elif re.match(r'^\d', l) or re.search(r'\b(apt|unit|suite|ste|#)\b', l, re.I):
+                    streets.append(_normalize_informal_street(l))
+                elif not name and re.search(r'[A-Za-z]{2,}', l) and not _looks_like_city_state_zip(l):
+                    if not re.search(r'\b(apt|unit|suite)\b', l, re.I):
+                        name = l
             street = ', '.join(streets)
             street = re.sub(r',\s*apt\s*(\d+)', r' Apt \1', street, flags=re.I)
             street = re.sub(r'\b(St\.?|Street|Ave\.?|Rd\.?|Dr\.?)\s+(\d{3,4})\b(?!\d)', r'\1 Apt \2', street, flags=re.I)
@@ -309,7 +315,7 @@ def parse_label_text(text):
             else:
                 address = f'{city}, {state} {zip_code}'.strip()
             for j, l in enumerate(block):
-                if j < city_line and not re.match(r'^\d+\s+', l) and not _looks_like_city_state_zip(l):
+                if j < city_line and not name and not re.match(r'^\d', l) and not _looks_like_city_state_zip(l):
                     if re.search(r'[A-Za-z]{2,}', l) and not re.search(r'\b(apt|unit|suite)\b', l, re.I):
                         name = l
                         break
@@ -333,6 +339,8 @@ def parse_label_text(text):
         zm = re.search(r'\b(\d{5})\b', address)
         if zm:
             zip_code = zm.group(1)
+    if _is_sender_address(address):
+        address, name = '', name
     return {'tracking': tracking, 'name': name, 'address': address, 'zip': zip_code}
 
 
@@ -615,6 +623,66 @@ def infer_address_suggestions(tracking='', partial_address='', ocr_text='', name
         deduped.append(item)
     return deduped[:limit]
 
+
+_RETURN_ADDRESS_MARKERS = (
+    'SHEIN FULFILLMENT', 'NORTH AURORA', 'COMPTON, CA', 'ARTESIA BLVD', 'ARTESIA',
+    'CITY OF INDUSTRY', 'COINER CT', 'WILMINGTON, MA', 'ONTARIO, CA', 'JURUPA ST',
+    'POINT2POINT', 'RETURN:', 'RETURN ', 'MERCHANT', 'TEMU', 'YC - LOG', 'COMPTON',
+    'OVERLAND DRIVE', 'FULFILLMENT',
+)
+_RETURN_ZIPS = {'60542', '90220', '91748', '91761', '01887', '60642'}
+
+
+def _is_sender_address(addr):
+    if not addr:
+        return False
+    u = addr.upper()
+    if any(m in u for m in _RETURN_ADDRESS_MARKERS):
+        return True
+    zm = re.search(r'\b(\d{5})\b', u)
+    return bool(zm and zm.group(1) in _RETURN_ZIPS)
+
+
+def _normalize_informal_street(line):
+    if not line:
+        return line
+    line = line.strip()
+    if re.search(r'\b(st|street|ave|avenue|rd|road|dr|drive|blvd|way|ln|lane|ct|court|pl|place|pkwy|box)\b', line, re.I):
+        return line
+    m = re.match(r'^(\d+\s*[A-Za-z]?\s*\d*)\s+([A-Za-z][A-Za-z\s.\'-]+)$', line)
+    if m:
+        return f'{m.group(1).strip()} {m.group(2).strip().title()} St'
+    return line
+
+
+def _address_quality_issues(address, lat=None, lng=None, route_centroid=None, max_outlier_mi=35):
+    issues = []
+    if not (address or '').strip():
+        return ['empty']
+    if _is_sender_address(address):
+        issues.append('sender_address')
+    if not re.search(r'\b(st|street|ave|avenue|rd|road|dr|drive|blvd|way|ln|lane|ct|court|pl|place|pkwy|box)\b', address, re.I):
+        if not re.match(r'^\d+\s+\d', address):
+            issues.append('informal_street')
+    if lat is None or lng is None:
+        issues.append('not_geocoded')
+    elif route_centroid:
+        try:
+            if geodesic((lat, lng), route_centroid).miles > max_outlier_mi:
+                issues.append('far_from_route')
+        except Exception:
+            pass
+    return issues
+
+
+def _route_centroid_from_items(items):
+    pts = [(r['dest_lat'], r['dest_lng']) for r in items if r.get('dest_lat') and r.get('dest_lng')]
+    if not pts:
+        return None
+    return (sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts))
+
+
+def compress_for_api(img_bytes, max_bytes=4 * 1024 * 1024):
     """Resize + compress image to stay under Anthropic 5MB API limit."""
     try:
         img = Image.open(io.BytesIO(img_bytes)).convert('RGB')
@@ -3319,6 +3387,118 @@ def vehicle_setup_get():
         'label':   VEHICLE_LABELS.get(vehicle_type, 'SUV'),
         'options': [{'value': k, 'label': v} for k, v in VEHICLE_LABELS.items()],
         'zones':   VEHICLE_ZONES.get(vehicle_type, VEHICLE_ZONES['suv_midsize']),
+    })
+
+
+@app.route('/driver/scan/validate-addresses', methods=['POST'])
+def scan_validate_addresses():
+    """Flag bad/informal addresses before route optimization."""
+    if 'driver_id' not in session:
+        return jsonify({'ok': False, 'error': 'not logged in'}), 401
+    db = get_db()
+    today = datetime.now().strftime('%Y-%m-%d')
+    ss = db.execute(
+        "SELECT id FROM scan_sessions WHERE driver_id=? AND date=? AND status='scanning' ORDER BY id DESC LIMIT 1",
+        (session['driver_id'], today),
+    ).fetchone()
+    if not ss:
+        db.close()
+        return jsonify({'ok': True, 'flagged': [], 'total': 0})
+    items = db.execute(
+        "SELECT id, tracking, customer_name, address, zip_code, dest_lat, dest_lng, scan_order FROM scan_items WHERE session_id=? ORDER BY scan_order ASC, id ASC",
+        (ss['id'],),
+    ).fetchall()
+    db.close()
+    rows = [dict(i) for i in items]
+    centroid = _route_centroid_from_items(rows)
+    flagged = []
+    issue_labels = {
+        'sender_address': 'Looks like sender/warehouse address',
+        'informal_street': 'Informal street — missing St/Ave/Rd',
+        'not_geocoded': 'Could not verify on map',
+        'far_from_route': 'Far from other stops on your route',
+        'empty': 'Missing address',
+    }
+    for item in rows:
+        issues = _address_quality_issues(
+            item.get('address'), item.get('dest_lat'), item.get('dest_lng'), centroid,
+        )
+        if not issues:
+            continue
+        suggestions = infer_address_suggestions(
+            tracking=item.get('tracking') or '',
+            partial_address=item.get('address') or '',
+            name=item.get('customer_name') or '',
+            zip_code=item.get('zip_code') or '',
+            limit=4,
+        )
+        if centroid and suggestions:
+            filtered = []
+            for s in suggestions:
+                lat, lng = _census_geocode(s['address'])
+                if lat and lng:
+                    try:
+                        if geodesic((lat, lng), centroid).miles <= 40:
+                            s = dict(s)
+                            s['confidence'] = min(99, s.get('confidence', 0) + 10)
+                            filtered.append(s)
+                    except Exception:
+                        filtered.append(s)
+                else:
+                    filtered.append(s)
+            if filtered:
+                suggestions = filtered
+        flagged.append({
+            'id': item['id'],
+            'scan_order': item.get('scan_order'),
+            'tracking': item.get('tracking') or '',
+            'name': item.get('customer_name') or '',
+            'address': item.get('address') or '',
+            'issues': issues,
+            'issue_labels': [issue_labels.get(i, i) for i in issues],
+            'suggestions': suggestions,
+        })
+    return jsonify({'ok': True, 'flagged': flagged, 'total': len(rows)})
+
+
+@app.route('/driver/scan/item/<int:item_id>', methods=['PATCH'])
+def scan_update_item(item_id):
+    """Fix an address on a scanned package (before or after optimize)."""
+    if 'driver_id' not in session:
+        return jsonify({'ok': False, 'error': 'not logged in'}), 401
+    data = request.get_json() or {}
+    address = (data.get('address') or '').strip()
+    name = (data.get('name') or '').strip()
+    if not address:
+        return jsonify({'ok': False, 'error': 'Address is required'})
+    if _is_sender_address(address):
+        return jsonify({'ok': False, 'error': 'That looks like a sender address — enter the delivery address'})
+    zip_code = _extract_zip(address) or (data.get('zip') or '').strip()
+    lat, lng = None, None
+    try:
+        coords = geocode_address(address)
+        if coords:
+            lat, lng = coords
+    except Exception as e:
+        log.warning(f'scan_update_item geocode: {e}')
+    db = get_db()
+    row = db.execute("SELECT session_id FROM scan_items WHERE id=?", (item_id,)).fetchone()
+    if not row:
+        db.close()
+        return jsonify({'ok': False, 'error': 'Package not found'})
+    db.execute(
+        """UPDATE scan_items SET address=?, customer_name=?, zip_code=?, dest_lat=?, dest_lng=?
+           WHERE id=?""",
+        (address, name, zip_code, lat, lng, item_id),
+    )
+    db.commit()
+    db.close()
+    tracking = (data.get('tracking') or '').strip()
+    if tracking:
+        upsert_label_memory(tracking, name, address, zip_code, source='fix')
+    return jsonify({
+        'ok': True, 'geocoded': bool(lat), 'address': address, 'name': name,
+        'issues': _address_quality_issues(address, lat, lng),
     })
 
 
