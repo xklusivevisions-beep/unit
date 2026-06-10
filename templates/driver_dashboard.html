@@ -416,7 +416,7 @@ function startLiveShare() {
       liveUrl   = data.url;
       document.getElementById('live-share-btn').style.display    = 'none';
       document.getElementById('live-share-active').style.display = 'block';
-      initMiniMap();
+      try { initMiniMap(); } catch(e) { console.warn('[live-share] mini-map failed:', e); }
       startGpsPing();
       startViewReceipt();
     })
@@ -581,6 +581,16 @@ function initMiniMap() {
   if (miniMap) return;
   const mapEl = document.getElementById('driver-mini-map');
   if (!mapEl) return;
+  const token = (typeof mapboxgl !== 'undefined') && mapboxgl.accessToken;
+  if (!token) {
+    // No Mapbox token — show a simple GPS placeholder instead of crashing
+    mapEl.style.background = '#0a1628';
+    mapEl.style.display = 'flex';
+    mapEl.style.alignItems = 'center';
+    mapEl.style.justifyContent = 'center';
+    mapEl.innerHTML = '<div style="color:#0088ff;font-size:0.8rem;text-align:center;"><div style="font-size:1.8rem;margin-bottom:6px;">📍</div>GPS Active</div>';
+    return;
+  }
   miniMap = new mapboxgl.Map({
     container: 'driver-mini-map',
     style: 'mapbox://styles/mapbox/dark-v11',
