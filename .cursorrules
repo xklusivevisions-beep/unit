@@ -362,6 +362,80 @@ PHASE 4 — DRIVE: Sequential route. No backtracking.
 ##   - residents table schema — only INSERT/UPDATE, no structural changes
 ## ─────────────────────────────────────────────────────────
 
+## ─────────────────────────────────────────────────────────
+## CRITICAL BUG FIXES — ZONE STABILITY + BAG REMOVAL
+## ─────────────────────────────────────────────────────────
+##
+## BUG 1 — REMOVE BAG_SIZE ENTIRELY
+##
+##   What it does: BAG_SIZE = 8 sub-divides each zone into "bags" of 8 stops.
+##   Zone A becomes A-Bag1, A-Bag2, etc. Director X sees this as confusing
+##   "groups of 10" that make no sense after he's already physically loaded
+##   packages by zone into his vehicle.
+##
+##   THE FIX:
+##   - Delete the BAG_SIZE constant (line ~1142 in app.py)
+##   - Remove all bag_num and bag_label fields from build_optimized_route()
+##   - Remove all bag_num and bag_label fields from any other route build functions
+##   - Search entire app.py for bag_num, bag_label, BAG_SIZE, n_bags, bag_group
+##     and remove every reference
+##   - Remove bag display from ALL templates:
+##       scan.html, driver_dashboard.html, route_detail.html, stop_active.html
+##     Search templates for bag_num, bag_label, Bag1, Bag2, n_bags
+##   - Packages belong to ZONES only. No sub-grouping within zones. Period.
+##
+## BUG 2 — ZONES ARE SEQUENTIAL CHUNKS, NOT GEOGRAPHIC K-MEANS
+##
+##   What's happening: build_optimized_route() assigns zones using:
+##     zone_seq = min(si // zone_size, k - 1)
+##   This makes Zone A = stops 1-20, Zone B = stops 21-40 (sequential chunking).
+##   K-means IS defined in the codebase (kmeans_geo function exists) but is
+##   NEVER CALLED during the actual route build. This is the root cause of
+##   zones changing — the dashboard falls back to scan_items.zone_letter
+##   which was assigned before optimization, giving totally different zones
+##   than what was physically loaded.
+##
+##   THE FIX:
+##   In build_optimized_route(), after OSRM orders the stops:
+##
+##   REPLACE:
+##     zone_size = max(1, math.ceil(n_stops / k)) if n_stops else 1
+##     ...zone_seq = min(si // zone_size, k - 1)...
+##
+##   WITH:
+##     1. Run kmeans_geo(routable, k) on the geocoded stop coordinates
+##     2. Assign zone_letter based on cluster index (cluster 0 = A, 1 = B, etc.)
+##     3. Sort clusters geographically (furthest from depot = Zone A,
+##        closest to depot = last zone) so loading order still makes sense
+##     4. Within each geographic zone, order stops by OSRM delivery sequence
+##     5. zone_letter is now geography-based, not sequence-based
+##
+##   ZONE LOCK RULE (already in architecture, must be enforced in code):
+##   - Once route is built and zones assigned: zone_letter is written to
+##     stops table and NEVER recalculated again for that route
+##   - build_route_zone_context() must ONLY READ zone_letter from stops table
+##     It must NOT fall back to scan_items.zone_letter after optimize
+##     Remove this block from build_route_zone_context():
+##       if s.get('tracking') and (not s.get('scan_order') or not s.get('zone_letter')):
+##           item = db.execute("SELECT scan_order, zone_letter FROM scan_items...")
+##     If zone_letter is missing from stops after optimize, that is a build bug
+##     to fix at build time — not something to paper over with a fallback
+##
+##   RESULT:
+##   - Zones are geographic (all addresses in one neighborhood = same zone)
+##   - Zones NEVER change after optimize is hit
+##   - What driver sees on dashboard = exactly what they loaded into the car
+##   - Zero zone drift during the route
+##
+## IMPLEMENTATION ORDER FOR THESE FIXES:
+##   1. Remove BAG_SIZE first (safest, purely additive removal)
+##   2. Fix zone assignment to use kmeans_geo
+##   3. Remove scan_items fallback from build_route_zone_context
+##   4. Test: optimize a route, note zone assignments, refresh dashboard
+##      mid-route — zones must be identical
+##
+## ─────────────────────────────────────────────────────────
+
 ## Do Not Touch
 - Vehicle zone definitions (suv_midsize confirmed correct)
 - Claude Vision address extraction logic (extend it, don't rewrite it)
