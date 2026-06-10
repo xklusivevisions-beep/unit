@@ -1283,9 +1283,80 @@ def cluster_packages_geo(geocoded):
 
 # ── OSRM chunk size: API handles ~100 waypoints reliably ──
 OSRM_MAX_WAYPOINTS = 90
+BUILDING_GROUP_METERS = 55  # same building if coords within this distance
 
 
-def _nn_sort(pkgs):
+def _street_base(address):
+    """Strip unit/apt for building-level grouping."""
+    if not address:
+        return ''
+    a = _normalize_addr_key(address)
+    a = re.sub(r'\b(APT|APARTMENT|UNIT|STE|SUITE|#|FL|FLOOR|RM|ROOM|BLDG|BUILDING)\s*[\w-]+', '', a, flags=re.I)
+    a = re.sub(r',\s*,', ',', a)
+    return re.sub(r'\s+', ' ', a).strip(' ,')
+
+
+def _building_group_key(address, lat=None, lng=None):
+    base = _street_base(address)
+    if base:
+        return base
+    if lat is not None and lng is not None:
+        return f'COORD:{round(float(lat), 4)}:{round(float(lng), 4)}'
+    return ''
+
+
+def group_packages_by_stop(packages, proximity_m=BUILDING_GROUP_METERS):
+    """
+    Merge packages at the same building into one routable stop.
+    Returns list of {addr_key, lat, lng, address, packages: [...]}.
+    """
+    groups = []
+    for p in packages:
+        if not p.get('lat') or not p.get('lng'):
+            continue
+        addr_key = _building_group_key(p.get('address', ''), p['lat'], p['lng'])
+        placed = False
+        for g in groups:
+            if addr_key and g['addr_key'] == addr_key:
+                g['packages'].append(p)
+                placed = True
+                break
+            try:
+                dist = geodesic((p['lat'], p['lng']), (g['lat'], g['lng'])).meters
+            except Exception:
+                dist = 9999
+            if dist <= proximity_m:
+                if addr_key and g['addr_key'] and addr_key == g['addr_key']:
+                    g['packages'].append(p)
+                    placed = True
+                    break
+                if _street_base(p.get('address', '')) == _street_base(g.get('address', '')):
+                    g['packages'].append(p)
+                    placed = True
+                    break
+        if not placed:
+            groups.append({
+                'addr_key': addr_key or f"PT:{p.get('id', id(p))}",
+                'lat': p['lat'],
+                'lng': p['lng'],
+                'address': p.get('address', ''),
+                'packages': [p],
+            })
+    # Packages missing coords — one group each
+    for p in packages:
+        if p.get('lat') and p.get('lng'):
+            continue
+        groups.append({
+            'addr_key': _building_group_key(p.get('address', '')) or f"NGEO:{p.get('id', id(p))}",
+            'lat': p.get('lat'),
+            'lng': p.get('lng'),
+            'address': p.get('address', ''),
+            'packages': [p],
+        })
+    return groups
+
+
+def _nn_sort(pkgs, start=None):
     """
     Nearest-neighbor TSP fallback.
     Greedily picks the closest unvisited stop at every step.
@@ -1294,10 +1365,13 @@ def _nn_sort(pkgs):
     if len(pkgs) <= 1:
         return list(pkgs)
     remaining = list(pkgs)
-    start     = min(remaining, key=lambda p: p.get('lat', 0))  # start from northernmost
-    remaining.remove(start)
-    ordered = [start]
-    cur = start
+    if start and start.get('lat') is not None and start.get('lng') is not None:
+        cur = {'lat': float(start['lat']), 'lng': float(start['lng'])}
+        ordered = []
+    else:
+        cur = min(remaining, key=lambda p: p.get('lat', 0))
+        remaining.remove(cur)
+        ordered = [cur]
     while remaining:
         nxt = min(remaining, key=lambda p: _dsq(cur, p))
         remaining.remove(nxt)
@@ -1306,38 +1380,79 @@ def _nn_sort(pkgs):
     return ordered
 
 
-def _osrm_trip(pkgs, timeout=12):
+def _osrm_trip(pkgs, start=None, end=None, timeout=12):
     """
-    Run a single OSRM trip request on a list of packages (max OSRM_MAX_WAYPOINTS).
-    Returns (ordered_pkgs, dist_m, dur_s) or raises on failure.
+    Run OSRM trip on packages. Optional start/end virtual waypoints fix depot routing.
+    Uses input-index mapping (not proximity matching) to avoid order swaps in dense areas.
     """
-    coords = ';'.join(f"{p['lng']},{p['lat']}" for p in pkgs)
-    url    = (f"http://router.project-osrm.org/trip/v1/driving/{coords}"
-              f"?roundtrip=false&source=first&destination=last&overview=false")
-    resp   = requests.get(url, timeout=timeout)
+    all_pts = []
+    pkg_indices = []
+
+    if start and start.get('lat') is not None and start.get('lng') is not None:
+        all_pts.append({'lat': float(start['lat']), 'lng': float(start['lng']), '_virtual': True})
+
+    for i, p in enumerate(pkgs):
+        all_pts.append(p)
+        pkg_indices.append(i)
+
+    if end and end.get('lat') is not None and end.get('lng') is not None:
+        all_pts.append({'lat': float(end['lat']), 'lng': float(end['lng']), '_virtual': True})
+
+    if len(all_pts) <= 1:
+        return list(pkgs), 0, 0
+
+    has_start = start and start.get('lat') is not None
+    has_end = end and end.get('lat') is not None
+    if has_start and has_end:
+        src, dst = 'first', 'last'
+    elif has_start:
+        src, dst = 'first', 'any'
+    elif has_end:
+        src, dst = 'any', 'last'
+    else:
+        src, dst = 'any', 'any'
+
+    coords = ';'.join(f"{p['lng']},{p['lat']}" for p in all_pts)
+    url = (f"http://router.project-osrm.org/trip/v1/driving/{coords}"
+           f"?roundtrip=false&source={src}&destination={dst}&overview=false")
+    resp = requests.get(url, timeout=timeout)
     resp.raise_for_status()
-    data   = resp.json()
-    if data.get('code') != 'Ok' or not data.get('waypoints'):
+    data = resp.json()
+    if data.get('code') != 'Ok' or not data.get('trips'):
         raise ValueError(f"OSRM returned: {data.get('code')}")
-    wps     = sorted(data['waypoints'], key=lambda w: w['waypoint_index'])
+
+    trip = data['trips'][0]
+    visit_indices = trip.get('waypoints') or []
+    if visit_indices and isinstance(visit_indices[0], dict):
+        visit_indices = [w.get('waypoint_index', i) for i, w in enumerate(visit_indices)]
+    if not visit_indices:
+        visit_indices = list(range(len(all_pts)))
+
+    offset = 1 if has_start else 0
     ordered, seen = [], set()
-    for wp in wps:
-        closest = min(pkgs,
-            key=lambda p: abs(p['lat'] - wp['location'][1]) + abs(p['lng'] - wp['location'][0]))
-        pid = closest.get('id', id(closest))
-        if pid not in seen:
-            seen.add(pid)
-            ordered.append(closest)
-    for p in pkgs:   # append any OSRM missed
+    for vi in visit_indices:
+        if vi < offset or vi >= offset + len(pkgs):
+            continue
+        pi = vi - offset
+        if pi < 0 or pi >= len(pkgs):
+            continue
+        p = pkgs[pi]
+        pid = p.get('id', pi)
+        if pid in seen:
+            continue
+        seen.add(pid)
+        ordered.append(p)
+    for p in pkgs:
         pid = p.get('id', id(p))
         if pid not in seen:
             ordered.append(p)
-    dist = data['trips'][0].get('distance', 0) if data.get('trips') else 0
-    dur  = data['trips'][0].get('duration', 0) if data.get('trips') else 0
+
+    dist = trip.get('distance', 0)
+    dur = trip.get('duration', 0)
     return ordered, dist, dur
 
 
-def osrm_optimize_full_route(pkgs):
+def osrm_optimize_full_route(pkgs, start=None, end=None):
     """
     Globally optimize ALL stops in a single OSRM call (or chunked for large routes).
     This is the correct approach — optimize first, then assign zones.
@@ -1359,10 +1474,10 @@ def osrm_optimize_full_route(pkgs):
     # ── Small route: single OSRM call ───────────────────────────────────
     if n <= OSRM_MAX_WAYPOINTS:
         try:
-            return _osrm_trip(pkgs)
+            return _osrm_trip(pkgs, start=start, end=end)
         except Exception as e:
             log.warning(f'[osrm_full] single-call failed ({e}), falling back to NN')
-            return _nn_sort(pkgs), 0, 0
+            return _nn_sort(pkgs, start=start), 0, 0
 
     # ── Large route: chunked OSRM ─────────────────────────────────────
     # Pre-sort with nearest-neighbor so chunks are geographically contiguous
@@ -1374,7 +1489,9 @@ def osrm_optimize_full_route(pkgs):
 
     for i, chunk in enumerate(chunks):
         try:
-            ordered_chunk, dist, dur = _osrm_trip(chunk)
+            chunk_start = start if i == 0 else None
+            chunk_end = end if i == len(chunks) - 1 else None
+            ordered_chunk, dist, dur = _osrm_trip(chunk, start=chunk_start, end=chunk_end)
             # If not first chunk, re-anchor: find which end of this chunk
             # is closest to the last stop of the previous chunk, reverse if needed
             if final_order:
@@ -1396,74 +1513,104 @@ def osrm_optimize_segment(pkgs):
     return osrm_optimize_full_route(pkgs)
 
 
-def build_optimized_route(geocoded):
+def build_optimized_route(geocoded, start=None, end=None):
     """
-    Route optimization pipeline — correct order of operations:
-
-    1. Run OSRM trip on ALL stops globally → optimal driving sequence
-    2. THEN assign zones as sequential chunks of the optimized order
-       (Zone A = first N stops, Zone B = next N, etc.)
-    3. Apply address-confidence zone labels from address_intel
-
-    This eliminates backtracking between zones because zones ARE
-    the route — not arbitrary geographic clusters optimized separately.
+    Route optimization pipeline:
+    1. Group packages at same building into one routable stop
+    2. OSRM optimize stops globally (with optional start/end depot)
+    3. Assign zones as sequential chunks of the optimized stop order
+    4. Expand back to per-package list (same building = same zone, consecutive orders)
 
     Returns (sorted_pkgs, total_dist_m, total_dur_s)
     """
     if not geocoded:
         return [], 0, 0
 
-    # ── Step 1: Get address confidence BEFORE routing ──────────────────
-    addresses  = [p.get('address', '') for p in geocoded]
+    addresses = [p.get('address', '') for p in geocoded]
     confidence = get_address_zone_confidence(addresses)
     for p in geocoded:
-        key  = _normalize_addr_key(p.get('address', ''))
+        key = _normalize_addr_key(p.get('address', ''))
         info = confidence.get(key)
-        p['_zone_confidence']  = info['confidence'] if info else 0.0
-        p['_zone_count']       = info['count']      if info else 0
-        p['_pinned_zone']      = info['zone']       if (info and info['pinned']) else None
+        p['_zone_confidence'] = info['confidence'] if info else 0.0
+        p['_zone_count'] = info['count'] if info else 0
+        p['_pinned_zone'] = info['zone'] if (info and info['pinned']) else None
 
-    # ── Step 2: Globally optimize ALL stops in one shot ─────────────
-    # Correct order of ops: optimize first, THEN assign zones
-    # This prevents backtracking between zones completely.
-    globally_ordered, total_dist, total_dur = osrm_optimize_full_route(geocoded)
-    n = len(globally_ordered)
-
-    # ── Step 3: Assign zones as sequential chunks of the optimal order ─
-    # Zone A = first N stops on the route, Zone B = next N, etc.
-    # Zones are now guaranteed to flow in one direction — no backtracking.
-    k          = calc_num_zones_adaptive(geocoded)
-    zone_size  = math.ceil(n / k)
-    result     = []
-    for i, p in enumerate(globally_ordered):
-        zone_seq   = min(i // zone_size, k - 1)       # 0-indexed zone number
-        letter     = chr(65 + zone_seq)               # A, B, C …
-        local_num  = (i % zone_size) + 1
-        color      = ZONE_COLORS.get(letter, {'hex': '#6b7280', 'emoji': '⚪'})
-        conf       = p.get('_zone_confidence', 0.0)
-        zone_count = p.get('_zone_count', 0)
-        is_pinned  = p.get('_pinned_zone') is not None
-        if is_pinned:
-            zone_status = 'locked'
-        elif zone_count >= 1:
-            zone_status = 'learning'
-        else:
-            zone_status = 'new'
-        p.update({
-            'zone_letter':     letter,
-            'zone_num':        local_num,
-            'zone_label_full': f'{letter}-{local_num}',
-            'zone_color':      color['hex'],
-            'zone_emoji':      color['emoji'],
-            'bag_num':         math.ceil(local_num / BAG_SIZE),
-            'bag_label':       f'{letter}-Bag{math.ceil(local_num / BAG_SIZE)}',
-            'delivery_order':  i + 1,
-            'load_position':   n - i,    # last delivery loads last (near door)
-            'zone_confidence': round(conf * 100),
-            'zone_status':     zone_status,
-            'zone_deliveries': zone_count,
+    stop_groups = group_packages_by_stop(geocoded)
+    routable = []
+    for g in stop_groups:
+        if not g.get('lat') or not g.get('lng'):
+            continue
+        routable.append({
+            'id': g['packages'][0].get('id'),
+            'lat': g['lat'],
+            'lng': g['lng'],
+            'address': g['address'],
+            '_group': g,
         })
-        result.append(p)
+
+    if not routable:
+        routable = [dict(p, _group={'packages': [p], 'addr_key': _building_group_key(p.get('address', '')),
+                                    'lat': p.get('lat'), 'lng': p.get('lng'), 'address': p.get('address', '')})
+                  for p in geocoded if p.get('lat') and p.get('lng')]
+
+    ordered_stops, total_dist, total_dur = osrm_optimize_full_route(routable, start=start, end=end)
+    n_stops = len(ordered_stops)
+    k = calc_num_zones_adaptive(routable)
+    zone_size = max(1, math.ceil(n_stops / k)) if n_stops else 1
+
+    result = []
+    delivery_order = 1
+    for si, stop_pt in enumerate(ordered_stops):
+        group = stop_pt.get('_group') or stop_pt
+        pkgs = sorted(group.get('packages', [stop_pt]),
+                      key=lambda x: x.get('scan_order') or x.get('id') or 0)
+        zone_seq = min(si // zone_size, k - 1)
+        letter = chr(65 + zone_seq)
+        local_num = (si % zone_size) + 1
+        color = ZONE_COLORS.get(letter, {'hex': '#6b7280', 'emoji': '⚪'})
+        for p in pkgs:
+            conf = p.get('_zone_confidence', 0.0)
+            zone_count = p.get('_zone_count', 0)
+            is_pinned = p.get('_pinned_zone') is not None
+            if is_pinned:
+                zone_status = 'locked'
+            elif zone_count >= 1:
+                zone_status = 'learning'
+            else:
+                zone_status = 'new'
+            pkg = dict(p)
+            pkg.update({
+                'zone_letter': letter,
+                'zone_num': local_num,
+                'zone_label_full': f'{letter}-{local_num}',
+                'zone_color': color['hex'],
+                'zone_emoji': color['emoji'],
+                'bag_num': math.ceil(local_num / BAG_SIZE),
+                'bag_label': f'{letter}-Bag{math.ceil(local_num / BAG_SIZE)}',
+                'delivery_order': delivery_order,
+                'load_position': max(0, n_stops - si),
+                'zone_confidence': round(conf * 100),
+                'zone_status': zone_status,
+                'zone_deliveries': zone_count,
+                'stop_group_key': group.get('addr_key'),
+                'packages_at_stop': len(pkgs),
+            })
+            result.append(pkg)
+            delivery_order += 1
+
+    # Ungeocoded packages not in routable — append at end
+    routed_ids = {p.get('id') for p in result}
+    for p in geocoded:
+        if p.get('id') not in routed_ids and p.get('id') is not None:
+            pkg = dict(p)
+            pkg.update({
+                'zone_letter': '?', 'zone_num': 0, 'zone_label_full': '?',
+                'zone_color': '#6b7280', 'zone_emoji': '⚪',
+                'delivery_order': delivery_order,
+                'packages_at_stop': 1,
+            })
+            result.append(pkg)
+            delivery_order += 1
 
     return result, total_dist, total_dur
 
@@ -2173,6 +2320,13 @@ def init_db():
         "ALTER TABLE stops ADD COLUMN zone_color TEXT",
         "ALTER TABLE stops ADD COLUMN zone_emoji TEXT",
         "ALTER TABLE stops ADD COLUMN vehicle_zone_label TEXT",
+        "ALTER TABLE scan_sessions ADD COLUMN route_start_lat REAL",
+        "ALTER TABLE scan_sessions ADD COLUMN route_start_lng REAL",
+        "ALTER TABLE scan_sessions ADD COLUMN route_end_lat REAL",
+        "ALTER TABLE scan_sessions ADD COLUMN route_end_lng REAL",
+        "ALTER TABLE scan_sessions ADD COLUMN route_end_mode TEXT",
+        "ALTER TABLE stops ADD COLUMN package_count INTEGER DEFAULT 1",
+        "ALTER TABLE stops ADD COLUMN package_list TEXT",
         # ── QR Building Access feature ──
         "ALTER TABLE buildings ADD COLUMN building_code TEXT",
         "ALTER TABLE buildings ADD COLUMN name TEXT",
@@ -2824,6 +2978,50 @@ def _attach_scan_orders(packages, order_map):
     return packages
 
 
+def _ensure_unique_scan_orders(db, session_id):
+    """Fix duplicate or missing warehouse sticker numbers."""
+    items = db.execute(
+        "SELECT id, scan_order FROM scan_items WHERE session_id=? ORDER BY id ASC",
+        (session_id,),
+    ).fetchall()
+    used = set()
+    fixes = []
+    next_free = 1
+    for item in items:
+        so = _ss_val(item, 'scan_order')
+        if so is not None and int(so) > 0 and int(so) not in used:
+            used.add(int(so))
+            next_free = max(next_free, int(so) + 1)
+            continue
+        while next_free in used:
+            next_free += 1
+        fixes.append((next_free, item['id']))
+        used.add(next_free)
+        next_free += 1
+    for new_so, item_id in fixes:
+        db.execute("UPDATE scan_items SET scan_order=? WHERE id=?", (new_so, item_id))
+    if fixes:
+        db.commit()
+
+
+def _parse_route_endpoints(data):
+    """Extract start/end depot from optimize request JSON."""
+    data = data or {}
+    start = end = None
+    if data.get('start_lat') is not None and data.get('start_lng') is not None:
+        start = {'lat': float(data['start_lat']), 'lng': float(data['start_lng'])}
+    end_mode = (data.get('end_mode') or 'none').strip().lower()
+    if end_mode == 'return_start' and start:
+        end = dict(start)
+    elif data.get('end_lat') is not None and data.get('end_lng') is not None:
+        end = {'lat': float(data['end_lat']), 'lng': float(data['end_lng'])}
+    elif data.get('end_address'):
+        coords = geocode_address(data['end_address'].strip())
+        if coords:
+            end = {'lat': coords[0], 'lng': coords[1]}
+    return start, end, end_mode
+
+
 def _persist_optimized_scan_items(db, session_id, sorted_pkgs):
     """Save locked zone + delivery order onto scan_items for build-route."""
     for p in sorted_pkgs:
@@ -3198,8 +3396,9 @@ def scan_add():
             zip_warning = f'ZIP {zip_code} is outside your assigned zone ({driver_row["assigned_zips"]})'
 
     next_order = db.execute(
-        "SELECT COUNT(*) FROM scan_items WHERE session_id=?", (ss_id,)
-    ).fetchone()[0] + 1
+        "SELECT COALESCE(MAX(scan_order), 0) + 1 FROM scan_items WHERE session_id=?",
+        (ss_id,),
+    ).fetchone()[0]
     db.execute(
         """INSERT INTO scan_items (session_id, tracking, customer_name, address, zip_code, raw_json, dest_lat, dest_lng, scan_order)
            VALUES (?,?,?,?,?,?,?,?,?)""",
@@ -3281,7 +3480,7 @@ def scan_live_sort():
             sorted_pkgs.append({
                 **p,
                 'delivery_order': i + 1,
-                'scan_order':     i + 1,
+                'scan_order':     order_map[p['id']],
             })
         total = len(sorted_pkgs)
         return jsonify({
@@ -3313,7 +3512,12 @@ def scan_live_sort():
         naive_miles = round(naive_dist_m * 0.000621371, 2)
 
     # ─ OPTIMIZED PHASE: zones locked — run route optimization once ─
-    sorted_pkgs, total_dist_m, total_dur_s = build_optimized_route(geocoded)
+    start = end = None
+    if ss_full and _ss_val(ss_full, 'route_start_lat') is not None:
+        start = {'lat': float(ss_full['route_start_lat']), 'lng': float(ss_full['route_start_lng'])}
+    if ss_full and _ss_val(ss_full, 'route_end_lat') is not None:
+        end = {'lat': float(ss_full['route_end_lat']), 'lng': float(ss_full['route_end_lng'])}
+    sorted_pkgs, total_dist_m, total_dur_s = build_optimized_route(geocoded, start=start, end=end)
 
     # Add ungeocoded at end
     seen_ids = {p['id'] for p in sorted_pkgs}
@@ -3399,6 +3603,9 @@ def scan_optimize():
     if 'driver_id' not in session:
         return jsonify({'ok': False, 'error': 'not logged in'}), 401
 
+    req_data = request.get_json(silent=True) or {}
+    start, end, end_mode = _parse_route_endpoints(req_data)
+
     db = get_db()
     today = datetime.now().strftime('%Y-%m-%d')
     ss = db.execute(
@@ -3417,10 +3624,17 @@ def scan_optimize():
 
     driver = db.execute("SELECT vehicle_type FROM drivers WHERE id=?", (session['driver_id'],)).fetchone()
     vehicle_type = (driver['vehicle_type'] if driver and driver['vehicle_type'] else 'suv_midsize')
-    db.close()
 
     if not items:
+        db.close()
         return jsonify({'ok': False, 'error': 'No packages to optimize'})
+
+    _ensure_unique_scan_orders(db, ss['id'])
+    items = db.execute(
+        "SELECT * FROM scan_items WHERE session_id=? ORDER BY id ASC",
+        (ss['id'],)
+    ).fetchall()
+    db.close()
 
     # Build packages list
     packages = []
@@ -3437,8 +3651,8 @@ def scan_optimize():
     geocoded = [p for p in packages if p['lat'] and p['lng']]
     ungeoced = [p for p in packages if not (p['lat'] and p['lng'])]
 
-    # Run optimization ONCE — this is the single moment zones are determined
-    sorted_pkgs, total_dist_m, total_dur_s = build_optimized_route(geocoded)
+    # Run optimization ONCE — group buildings, honor start/end depot
+    sorted_pkgs, total_dist_m, total_dur_s = build_optimized_route(geocoded, start=start, end=end)
 
     # Add ungeocoded at end
     seen_ids = {p['id'] for p in sorted_pkgs}
@@ -3492,9 +3706,16 @@ def scan_optimize():
     _persist_optimized_scan_items(db2, ss['id'], sorted_pkgs)
     db2.execute(
         """UPDATE scan_sessions
-           SET zones_locked=1, zone_centroids=?, locked_at=?, phase='optimized'
+           SET zones_locked=1, zone_centroids=?, locked_at=?, phase='optimized',
+               route_start_lat=?, route_start_lng=?, route_end_lat=?, route_end_lng=?, route_end_mode=?
            WHERE id=?""",
-        (json.dumps(centroids), datetime.now().isoformat(), ss['id'])
+        (
+            json.dumps(centroids), datetime.now().isoformat(),
+            start['lat'] if start else None, start['lng'] if start else None,
+            end['lat'] if end else None, end['lng'] if end else None,
+            end_mode,
+            ss['id'],
+        )
     )
     db2.commit()
     db2.close()
@@ -4220,49 +4441,125 @@ def scan_build_route():
     except Exception:
         pass
 
-    # Geocode and insert stops
+    # Geocode items missing coords, then group same-building into one delivery stop
     geocoded = 0
     failed_addresses = []
-    for i, item in enumerate(items):
-        lat, lng = None, None
-        if item['address']:
+    for item in items:
+        if not item['dest_lat'] and item['address']:
             coords = geocode_address(item['address'])
             if coords:
                 lat, lng = coords
                 geocoded += 1
-                # Update scan_items with geocoded coords
                 db.execute(
                     "UPDATE scan_items SET dest_lat=?, dest_lng=? WHERE id=?",
                     (lat, lng, item['id'])
                 )
+                item = dict(item)
+                item['dest_lat'] = lat
+                item['dest_lng'] = lng
             else:
                 failed_addresses.append(item['address'])
-        import secrets as _sec
-        token = _sec.token_urlsafe(12)
+
+    stop_groups = []
+    group_index = {}
+    for item in items:
         meta = pkg_meta.get(item['id'], {})
-        zone_letter = meta.get('zone_letter') or _ss_val(item, 'zone_letter')
-        scan_order = meta.get('scan_order') or _ss_val(item, 'scan_order') or (i + 1)
-        zone_num = meta.get('zone_num')
-        zone_color = meta.get('zone_color')
-        zone_emoji = meta.get('zone_emoji')
-        vehicle_zone_label = meta.get('vehicle_zone_label', '')
+        lat = _ss_val(item, 'dest_lat') or meta.get('lat')
+        lng = _ss_val(item, 'dest_lng') or meta.get('lng')
+        gkey = meta.get('stop_group_key') or _building_group_key(item['address'], lat, lng)
+        placed = False
+        for gi, g in enumerate(stop_groups):
+            if gkey and g['key'] == gkey:
+                g['items'].append((item, meta))
+                placed = True
+                break
+            if lat and lng and g.get('lat') and g.get('lng'):
+                try:
+                    if geodesic((lat, lng), (g['lat'], g['lng'])).meters <= BUILDING_GROUP_METERS:
+                        if _street_base(item['address']) == _street_base(g['address']):
+                            g['items'].append((item, meta))
+                            placed = True
+                            break
+                except Exception:
+                    pass
+        if not placed:
+            stop_groups.append({
+                'key': gkey or f"item:{item['id']}",
+                'address': item['address'],
+                'lat': lat, 'lng': lng,
+                'items': [(item, meta)],
+            })
+
+    import secrets as _sec
+    stop_num = 0
+    for group in stop_groups:
+        stop_num += 1
+        items_in = group['items']
+        primary_item, primary_meta = items_in[0]
+        lat = group.get('lat') or _ss_val(primary_item, 'dest_lat')
+        lng = group.get('lng') or _ss_val(primary_item, 'dest_lng')
+        if lat and lng:
+            geocoded += 1 if len(items_in) == 1 else 0
+
+        package_list = []
+        scan_orders = []
+        names = []
+        trackings = []
+        for it, meta in items_in:
+            so = meta.get('scan_order') or _ss_val(it, 'scan_order')
+            package_list.append({
+                'tracking': _ss_val(it, 'tracking', ''),
+                'name': _ss_val(it, 'customer_name', ''),
+                'scan_order': so,
+                'address': _ss_val(it, 'address', ''),
+            })
+            if so:
+                scan_orders.append(int(so))
+            nm = (_ss_val(it, 'customer_name', '') or '').strip()
+            if nm:
+                names.append(nm)
+            tr = (_ss_val(it, 'tracking', '') or '').strip()
+            if tr:
+                trackings.append(tr)
+
+        customer_name = names[0] if names else ''
+        if len(names) > 1:
+            customer_name = f"{names[0]} +{len(names) - 1}"
+        tracking = trackings[0] if trackings else ''
+        if len(trackings) > 1:
+            tracking = f"{trackings[0]} (+{len(trackings) - 1})"
+
+        stickers = ', '.join(f'#{n}' for n in sorted(scan_orders))
+        notes = f"{len(items_in)} packages · Stickers: {stickers}" if len(items_in) > 1 else ''
+        zone_letter = primary_meta.get('zone_letter') or _ss_val(primary_item, 'zone_letter')
+        scan_order = min(scan_orders) if scan_orders else stop_num
+        zone_num = primary_meta.get('zone_num')
+        zone_color = primary_meta.get('zone_color')
+        zone_emoji = primary_meta.get('zone_emoji')
+        vehicle_zone_label = primary_meta.get('vehicle_zone_label', '')
+        token = _sec.token_urlsafe(12)
+        pkg_count = len(items_in)
+        pkg_json = json.dumps(package_list)
+
         try:
             db.execute(
                 """INSERT INTO stops
-                   (route_id, stop_number, address, customer_name, tracking, dest_lat, dest_lng,
-                    status, token, zone_letter, scan_order, zone_num, zone_color, zone_emoji, vehicle_zone_label)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (route_id, i + 1, item['address'], item['customer_name'],
-                 item['tracking'], lat, lng, 'pending', token, zone_letter, scan_order,
-                 zone_num, zone_color, zone_emoji, vehicle_zone_label)
+                   (route_id, stop_number, address, customer_name, tracking, notes, dest_lat, dest_lng,
+                    status, token, zone_letter, scan_order, zone_num, zone_color, zone_emoji,
+                    vehicle_zone_label, package_count, package_list)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (route_id, stop_num, primary_item['address'], customer_name, tracking, notes,
+                 lat, lng, 'pending', token, zone_letter, scan_order, zone_num, zone_color,
+                 zone_emoji, vehicle_zone_label, pkg_count, pkg_json)
             )
         except Exception:
             db.execute(
                 """INSERT INTO stops
-                   (route_id, stop_number, address, customer_name, tracking, dest_lat, dest_lng, status, token, zone_letter)
-                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
-                (route_id, i + 1, item['address'], item['customer_name'],
-                 item['tracking'], lat, lng, 'pending', token, zone_letter)
+                   (route_id, stop_number, address, customer_name, tracking, notes, dest_lat, dest_lng,
+                    status, token, zone_letter)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (route_id, stop_num, primary_item['address'], customer_name, tracking, notes,
+                 lat, lng, 'pending', token, zone_letter)
             )
     db.commit()
 
@@ -4298,6 +4595,7 @@ def scan_build_route():
         'ok': True,
         'route_id': route_id,
         'total': len(items),
+        'stops': stop_num,
         'geocoded': geocoded,
         'failed': failed_addresses,
         'redirect': url_for('route_detail', route_id=route_id)

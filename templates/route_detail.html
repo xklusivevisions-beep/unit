@@ -221,6 +221,9 @@
       <div style="flex:1;min-width:0;">
         <div class="fw-bold" style="font-size:0.9rem;">{{ (stop.customer_name or 'Unknown')|name_short }}</div>
         <div class="text-secondary small text-truncate">{{ stop.address }}</div>
+        {% if stop.package_count and stop.package_count > 1 %}
+        <small style="color:#f59e0b;font-weight:700;">📦 {{ stop.package_count }} packages at this stop</small>
+        {% endif %}
         {% if stop.unit %}<small class="text-secondary">Unit {{ stop.unit }}</small>{% endif %}
 
         <!-- Edit button -->
