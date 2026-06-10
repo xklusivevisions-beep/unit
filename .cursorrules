@@ -219,9 +219,81 @@ PHASE 4 — DRIVE: Sequential route. No backtracking.
 ##   - SMS notification timing
 ## ─────────────────────────────────────────────────────────
 
+## ─────────────────────────────────────────────────────────
+## UNIT NUMBER EXTRACTION + BUILDING MEMORY
+## ─────────────────────────────────────────────────────────
+##
+## PROBLEM:
+## Driver has to open Speed X app at each stop to get the unit/apt number
+## because UNIT either drops it during scan or doesn't show it prominently.
+## Unit numbers ARE on the Speed X label — this is a parsing + display problem.
+##
+## THE FIX — 3 layers:
+##
+## LAYER 1 — FIX SCAN PARSING (catch it at warehouse, not at the door)
+##
+##   In the Claude Vision / Tesseract address extraction logic:
+##   - Always extract unit/apt number as a SEPARATE field from street address
+##   - Patterns to detect: Apt, Apt., APT, Unit, UNIT, #, Suite, Ste, Fl, Floor
+##     plus bare numbers after a comma (e.g. "123 Main St, 4B")
+##   - Store in stops.unit column (already exists in DB schema)
+##   - Display the unit number PROMINENTLY on every stop card:
+##       - On scan page: shown as a separate orange badge next to the address
+##       - On dashboard stop list: shown below address, never hidden
+##       - On stop_active delivery screen: LARGE at top, impossible to miss
+##
+##   - During scan phase: if address is a known multi-unit building
+##     (building exists in buildings table OR address_intel shows multiple
+##     unit numbers for same street address) AND no unit number was extracted:
+##     FLAG IT IMMEDIATELY with a yellow warning card:
+##     "No unit number found for [address] — this looks like a multi-unit building.
+##      Enter it now before you leave."
+##     Driver fills it in once at warehouse. Never discovers it mid-route.
+##
+## LAYER 2 — BUILDING MEMORY (never ask twice)
+##
+##   Extend address_intel table:
+##   - ALTER TABLE address_intel ADD COLUMN known_units TEXT DEFAULT '[]'
+##     (JSON array of unit numbers seen at this address)
+##   - Every time a stop is delivered with a unit number confirmed:
+##     append that unit number to known_units for that address
+##   - On future scans: if same street address with no unit number extracted,
+##     AND known_units has entries: show a quick-pick list of known units
+##     so driver taps the right one instead of typing
+##
+##   For brand new addresses with no unit number:
+##   - On stop_active screen, if unit field is empty AND building table
+##     suggests multi-unit (or address contains keywords: apt, suite, bldg):
+##     show a one-tap prompt at arrival: "Unit number? (saves for next time)"
+##     Driver enters it once -> saved to address_intel.known_units forever
+##
+## LAYER 3 — STOP ACTIVE SCREEN (unit number front and center)
+##
+##   On the stop_active.html delivery screen:
+##   - Unit number displayed in its own large block at the top, styled like:
+##       APT / UNIT
+##       [ 4B ]    <- large, bold, high contrast
+##   - If unit number is missing: show a red "No unit #" badge with
+##     a tap-to-add button right there — no app switching needed
+##   - Unit number should be the first thing the driver sees when they
+##     pull up the stop, not buried in the address string
+##
+## FILES TO TOUCH:
+##   - app.py: update address extraction to parse unit as separate field,
+##     add known_units column to address_intel, update deliver endpoint
+##     to save confirmed unit to address_intel
+##   - templates/scan.html: show unit badge, flag missing units on multi-unit
+##   - templates/stop_active.html: large unit number display at top
+##   - templates/driver_dashboard.html: show unit number on stop cards
+##
+## DO NOT CHANGE:
+##   - stops.unit column already exists - just populate and display it better
+##   - address_intel table - only ADD columns, don't restructure
+## ─────────────────────────────────────────────────────────
+
 ## Do Not Touch
 - Vehicle zone definitions (suv_midsize confirmed correct)
-- Claude Vision address extraction logic
+- Claude Vision address extraction logic (extend it, don't rewrite it)
 - OSRM fallback logic (keep as fallback when Google Maps key is absent)
 
 ## Constants
