@@ -1982,6 +1982,110 @@ def record_address_delivery(address, zone_letter=None):
     except Exception as e:
         log.warning(f'[address_intel] record_delivery error: {e}')
 
+_UNIT_LABEL_RE = re.compile(
+    r'(?:\b(?:apt|apartment|unit|suite|ste|fl|floor|rm|room|bldg|building|no)\b\.?|#)\s*#?\s*([A-Za-z]?\d+[A-Za-z]?(?:-\d+)?|\d*[A-Za-z])\b',
+    re.I,
+)
+# Bare number between street and city: "123 Main St, 4B, Detroit MI" or "1310 Pallister St 807"
+_UNIT_TRAILING_RE = re.compile(
+    r'\b(?:St|Street|Ave|Avenue|Rd|Road|Dr|Drive|Blvd|Boulevard|Ln|Lane|Ct|Court|Pl|Place|Way|Pkwy|Hwy|Ter|Trl|Cir)\.?\s*,?\s+(\d{1,4}[A-Za-z]?)\s*(?:,|$)',
+    re.I,
+)
+
+
+def extract_unit_number(address):
+    """Pull the apt/unit identifier out of a full address string.
+
+    Returns the unit string ('4B', '206', ...) or ''. The address itself is
+    left untouched — geocoding and grouping already handle unit suffixes.
+    """
+    if not address:
+        return ''
+    m = _UNIT_LABEL_RE.search(address)
+    if m and not re.fullmatch(r'\d{5}', m.group(1)):  # 'FL 33101' is a state+zip, not Floor 33101
+        return m.group(1).upper()
+    m = _UNIT_TRAILING_RE.search(address)
+    if m and not re.fullmatch(r'\d{5}', m.group(1)):
+        return m.group(1).upper()
+    return ''
+
+
+def get_known_units(address):
+    """Return list of unit numbers previously confirmed at this street address."""
+    if not address:
+        return []
+    key = _normalize_addr_key(_street_base(address))
+    if not key:
+        return []
+    try:
+        db = get_db()
+        row = db.execute(
+            "SELECT known_units FROM address_intel WHERE address=? OR address LIKE ? LIMIT 1",
+            (key, key + '%'),
+        ).fetchone()
+        db.close()
+        if row and row['known_units']:
+            units = json.loads(row['known_units'])
+            return [str(u) for u in units if u][:12]
+    except Exception as e:
+        log.warning(f'[building_memory] get_known_units error: {e}')
+    return []
+
+
+def is_known_multi_unit(address):
+    """True if this street address is a known multi-unit building."""
+    if not address:
+        return False
+    base = _street_base(address)
+    if not base:
+        return False
+    if len(get_known_units(address)) >= 1:
+        return True
+    try:
+        db = get_db()
+        hit = db.execute(
+            "SELECT 1 FROM buildings WHERE UPPER(address) LIKE ? LIMIT 1",
+            (base + '%',),
+        ).fetchone()
+        db.close()
+        if hit:
+            return True
+    except Exception:
+        pass
+    return bool(re.search(r'\b(apt|apartment|unit|suite|ste|bldg|building|tower|plaza|lofts?|manor|terrace apartments)\b', address, re.I))
+
+
+def remember_unit_number(address, unit):
+    """Append a confirmed unit number to address_intel.known_units (building memory)."""
+    if not address or not unit:
+        return
+    unit = str(unit).strip().upper()
+    base_key = _normalize_addr_key(_street_base(address))
+    full_key = _normalize_addr_key(address)
+    try:
+        db = get_db()
+        row = db.execute(
+            "SELECT id, known_units FROM address_intel WHERE address IN (?,?) LIMIT 1",
+            (base_key, full_key),
+        ).fetchone()
+        now = datetime.now().isoformat()
+        if row:
+            try:
+                units = json.loads(row['known_units'] or '[]')
+            except Exception:
+                units = []
+            if unit not in units:
+                units.append(unit)
+                db.execute(
+                    "UPDATE address_intel SET known_units=?, updated_at=? WHERE id=?",
+                    (json.dumps(units[-50:]), now, row['id']),
+                )
+                db.commit()
+        db.close()
+    except Exception as e:
+        log.warning(f'[building_memory] remember_unit error: {e}')
+
+
 def get_historical_centroids_for_zips(zip_codes):
     """
     Pull all historically-delivered lat/lng points for a set of zip codes.
@@ -2327,6 +2431,9 @@ def init_db():
         "ALTER TABLE scan_sessions ADD COLUMN route_end_mode TEXT",
         "ALTER TABLE stops ADD COLUMN package_count INTEGER DEFAULT 1",
         "ALTER TABLE stops ADD COLUMN package_list TEXT",
+        # ── Unit number extraction + building memory ──
+        "ALTER TABLE scan_items ADD COLUMN unit TEXT",
+        "ALTER TABLE address_intel ADD COLUMN known_units TEXT DEFAULT '[]'",
         # ── QR Building Access feature ──
         "ALTER TABLE buildings ADD COLUMN building_code TEXT",
         "ALTER TABLE buildings ADD COLUMN name TEXT",
@@ -3315,6 +3422,7 @@ def scan_add():
     zip_code = data.get('zip', '').strip()
     if not address:
         return jsonify({'ok': False, 'error': 'Address is required'})
+    unit = (data.get('unit') or '').strip().upper() or extract_unit_number(address)
 
     # ─ Import-first fast path: zones locked, match by tracking ─
     db0 = get_db()
@@ -3400,17 +3508,30 @@ def scan_add():
         (ss_id,),
     ).fetchone()[0]
     db.execute(
-        """INSERT INTO scan_items (session_id, tracking, customer_name, address, zip_code, raw_json, dest_lat, dest_lng, scan_order)
-           VALUES (?,?,?,?,?,?,?,?,?)""",
-        (ss_id, tracking, name, address, zip_code, json.dumps(data), lat, lng, next_order)
+        """INSERT INTO scan_items (session_id, tracking, customer_name, address, zip_code, raw_json, dest_lat, dest_lng, scan_order, unit)
+           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+        (ss_id, tracking, name, address, zip_code, json.dumps(data), lat, lng, next_order, unit)
     )
     db.commit()
     new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
     db.close()
     if tracking and address:
         upsert_label_memory(tracking, name, address, zip_code, source='confirm')
+
+    # Building memory: no unit found on a known multi-unit building → flag now, not at the door
+    unit_warning = None
+    known_units = []
+    if not unit:
+        try:
+            known_units = get_known_units(address)
+            if known_units or is_known_multi_unit(address):
+                unit_warning = 'No unit number found — this looks like a multi-unit building. Enter it now before you leave.'
+        except Exception as e:
+            log.warning(f'[building_memory] scan_add check failed: {e}')
+
     return jsonify({'ok': True, 'count': next_order, 'scan_order': next_order, 'geocoded': lat is not None,
-                   'new_item_id': new_id, 'zip_warning': zip_warning})
+                   'new_item_id': new_id, 'zip_warning': zip_warning,
+                   'unit': unit, 'unit_warning': unit_warning, 'known_units': known_units})
 
 
 @app.route('/driver/scan/live-sort', methods=['GET'])
@@ -3453,11 +3574,13 @@ def scan_live_sort():
     packages = []
     order_map = _scan_order_map(items)
     for item in items:
+        item_unit = item['unit'] if 'unit' in item.keys() else None
         packages.append({
             'id':         item['id'],
             'tracking':   item['tracking'],
             'name':       item['customer_name'],
             'address':    item['address'],
+            'unit':       item_unit or extract_unit_number(item['address']),
             'lat':        item['dest_lat'],
             'lng':        item['dest_lng'],
             'scan_order': order_map[item['id']],
@@ -3867,10 +3990,11 @@ def scan_update_item(item_id):
     if not row:
         db.close()
         return jsonify({'ok': False, 'error': 'Package not found'})
+    unit = (data.get('unit') or '').strip().upper() or extract_unit_number(address)
     db.execute(
-        """UPDATE scan_items SET address=?, customer_name=?, zip_code=?, dest_lat=?, dest_lng=?
+        """UPDATE scan_items SET address=?, customer_name=?, zip_code=?, dest_lat=?, dest_lng=?, unit=?
            WHERE id=?""",
-        (address, name, zip_code, lat, lng, item_id),
+        (address, name, zip_code, lat, lng, unit, item_id),
     )
     db.commit()
     db.close()
@@ -3881,6 +4005,27 @@ def scan_update_item(item_id):
         'ok': True, 'geocoded': bool(lat), 'address': address, 'name': name,
         'issues': _address_quality_issues(address, lat, lng),
     })
+
+
+@app.route('/driver/scan/item/<int:item_id>/unit', methods=['POST'])
+def scan_set_unit(item_id):
+    """Set/fix the unit number on a scanned package (warehouse, before route build)."""
+    if 'driver_id' not in session:
+        return jsonify({'ok': False, 'error': 'not logged in'}), 401
+    data = request.get_json() or {}
+    unit = (data.get('unit') or '').strip().upper()
+    if not unit:
+        return jsonify({'ok': False, 'error': 'Unit number is required'})
+    db = get_db()
+    row = db.execute("SELECT address FROM scan_items WHERE id=?", (item_id,)).fetchone()
+    if not row:
+        db.close()
+        return jsonify({'ok': False, 'error': 'Package not found'})
+    db.execute("UPDATE scan_items SET unit=? WHERE id=?", (unit, item_id))
+    db.commit()
+    db.close()
+    remember_unit_number(row['address'], unit)
+    return jsonify({'ok': True, 'unit': unit})
 
 
 @app.route('/driver/scan/remove/<int:item_id>', methods=['POST'])
@@ -4525,6 +4670,12 @@ def scan_build_route():
         if len(trackings) > 1:
             tracking = f"{trackings[0]} (+{len(trackings) - 1})"
 
+        primary_unit = ''
+        if 'unit' in primary_item.keys() and primary_item['unit']:
+            primary_unit = primary_item['unit']
+        if not primary_unit:
+            primary_unit = extract_unit_number(primary_item['address'])
+
         stickers = ', '.join(f'#{n}' for n in sorted(scan_orders))
         notes = f"{len(items_in)} packages · Stickers: {stickers}" if len(items_in) > 1 else ''
         zone_letter = primary_meta.get('zone_letter') or _ss_val(primary_item, 'zone_letter')
@@ -4540,21 +4691,21 @@ def scan_build_route():
         try:
             db.execute(
                 """INSERT INTO stops
-                   (route_id, stop_number, address, customer_name, tracking, notes, dest_lat, dest_lng,
+                   (route_id, stop_number, address, unit, customer_name, tracking, notes, dest_lat, dest_lng,
                     status, token, zone_letter, scan_order, zone_num, zone_color, zone_emoji,
                     vehicle_zone_label, package_count, package_list)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (route_id, stop_num, primary_item['address'], customer_name, tracking, notes,
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (route_id, stop_num, primary_item['address'], primary_unit, customer_name, tracking, notes,
                  lat, lng, 'pending', token, zone_letter, scan_order, zone_num, zone_color,
                  zone_emoji, vehicle_zone_label, pkg_count, pkg_json)
             )
         except Exception:
             db.execute(
                 """INSERT INTO stops
-                   (route_id, stop_number, address, customer_name, tracking, notes, dest_lat, dest_lng,
+                   (route_id, stop_number, address, unit, customer_name, tracking, notes, dest_lat, dest_lng,
                     status, token, zone_letter)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-                (route_id, stop_num, primary_item['address'], customer_name, tracking, notes,
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (route_id, stop_num, primary_item['address'], primary_unit, customer_name, tracking, notes,
                  lat, lng, 'pending', token, zone_letter)
             )
     db.commit()
@@ -5145,10 +5296,20 @@ def stop_active(stop_id):
             stop = db.execute("SELECT * FROM stops WHERE id=?", (stop_id,)).fetchone()
             stop_dict = next((s for s in stops_enriched if s['id'] == stop_id), dict(stop))
     db.close()
+    # Building memory: quick-pick units when the unit number is missing
+    known_units = []
+    multi_unit = False
+    if not stop['unit']:
+        try:
+            known_units = get_known_units(stop['address'])
+            multi_unit = bool(known_units) or is_known_multi_unit(stop['address'])
+        except Exception as _e:
+            log.warning(f'[building_memory] stop_active lookup failed: {_e}')
     return render_template('stop_active.html', stop=stop, stop_meta=stop_dict,
         zone_summary=zone_summary, zone_stops=zone_stops,
         zone_position=zone_position, zone_delivered=zone_delivered,
-        current_zone=current_zone, gmaps_key=GOOGLE_MAPS_KEY, mapbox_token=MAPBOX_TOKEN)
+        current_zone=current_zone, gmaps_key=GOOGLE_MAPS_KEY, mapbox_token=MAPBOX_TOKEN,
+        known_units=known_units, multi_unit=multi_unit)
 
 @app.route('/driver/stop/<int:stop_id>/pin', methods=['POST'])
 def stop_pin(stop_id):
@@ -5199,6 +5360,9 @@ def stop_delivered(stop_id):
             record_address_delivery(stop['address'], zone_letter=zone_letter)
         except Exception as _ae:
             log.warning(f'[address_intel] delivery record failed: {_ae}')
+        # Building memory: confirmed delivery with a unit number — never ask twice
+        if stop['unit']:
+            remember_unit_number(stop['address'], stop['unit'])
 
     if route_id:
         route = db.execute("SELECT * FROM routes WHERE id=?", (route_id,)).fetchone()
@@ -5221,6 +5385,27 @@ def stop_delivered(stop_id):
     if next_stop:
         return redirect(url_for('stop_active', stop_id=next_stop['id']))
     return redirect(url_for('route_detail', route_id=route_id) if route_id else url_for('driver_dashboard'))
+
+@app.route('/driver/stop/<int:stop_id>/unit', methods=['POST'])
+def stop_set_unit(stop_id):
+    """Tap-to-add unit number from the stop_active screen. Saves to building memory."""
+    if 'driver_id' not in session:
+        return jsonify({'ok': False, 'error': 'not logged in'}), 401
+    data = request.get_json() or {}
+    unit = (data.get('unit') or '').strip().upper()
+    if not unit:
+        return jsonify({'ok': False, 'error': 'Unit number is required'})
+    db = get_db()
+    stop = db.execute("SELECT address FROM stops WHERE id=?", (stop_id,)).fetchone()
+    if not stop:
+        db.close()
+        return jsonify({'ok': False, 'error': 'Stop not found'})
+    db.execute("UPDATE stops SET unit=? WHERE id=?", (unit, stop_id))
+    db.commit()
+    db.close()
+    remember_unit_number(stop['address'], unit)
+    return jsonify({'ok': True, 'unit': unit})
+
 
 @app.route('/driver/stop/<int:stop_id>/failed', methods=['POST'])
 def stop_failed(stop_id):

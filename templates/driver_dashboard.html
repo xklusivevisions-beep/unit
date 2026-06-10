@@ -272,7 +272,7 @@
           <a href="/driver/stop/{{ stop.id }}/edit" class="text-decoration-none">
             <div class="fw-bold" style="font-size:0.9rem;color:#fff;">{{ stop.address[:38] }}{% if stop.address|length > 38 %}...{% endif %} <i class="fas fa-pencil-alt" style="font-size:0.65rem;color:#555;"></i></div>
           </a>
-          {% if stop.unit %}<small class="text-secondary">Unit {{ stop.unit }}</small>{% endif %}
+          {% if stop.unit %}<span style="display:inline-block;background:#f97316;color:#fff;border-radius:6px;padding:1px 8px;font-size:0.72rem;font-weight:800;margin-top:2px;">APT {{ stop.unit }}</span>{% endif %}
           {% if stop.customer_name %}<small class="text-secondary d-block">{{ stop.customer_name }}</small>{% endif %}
         </div>
         <div class="text-end ms-2">
@@ -322,6 +322,7 @@
             <span class="zone-route-badge" style="background:{{ z.color }};">{{ z.emoji }} {{ stop.zone_label_full or z.letter }}</span>
           </div>
           <div class="fw-bold" style="font-size:0.9rem;color:#fff;">{{ stop.address[:40] }}</div>
+          {% if stop.unit %}<span style="display:inline-block;background:#f97316;color:#fff;border-radius:6px;padding:1px 8px;font-size:0.72rem;font-weight:800;margin-top:2px;">APT {{ stop.unit }}</span>{% endif %}
           {% if stop.customer_name %}<small class="text-secondary d-block">{{ stop.customer_name }}</small>{% endif %}
         </div>
         <div class="text-end ms-2">
@@ -355,7 +356,7 @@
         <span class="sticker-badge" style="font-size:0.9rem;padding:4px 10px;">#{{ stop.scan_order or stop.stop_number }}</span>
         <div style="flex:1;">
           <div style="color:{{ stop.zone_color or '#94a3b8' }};font-weight:800;font-size:0.8rem;">{{ stop.zone_emoji or '' }} {{ stop.zone_label_full or '?' }} · Stop {{ stop.stop_number }}</div>
-          <div class="fw-bold" style="font-size:0.85rem;">{{ stop.address[:36] }}</div>
+          <div class="fw-bold" style="font-size:0.85rem;">{{ stop.address[:36] }}{% if stop.unit %} <span style="background:#f97316;color:#fff;border-radius:6px;padding:1px 7px;font-size:0.68rem;font-weight:800;">APT {{ stop.unit }}</span>{% endif %}</div>
         </div>
         {% if stop.status == 'pending' %}
         <a href="/driver/stop/{{ stop.id }}" class="btn btn-sm" style="background:#00ff88;color:#000;border-radius:8px;">Go</a>

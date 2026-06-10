@@ -237,6 +237,24 @@
                      color: #fed7aa; display: none; }
   .zip-warn-banner.show { display: block; }
 
+  /* Unit number badge + missing-unit warning */
+  .unit-badge { display: inline-block; background: #f97316; color: #fff; border-radius: 6px;
+                padding: 1px 7px; font-size: 0.7rem; font-weight: 800; margin-left: 6px;
+                vertical-align: middle; letter-spacing: 0.02em; }
+  .unit-warn-card { background: #422006; border: 1px solid #facc15; border-radius: 12px;
+                    padding: 12px 14px; margin-bottom: 10px; display: none; }
+  .unit-warn-card.show { display: block; }
+  .unit-warn-title { color: #fde047; font-size: 0.85rem; font-weight: 700; margin-bottom: 8px; }
+  .unit-pick-btn { background: #1f2937; border: 1px solid #facc15; color: #fde047;
+                   border-radius: 8px; padding: 8px 14px; font-size: 0.9rem; font-weight: 800;
+                   margin: 0 6px 6px 0; cursor: pointer; }
+  .unit-pick-btn:active { background: #facc15; color: #000; }
+  .unit-warn-row { display: flex; gap: 8px; margin-top: 6px; }
+  .unit-warn-row input { flex: 1; background: #111827; border: 1px solid #374151; color: #fff;
+                         border-radius: 8px; padding: 10px 12px; font-size: 1rem; }
+  .unit-warn-row button { background: #facc15; color: #000; border: none; border-radius: 8px;
+                          padding: 10px 16px; font-weight: 800; cursor: pointer; }
+
   /* Vehicle selector */
   .vehicle-bar { display: flex; align-items: center; justify-content: space-between;
                  background: #1f2937; border-radius: 12px; padding: 10px 14px;
@@ -404,6 +422,17 @@
   <!-- Zip warning banner -->
   <div class="zip-warn-banner" id="zip-warn-banner">
     ⚠️ <span id="zip-warn-text"></span>
+  </div>
+
+  <!-- Missing unit number warning (multi-unit building detected) -->
+  <div class="unit-warn-card" id="unit-warn-card">
+    <div class="unit-warn-title">⚠️ <span id="unit-warn-text"></span></div>
+    <div id="unit-known-picks"></div>
+    <div class="unit-warn-row">
+      <input type="text" id="unit-warn-input" placeholder="Apt / Unit # (e.g. 4B)" autocapitalize="characters">
+      <button onclick="saveUnitFromWarn()">Save</button>
+    </div>
+    <button onclick="dismissUnitWarn()" style="background:none;border:none;color:#9ca3af;font-size:0.75rem;margin-top:6px;cursor:pointer;text-decoration:underline;">Skip — no unit</button>
   </div>
 
   <!-- Zone flash banner (appears right after scan) -->
@@ -1498,7 +1527,7 @@ function refreshLiveSort() {
                   <span class="sticker-badge">#${sn}</span>
                   ${nameShort(pkg.name)}
                 </div>
-                <div class="pkg-addr">${pkg.address}</div>
+                <div class="pkg-addr">${pkg.address}${pkg.unit ? `<span class="unit-badge">APT ${pkg.unit}</span>` : ''}</div>
                 ${pkg.tracking ? `<div class="pkg-tracking">${pkg.tracking}</div>` : ''}
               </div>
               <button class="pkg-remove" onclick="removeItem(${pkg.id}, this)">✕</button>
@@ -2509,6 +2538,9 @@ function _finishAddResponse(data, name, address, tracking, zip) {
   }
   showToast('Package added ✓' + (data.geocoded ? ' 📍' : ''));
   if (tracking && address) rememberLabelLocally(tracking, name, address, zip);
+  if (data.unit_warning && data.new_item_id) {
+    showUnitWarn(data.new_item_id, data.unit_warning, data.known_units || [], address);
+  }
   if (data.scan_order && currentPhase !== 'optimized') showStickerPrompt(data.scan_order);
   lastScannedZone = null;
   lastAddedItemId = currentPhase === 'optimized' ? (data.new_item_id || null) : null;
@@ -2522,6 +2554,53 @@ function _finishAddResponse(data, name, address, tracking, zip) {
 function setLoadingText(msg) {
   const el = document.getElementById('loading-text');
   if (el) el.textContent = msg;
+}
+
+// ── Missing unit number prompt (building memory) ──
+let _unitWarnItemId = null;
+
+function showUnitWarn(itemId, warningText, knownUnits, address) {
+  _unitWarnItemId = itemId;
+  const card = document.getElementById('unit-warn-card');
+  document.getElementById('unit-warn-text').textContent =
+    (address ? address.split(',')[0] + ' — ' : '') + warningText;
+  const picks = document.getElementById('unit-known-picks');
+  picks.innerHTML = (knownUnits || []).map(u =>
+    `<button type="button" class="unit-pick-btn" onclick="pickKnownUnit('${_escHtml(u).replace(/'/g, '')}')">${_escHtml(u)}</button>`
+  ).join('');
+  document.getElementById('unit-warn-input').value = '';
+  card.classList.add('show');
+  card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  if (typeof navigator.vibrate === 'function') navigator.vibrate([60, 40, 60]);
+}
+
+function pickKnownUnit(u) {
+  document.getElementById('unit-warn-input').value = u;
+  saveUnitFromWarn();
+}
+
+function saveUnitFromWarn() {
+  const unit = document.getElementById('unit-warn-input').value.trim();
+  if (!unit) { showToast('Enter the unit number', true); return; }
+  if (!_unitWarnItemId) { dismissUnitWarn(); return; }
+  fetch(`/driver/scan/item/${_unitWarnItemId}/unit`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ unit }),
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (!data.ok) { showToast(data.error || 'Error', true); return; }
+    showToast(`Unit ${data.unit} saved ✓`);
+    dismissUnitWarn();
+    setTimeout(refreshLiveSort, 300);
+  })
+  .catch(() => showToast('Could not save unit', true));
+}
+
+function dismissUnitWarn() {
+  _unitWarnItemId = null;
+  document.getElementById('unit-warn-card').classList.remove('show');
 }
 
 function needsAddressSuggestions(addr) {
@@ -2975,7 +3054,7 @@ function appendPackageToList(pkg) {
   el.innerHTML = `
     <div class="pkg-info">
       <div class="pkg-name">${nameShort(pkg.name)}</div>
-      <div class="pkg-addr">${pkg.address}</div>
+      <div class="pkg-addr">${pkg.address}${pkg.unit ? `<span class="unit-badge">APT ${pkg.unit}</span>` : ''}</div>
       ${pkg.tracking ? `<div class="pkg-tracking">${pkg.tracking}</div>` : ''}
       <span class="pkg-num">#${pkgCount}</span>
     </div>

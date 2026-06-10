@@ -109,13 +109,41 @@
   }
   </script>
 
+  <!-- Unit number — front and center, never buried in the address -->
+  {% if stop.unit %}
+  <div class="card p-3 mb-3 text-center" id="unit-block" style="border:2px solid #f97316;background:#f9731612;">
+    <div style="font-size:0.7rem;letter-spacing:0.15em;color:#fdba74;font-weight:700;">APT / UNIT</div>
+    <div style="font-size:2.4rem;font-weight:900;color:#f97316;line-height:1.1;" id="unit-block-num">{{ stop.unit }}</div>
+  </div>
+  {% else %}
+  <div class="card p-3 mb-3" id="unit-missing-card" style="border:2px solid #ff3333;background:#ff333310;">
+    <div class="d-flex align-items-center justify-content-between mb-2">
+      <span style="background:#ff3333;color:#fff;border-radius:6px;padding:3px 10px;font-size:0.75rem;font-weight:800;">⚠️ NO UNIT #</span>
+      {% if multi_unit %}<small style="color:#fca5a5;">Multi-unit building</small>{% endif %}
+    </div>
+    {% if known_units %}
+    <div class="mb-2">
+      <small class="text-secondary d-block mb-1">Units seen here before — tap one:</small>
+      {% for u in known_units %}
+      <button type="button" onclick="setStopUnit('{{ u|replace("'", "") }}')"
+        style="background:#1f2937;border:1px solid #f97316;color:#fdba74;border-radius:8px;padding:8px 14px;font-weight:800;margin:0 6px 6px 0;">{{ u }}</button>
+      {% endfor %}
+    </div>
+    {% endif %}
+    <div class="d-flex gap-2">
+      <input type="text" id="unit-add-input" placeholder="Unit number? (saves for next time)"
+        autocapitalize="characters"
+        style="flex:1;background:#111827;border:1px solid #374151;color:#fff;border-radius:8px;padding:10px 12px;font-size:1rem;">
+      <button type="button" onclick="setStopUnit()"
+        style="background:#f97316;color:#fff;border:none;border-radius:8px;padding:10px 16px;font-weight:800;">Save</button>
+    </div>
+  </div>
+  {% endif %}
+
   <!-- Stop Info -->
   <div class="card p-3 mb-3">
     <div class="fw-bold fs-5 mb-1">{{ (stop.customer_name or 'Customer')|name_short }}</div>
     <div class="text-secondary">{{ stop.address }}</div>
-    {% if stop.unit %}
-      <div class="mt-1"><span style="background:#00ff8822;color:#00ff88;border-radius:6px;padding:2px 8px;font-size:0.8rem;font-weight:700;">Unit {{ stop.unit }}</span></div>
-    {% endif %}
 
     {% if stop.drop_spot %}
       <div class="mt-2 d-flex align-items-start gap-2">
@@ -849,6 +877,33 @@ function sendCustomMessage() {
     btn.disabled = false;
     btn.textContent = 'Send';
   });
+}
+
+// ── Unit number tap-to-add (building memory — saves for next time) ──
+function setStopUnit(pickedUnit) {
+  const input = document.getElementById('unit-add-input');
+  const unit = (pickedUnit || (input ? input.value : '')).trim();
+  if (!unit) { alert('Enter the unit number'); return; }
+  fetch('/driver/stop/' + STOP_ID + '/unit', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ unit })
+  })
+  .then(r => r.json())
+  .then(d => {
+    if (!d.ok) { alert(d.error || 'Could not save unit'); return; }
+    const card = document.getElementById('unit-missing-card');
+    if (card) {
+      card.outerHTML = `
+        <div class="card p-3 mb-3 text-center" style="border:2px solid #f97316;background:#f9731612;">
+          <div style="font-size:0.7rem;letter-spacing:0.15em;color:#fdba74;font-weight:700;">APT / UNIT</div>
+          <div style="font-size:2.4rem;font-weight:900;color:#f97316;line-height:1.1;">${d.unit}</div>
+          <small style="color:#10b981;">✓ Saved — UNIT remembers this building</small>
+        </div>`;
+    }
+    if (typeof navigator.vibrate === 'function') navigator.vibrate(60);
+  })
+  .catch(() => alert('Network error — try again'));
 }
 </script>
 {% endblock %}
