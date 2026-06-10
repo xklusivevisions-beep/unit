@@ -267,6 +267,10 @@
                        letter-spacing: .06em; margin-bottom: 4px; }
   .zone-banner-main { font-size: 1.3rem; font-weight: 800; color: #fff; }
   .zone-banner-sub  { font-size: 0.8rem; color: #9ca3af; margin-top: 2px; }
+  .zone-undo-btn { background: rgba(255,255,255,0.12); color: #fff; border: 1px solid rgba(255,255,255,0.25);
+    border-radius: 8px; padding: 6px 12px; font-size: 0.75rem; font-weight: 700; cursor: pointer;
+    flex-shrink: 0; margin-left: 8px; margin-top: 2px; }
+  .zone-undo-btn:active { background: rgba(239,68,68,0.35); border-color: #ef4444; }
 
   /* Zone pill on package card */
   .zone-pill { display: inline-flex; align-items: center; gap: 4px; font-size: 0.72rem;
@@ -415,6 +419,7 @@
         border:none;border-radius:10px;padding:8px 14px;
         font-size:0.8rem;font-weight:800;cursor:pointer;flex-shrink:0;margin-left:10px;margin-top:2px;
       ">🗺️ Go</button>
+      <button id="zone-undo-btn" class="zone-undo-btn" onclick="undoAutoAdd()" style="display:none;">Undo</button>
     </div>
   </div>
 
@@ -847,17 +852,32 @@ function handleImportFiles(input) {
 
 // ── Optimize Route (Phase 2) ──
 function reviewAddresses() {
+  const btn = document.getElementById('review-addr-btn');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Checking addresses…'; }
   fetch('/driver/scan/validate-addresses', { method: 'POST' })
-    .then(r => r.json())
+    .then(async r => {
+      const data = await r.json();
+      if (!r.ok || !data.ok) throw new Error(data.error || 'Server error');
+      return data;
+    })
     .then(data => {
-      if (!data.ok) { showToast(data.error || 'Error', true); return; }
       if (!data.flagged || !data.flagged.length) {
         showToast('All addresses look good ✓');
         return;
       }
       showAddressReviewModal(data.flagged);
     })
-    .catch(() => showToast('Could not check addresses', true));
+    .catch(err => showToast(err.message || 'Could not check addresses', true))
+    .finally(() => {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = '🔍 Review Addresses Before Optimize';
+      }
+    });
+}
+
+function _escHtml(s) {
+  return String(s || '').replace(/</g, '&lt;');
 }
 
 function showAddressReviewModal(flagged) {
@@ -865,11 +885,11 @@ function showAddressReviewModal(flagged) {
   list.innerHTML = flagged.map(item => `
     <div class="ar-item" id="ar-item-${item.id}">
       <div style="font-weight:700;color:#f59e0b;">#${item.scan_order || '?'}</div>
-      <div class="ar-addr">${(item.name ? item.name + ' — ' : '')}${item.address.replace(/</g,'&lt;')}</div>
+      <div class="ar-addr">${item.name ? _escHtml(item.name) + ' — ' : ''}${_escHtml(item.address)}</div>
       <div class="ar-issues">${(item.issue_labels || item.issues || []).join(' · ')}</div>
       ${(item.suggestions || []).map((s, i) => `
         <button type="button" class="ar-fix-btn" onclick="applyRouteAddressFix(${item.id}, ${i})">
-          ✓ ${s.confidence}% — ${s.address.replace(/</g,'&lt;')}
+          ✓ ${s.confidence || '?'}% — ${_escHtml(s.address)}
         </button>`).join('') || '<div style="font-size:0.72rem;color:#6b7280;">No suggestions — tap package in list to edit</div>'}
     </div>`).join('');
   window._flaggedAddressData = flagged;
@@ -905,17 +925,27 @@ function closeAddressReview() {
 }
 
 function optimizeRoute() {
+  const btn = document.getElementById('optimize-btn');
+  if (btn) btn.disabled = true;
   fetch('/driver/scan/validate-addresses', { method: 'POST' })
-    .then(r => r.json())
+    .then(async r => {
+      const data = await r.json();
+      if (!r.ok || !data.ok) throw new Error(data.error || 'Validation failed');
+      return data;
+    })
     .then(data => {
-      if (data.ok && data.flagged && data.flagged.length) {
+      if (data.flagged && data.flagged.length) {
         showAddressReviewModal(data.flagged);
         showToast(`${data.flagged.length} address(es) need review`, true);
         return;
       }
       runOptimize();
     })
-    .catch(() => runOptimize());
+    .catch(err => {
+      showToast(err.message || 'Could not validate — optimizing anyway', true);
+      runOptimize();
+    })
+    .finally(() => { if (btn) btn.disabled = false; });
 }
 
 function toggleEndAddress() {
@@ -1140,21 +1170,96 @@ function closeVehicleModal(e) {
 }
 
 let _zoneBannerAddress = '';
+let _autoAddUndoItemId = null;
+let _autoAddUndoTimer = null;
+let _zoneBannerDismissTimer = null;
+
 function showZoneBanner(zone) {
   if (!zone) return;
   const banner = document.getElementById('zone-banner');
   const color  = zone.color || '#3b82f6';
-  // Extract address from desc field if present
   _zoneBannerAddress = (zone.desc || '').split('•').pop().trim();
   banner.style.borderColor = color;
   banner.style.background  = color + '18';
   document.getElementById('zone-banner-main').textContent = zone.icon + '  ' + zone.label;
   document.getElementById('zone-banner-main').style.color = color;
-  document.getElementById('zone-banner-sub').textContent  = zone.desc;
+  document.getElementById('zone-banner-sub').textContent  = zone.desc || '';
   const navBtn = document.getElementById('zone-nav-btn');
   if (navBtn) navBtn.style.display = _zoneBannerAddress ? 'block' : 'none';
+  const undoBtn = document.getElementById('zone-undo-btn');
+  if (undoBtn) undoBtn.style.display = zone.showUndo ? 'inline-block' : 'none';
   banner.classList.add('show');
-  setTimeout(() => banner.classList.remove('show'), zonesLocked ? 8000 : 5000);
+  clearTimeout(_zoneBannerDismissTimer);
+  _zoneBannerDismissTimer = setTimeout(() => {
+    banner.classList.remove('show');
+    if (undoBtn) undoBtn.style.display = 'none';
+    _autoAddUndoItemId = null;
+  }, zone.showUndo ? 5000 : (zonesLocked ? 8000 : 5000));
+}
+
+function showAutoAddFlash(data, parsed) {
+  if (typeof navigator.vibrate === 'function') navigator.vibrate(60);
+  const sticker = data.scan_order || data.count || '?';
+  const desc = `${nameShort(parsed.name)} · ${parsed.address}`.trim();
+  showZoneBanner({
+    icon: '✓',
+    label: currentPhase === 'optimized'
+      ? `Added · Sticker #${sticker}`
+      : `Added · Write #${sticker} on package`,
+    desc,
+    color: '#10b981',
+    showUndo: true,
+  });
+  clearTimeout(_autoAddUndoTimer);
+  _autoAddUndoItemId = data.new_item_id;
+  _autoAddUndoTimer = setTimeout(() => { _autoAddUndoItemId = null; }, 5000);
+
+  if (currentPhase === 'optimized' && data.new_item_id) {
+    setTimeout(() => {
+      fetch('/driver/scan/live-sort')
+        .then(r => r.json())
+        .then(d => {
+          const pkg = (d.items || []).find(p => p.id === data.new_item_id);
+          if (!pkg || !pkg.zone_letter) return;
+          showZoneBanner({
+            icon: pkg.zone_emoji || '📦',
+            label: `Zone ${pkg.zone_letter} → ${pkg.vehicle_zone_label || ''} | #${pkg.scan_order || sticker}`,
+            desc: `${nameShort(pkg.name)} · ${pkg.address}`,
+            color: pkg.zone_color || '#10b981',
+            showUndo: !!_autoAddUndoItemId,
+          });
+        })
+        .catch(() => {});
+    }, 700);
+  }
+}
+
+function undoAutoAdd() {
+  if (!_autoAddUndoItemId) return;
+  const id = _autoAddUndoItemId;
+  _autoAddUndoItemId = null;
+  clearTimeout(_autoAddUndoTimer);
+  fetch(`/driver/scan/remove/${id}`, { method: 'POST' })
+    .then(r => r.json())
+    .then(data => {
+      if (!data.ok) { showToast(data.error || 'Could not undo', true); return; }
+      const el = document.getElementById('item-' + id);
+      if (el) el.remove();
+      pkgCount = Math.max(0, pkgCount - 1);
+      updateCount();
+      document.getElementById('zone-banner').classList.remove('show');
+      const undoBtn = document.getElementById('zone-undo-btn');
+      if (undoBtn) undoBtn.style.display = 'none';
+      if (pkgCount === 0) {
+        document.getElementById('pkg-list-inner').innerHTML =
+          '<div class="empty-state" id="empty-msg">No packages yet. Scan your first label above.</div>';
+        document.getElementById('live-map-section').style.display = 'none';
+      } else {
+        setTimeout(refreshLiveSort, 400);
+      }
+      showToast('Undone ✓');
+    })
+    .catch(() => showToast('Could not undo', true));
 }
 function navigateFromZone() {
   const address = _zoneBannerAddress;
@@ -1940,6 +2045,79 @@ function scanReadOk(d) {
   return true;
 }
 
+function labelReadScore(parsed) {
+  let score = 0;
+  const tracking = (parsed.tracking || '').trim();
+  const address = _cleanAddress(parsed.address || '');
+  const name = (parsed.name || '').trim();
+  if (tracking.length >= 12) score += 3;
+  if (isPlausibleAddress(address) && !_isDirtyAddress(address) && !isSenderAddress(address)) score += 5;
+  if (isPlausibleName(name)) score += 2;
+  return score;
+}
+
+async function tryAutoAddPackage(parsed, prepBlob) {
+  if (_addInFlight) return false;
+  if (labelReadScore(parsed) < 7) return false;
+
+  const name = (parsed.name || '').trim();
+  const address = _cleanAddress(parsed.address || '');
+  const tracking = (parsed.tracking || '').trim();
+  if (!address || isSenderAddress(address)) return false;
+
+  const zip = parsed.zip || (address.match(/\b(\d{5})\b/) || ['', ''])[1];
+  const addKey = (tracking || '') + '|' + address.toLowerCase().replace(/\s+/g, ' ');
+  if (_lastAddKey === addKey && Date.now() - _lastAddTime < 45000) {
+    document.getElementById('loading').style.display = 'none';
+    showToast('Already in list ✓');
+    return true;
+  }
+
+  _addInFlight = true;
+  setLoadingText('Adding…');
+  try {
+    if (navigator.onLine) {
+      const proc = await checkParsedLabel({ ...parsed, name, address, tracking, zip }, 'local');
+      if (proc.ok && proc.mode === 'duplicate') {
+        document.getElementById('loading').style.display = 'none';
+        showToast('Already scanned ✓');
+        setTimeout(refreshLiveSort, 300);
+        return true;
+      }
+      if (proc.ok && proc.mode === 'lookup') {
+        document.getElementById('loading').style.display = 'none';
+        handleProcessResponse(proc);
+        return true;
+      }
+    }
+
+    const data = await fetch('/driver/scan/add', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, address, tracking, zip }),
+    }).then(r => r.json());
+
+    document.getElementById('loading').style.display = 'none';
+    if (!data.ok) return false;
+
+    if (data.duplicate) {
+      showToast('Already in list ✓');
+      return true;
+    }
+
+    _lastAddKey = addKey;
+    _lastAddTime = Date.now();
+    _finishAddResponse(data, name, address, tracking, zip);
+    showAutoAddFlash(data, { name, address, tracking });
+    return true;
+  } catch (e) {
+    document.getElementById('loading').style.display = 'none';
+    return false;
+  } finally {
+    _addInFlight = false;
+  }
+}
+
 function hideLabelTapPanel() {
   const panel = document.getElementById('label-tap-panel');
   if (panel) panel.style.display = 'none';
@@ -2595,6 +2773,9 @@ async function processBlob(blob) {
   const memHit = parsed.tracking ? lookupLocalLabelMemory(parsed.tracking) : null;
   if (memHit && memHit.address) {
     parsed = { ...parsed, name: memHit.name || parsed.name, address: memHit.address, zip: memHit.zip || parsed.zip };
+    if (labelReadScore(parsed) >= 7) {
+      if (await tryAutoAddPackage(parsed, prepBlob)) return;
+    }
     setLoadingText('Remembered package ✓');
     try {
       const data = await checkParsedLabel(parsed, 'memory');
@@ -2609,6 +2790,9 @@ async function processBlob(blob) {
   const partialLocal = isPlausibleAddress(parsed.address) || hasTracking;
 
   if (goodLocal) {
+    if (labelReadScore(parsed) >= 7) {
+      if (await tryAutoAddPackage(parsed, prepBlob)) return;
+    }
     setLoadingText('Checking…');
     try {
       const data = await checkParsedLabel(parsed, 'local');

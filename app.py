@@ -3780,6 +3780,14 @@ def scan_validate_addresses():
     """Flag bad/informal addresses before route optimization."""
     if 'driver_id' not in session:
         return jsonify({'ok': False, 'error': 'not logged in'}), 401
+    try:
+        return _scan_validate_addresses_impl()
+    except Exception:
+        log.exception('scan_validate_addresses failed')
+        return jsonify({'ok': False, 'error': 'Could not validate addresses'}), 500
+
+
+def _scan_validate_addresses_impl():
     db = get_db()
     today = datetime.now().strftime('%Y-%m-%d')
     ss = db.execute(
@@ -3810,29 +3818,17 @@ def scan_validate_addresses():
         )
         if not issues:
             continue
-        suggestions = infer_address_suggestions(
-            tracking=item.get('tracking') or '',
-            partial_address=item.get('address') or '',
-            name=item.get('customer_name') or '',
-            zip_code=item.get('zip_code') or '',
-            limit=4,
-        )
-        if centroid and suggestions:
-            filtered = []
-            for s in suggestions:
-                lat, lng = _census_geocode(s['address'])
-                if lat and lng:
-                    try:
-                        if geodesic((lat, lng), centroid).miles <= 40:
-                            s = dict(s)
-                            s['confidence'] = min(99, s.get('confidence', 0) + 10)
-                            filtered.append(s)
-                    except Exception:
-                        filtered.append(s)
-                else:
-                    filtered.append(s)
-            if filtered:
-                suggestions = filtered
+        suggestions = []
+        try:
+            suggestions = infer_address_suggestions(
+                tracking=item.get('tracking') or '',
+                partial_address=item.get('address') or '',
+                name=item.get('customer_name') or '',
+                zip_code=item.get('zip_code') or '',
+                limit=3,
+            )
+        except Exception as e:
+            log.warning(f'validate-addresses suggestions failed id={item.get("id")}: {e}')
         flagged.append({
             'id': item['id'],
             'scan_order': item.get('scan_order'),

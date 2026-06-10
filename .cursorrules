@@ -68,10 +68,93 @@ PHASE 4 — DRIVE: Sequential route. No backtracking.
 - Apartment complexes and recurring addresses auto-recognized
 - Goal: by last scan, system semi-predicts full route
 
+## ─────────────────────────────────────────────────────────
+## SPOKE-STYLE SCAN-TO-ROUTE — FEATURE BUILD SPEC
+## ─────────────────────────────────────────────────────────
+## Goal: replicate what makes Spoke feel instant and smooth.
+## Spoke = Circuit Route Planner (rebranded). It uses:
+##   - Apple Live Text (native iOS OCR) — no server call, result in <1 second
+##   - Google Maps Route Optimization API — not OSRM, real TSP solver
+##   - Auto-add on high confidence — no confirmation screen if read is clean
+##   - Real-time ETA recalc after each delivery
+##
+## UNIT equivalent implementation:
+##
+## [1] AUTO-ADD ON HIGH CONFIDENCE (no confirmation tap)
+##   - After Tesseract + address parse, score the result:
+##       score = 0
+##       +3 if tracking length >= 12
+##       +5 if isPlausibleAddress(address) && !_isDirtyAddress(address)
+##       +2 if isPlausibleName(name)
+##   - If score >= 7: skip preview card entirely, auto-POST to /driver/scan/add
+##     Show a green flash banner with zone assignment ("Zone B - Cargo Back")
+##     instead of the preview card confirm button.
+##   - If score < 7: show preview card as normal (current behavior).
+##   - Add a small "Undo" button in the zone banner (5-second window) in case
+##     auto-add grabbed the wrong package.
+##
+## [2] REPLACE OSRM WITH GOOGLE MAPS DIRECTIONS API (route optimization)
+##   - In app.py, find all OSRM calls (search for "osrm" or "router.osrm.org")
+##   - Replace with Google Maps Directions API:
+##       endpoint: https://maps.googleapis.com/maps/api/directions/json
+##       method: GET
+##       params: origin, destination, waypoints (pipe-separated),
+##               optimize:waypoints=true, key=GOOGLE_MAPS_API_KEY
+##   - "optimize:waypoints=true" triggers Google TSP solver (same thing Spoke uses)
+##   - Read GOOGLE_MAPS_API_KEY from env var (os.environ.get('GOOGLE_MAPS_API_KEY', ''))
+##   - If key is missing or call fails: fall back to existing OSRM logic (no prod breakage)
+##   - Return: ordered stop list, total distance (meters), total duration (seconds)
+##   - Convert to miles + minutes before storing in DB
+##   - Use Directions API NOT the newer Routes API (simpler, proven)
+##
+## [3] REAL-TIME ETA RECALC AFTER EACH DELIVERY
+##   - In stop_active.html, after marking a stop complete:
+##     POST to /driver/route/<id>/eta-refresh
+##   - Backend: re-run Directions API from current GPS position through remaining stops
+##     Return updated ETAs for all remaining stops
+##   - Frontend: update ETA display without page reload (AJAX, update DOM)
+##   - If offline: recalc from last known position using haversine / avg speed
+##
+## [4] CAMERA SCAN SPEED - REDUCE TAPS
+##   - Current: tap placeholder -> tap capture -> wait for OCR -> see preview
+##   - Target: camera opens -> frame auto-detects label -> captures automatically
+##   - Implement: after camera stream starts, run Tesseract.js on a frame every 1.5s
+##     When OCR score >= 7, auto-capture (stop loop, process the frame)
+##     Show a "Scanning..." pulse indicator while the loop is running
+##   - Keep "Manual Capture" button as fallback (still shows capture-btn)
+##   - Feels like Spoke's Live Text: point camera -> done
+##
+## [5] ZONE FLASH BANNER (after auto-add)
+##   - Full-width colored banner slides in from top, auto-dismisses in 4s
+##   - Shows: zone emoji + zone letter + vehicle spot name + sticker number
+##     Example: "Zone B -> Back Seat Right | #12 | Undo"
+##   - Color matches zone color from clustering
+##   - Haptic: navigator.vibrate(60) on auto-add success
+##
+## IMPLEMENTATION ORDER:
+##   Step 1 - Auto-add on high confidence (biggest UX gain, no API key needed)
+##   Step 2 - Camera auto-capture loop (makes scan feel like Live Text)
+##   Step 3 - Zone flash banner (ties steps 1+2 together visually)
+##   Step 4 - Google Maps routing swap (needs GOOGLE_MAPS_API_KEY in env)
+##   Step 5 - Real-time ETA recalc (depends on Step 4)
+##
+## FILES TO TOUCH:
+##   - templates/scan.html   -> Steps 1, 2, 3 (JS changes only)
+##   - app.py                -> Step 4 (routing swap) + Step 5 (eta-refresh endpoint)
+##   - render.yaml           -> add GOOGLE_MAPS_API_KEY env var placeholder
+##
+## DO NOT BREAK:
+##   - Existing preview card flow (still needed when score < 7)
+##   - Import-first panel (screenshot import still works)
+##   - Zone lock / optimize flow
+##   - Vehicle zone assignments
+##   - OSRM fallback (must stay active when Google key not set)
+## ─────────────────────────────────────────────────────────
+
 ## Do Not Touch
-- OSRM routing integration (working)
 - Vehicle zone definitions (suv_midsize confirmed correct)
 - Claude Vision address extraction logic
+- OSRM fallback logic (keep as fallback when Google Maps key is absent)
 
 ## Constants
 - ZONE_LOCK_THRESHOLD = 20 (legacy — being phased out)
