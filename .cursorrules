@@ -151,6 +151,74 @@ PHASE 4 — DRIVE: Sequential route. No backtracking.
 ##   - OSRM fallback (must stay active when Google key not set)
 ## ─────────────────────────────────────────────────────────
 
+## ─────────────────────────────────────────────────────────
+## SPEED X POD (PROOF OF DELIVERY) - 3-PHOTO CAPTURE FLOW
+## ─────────────────────────────────────────────────────────
+##
+## Speed X requires EXACTLY 3 photos before a delivery can be marked complete.
+## Confirmed from real delivery photos (Director X's actual workflow):
+##
+##   PHOTO 1 - Package label close-up
+##             Tracking number must be clearly visible (e.g. SPXDTW036626060..)
+##             Driver holds the package and shoots the label
+##
+##   PHOTO 2 - Package at the door, wide shot
+##             Shows full scene: package placed at door, house/building visible
+##             Address numbers should be readable in frame
+##
+##   PHOTO 3 - Address numbers close-up
+##             Tight shot of the physical house/unit number on the building
+##             Confirms the correct address was delivered to
+##
+## BUILD THIS INTO stop_active.html:
+##
+##   1. Replace the "Mark Delivered" button with a 3-step photo stepper
+##   2. Show clear progress: Step 1 of 3 / Step 2 of 3 / Step 3 of 3
+##   3. Each step shows a large prompt card with icon + instruction:
+##        Step 1: camera icon + "Shoot the package label - tracking number visible"
+##        Step 2: door icon  + "Package at the door - show full placement + house"
+##        Step 3: numbers icon + "Close-up of address numbers on the building"
+##   4. Tap prompt -> <input type=file accept=image/* capture=environment> fires
+##      (forces rear camera directly, no gallery)
+##   5. After each shot: thumbnail preview with RETAKE and USE PHOTO buttons
+##   6. After all 3 confirmed: green "Mark Delivered" button activates
+##   7. On Mark Delivered:
+##      - Save all 3 photos to device camera roll (download via JS blob URL)
+##      - Store base64 thumbnails in DB against the stop (pod_photo_1/2/3 columns)
+##      - POST to /driver/stop/<id>/deliver with photo data
+##      - Redirect to next stop
+##
+## BACKEND CHANGES (app.py):
+##   - ALTER TABLE stops ADD COLUMN pod_photo_1 TEXT (base64 thumbnail)
+##   - ALTER TABLE stops ADD COLUMN pod_photo_2 TEXT
+##   - ALTER TABLE stops ADD COLUMN pod_photo_3 TEXT
+##   - ALTER TABLE stops ADD COLUMN pod_captured_at TEXT
+##   - /driver/stop/<id>/deliver endpoint: accept pod photos in POST body
+##   - /driver/stop/<id>/pod GET: return the 3 thumbnails for review
+##
+## ROUTE LOG VIEW:
+##   - In route_log.html or route_detail.html, show POD thumbnails per stop
+##   - Driver can review all 3 photos per stop before batch uploading to Speed X
+##   - Display in delivery order so Speed X upload is systematic
+##
+## END OF DAY WORKFLOW (no Speed X API needed):
+##   - All 3 photos auto-downloaded to camera roll during delivery
+##   - Driver opens Speed X once at end of day
+##   - Selects photos from camera roll in order (they are timestamped + GPS tagged)
+##   - UNIT route log confirms which photos go to which stop
+##
+## GRACEFUL DEGRADATION:
+##   - If camera permission denied: show "Allow camera in Settings" message
+##     but also offer "Skip Photos" escape hatch (for edge cases)
+##   - Never block marking a stop delivered permanently
+##   - If photo storage fails: still mark delivered, log the error
+##
+## DO NOT CHANGE:
+##   - Existing failed/undo stop logic
+##   - En-route flow or GPS tracking
+##   - SMS notification timing
+## ─────────────────────────────────────────────────────────
+
 ## Do Not Touch
 - Vehicle zone definitions (suv_midsize confirmed correct)
 - Claude Vision address extraction logic
