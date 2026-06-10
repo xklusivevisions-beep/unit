@@ -5331,6 +5331,37 @@ def route_clear(route_id):
     db.close()
     return redirect(url_for('driver_dashboard'))
 
+
+@app.route('/driver/route/<int:route_id>/reset', methods=['POST'])
+def route_reset(route_id):
+    """Reset all stops back to pending without deleting the route.
+    Keeps zone assignments, sticker numbers, addresses, and stop order.
+    Use this to re-sort packages into bags and restart delivery from scratch."""
+    if 'driver_id' not in session:
+        return jsonify({'ok': False, 'error': 'not logged in'}), 401
+    db = get_db()
+    route = db.execute(
+        "SELECT * FROM routes WHERE id=? AND driver_id=?",
+        (route_id, session['driver_id'])
+    ).fetchone()
+    if not route:
+        db.close()
+        return jsonify({'ok': False, 'error': 'route not found'}), 404
+    db.execute(
+        """UPDATE stops
+           SET status='pending',
+               driver_lat=NULL, driver_lng=NULL,
+               approach_sms_sent=0,
+               sms_blast_sent=0
+           WHERE route_id=?""",
+        (route_id,)
+    )
+    db.commit()
+    count = db.execute("SELECT COUNT(*) FROM stops WHERE route_id=?", (route_id,)).fetchone()[0]
+    db.close()
+    log.info(f'[route_reset] route {route_id} reset — {count} stops back to pending')
+    return jsonify({'ok': True, 'reset': count})
+
 # ─── ADDRESS SUGGESTIONS (internal DB) ────────────────────────
 
 

@@ -96,11 +96,17 @@
           <div class="fw-bold" style="color:#00ff88;">{{ route.name }}</div>
           <small class="text-secondary">{{ stops|length }} stops total</small>
         </div>
+        <!-- Reset route (keeps zones + stickers, clears delivery progress) -->
+        <button class="btn btn-sm fw-bold" id="reset-route-btn"
+          onclick="resetRoute({{ route.id }})"
+          style="background:#f59e0b22;color:#f59e0b;border:1px solid #f59e0b44;border-radius:10px;margin-right:4px;">
+          <i class="fas fa-undo me-1"></i>Revert
+        </button>
         <form method="POST" action="/driver/route/{{ route.id }}/clear" style="display:inline;">
           <button type="submit" class="btn btn-sm fw-bold"
-            onclick="return confirm('Clear all stops and start over?')"
+            onclick="return confirm('DELETE the entire route? This cannot be undone.')"
             style="background:#ff333322;color:#ff4444;border:1px solid #ff333344;border-radius:10px;">
-            <i class="fas fa-trash-alt me-1"></i>Clear
+            <i class="fas fa-trash-alt me-1"></i>Delete
           </button>
         </form>
         {% if not route.blast_sent %}
@@ -722,6 +728,33 @@ function animateValue(el, newText) {
     el.textContent = newText;
     el.style.transform = 'scale(1)';
   }, 120);
+}
+
+function resetRoute(routeId) {
+  if (!confirm('Revert all stops to pending?\n\nZone assignments and sticker numbers are kept.\nDelivery progress will be cleared.')) return;
+  const btn = document.getElementById('reset-route-btn');
+  btn.disabled = true;
+  btn.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Reverting…';
+  fetch('/driver/route/' + routeId + '/reset', { method: 'POST' })
+    .then(r => r.json())
+    .then(data => {
+      if (data.ok) {
+        btn.innerHTML = '<i class="fas fa-check me-1"></i>Reverted';
+        btn.style.background = '#00ff8822';
+        btn.style.color = '#00ff88';
+        btn.style.borderColor = '#00ff8844';
+        setTimeout(() => location.reload(), 800);
+      } else {
+        alert('Reset failed: ' + (data.error || 'unknown error'));
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-undo me-1"></i>Revert';
+      }
+    })
+    .catch(() => {
+      alert('Could not connect. Try again.');
+      btn.disabled = false;
+      btn.innerHTML = '<i class="fas fa-undo me-1"></i>Revert';
+    });
 }
 
 function refreshEarnings() {
