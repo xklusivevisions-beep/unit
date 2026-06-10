@@ -291,6 +291,77 @@ PHASE 4 — DRIVE: Sequential route. No backtracking.
 ##   - address_intel table - only ADD columns, don't restructure
 ## ─────────────────────────────────────────────────────────
 
+## ─────────────────────────────────────────────────────────
+## RESIDENT PHONE AUTO-MATCH + ONE-TIME CAPTURE
+## ─────────────────────────────────────────────────────────
+##
+## PROBLEM:
+## Driver has to open Speed X app at every stop to get the customer phone number.
+## Speed X doesn't put phone numbers on the label. It lives inside their app.
+## UNIT needs to eliminate this lookup entirely.
+##
+## THE FIX — 2 layers:
+##
+## LAYER 1 — AUTO-MATCH ON DELIVERY (zero effort when resident is known)
+##
+##   When a stop is loaded in stop_active.html:
+##   - Query residents table: match on address + unit number
+##     SELECT * FROM residents WHERE address LIKE ? AND unit = ?
+##     (fuzzy match on address — strip apt/unit suffix before comparing)
+##   - If match found AND resident.phone is not null:
+##     -> Phone number is pre-filled on the stop. SMS send button is live.
+##     -> Show resident name + phone at top of stop screen
+##     -> "On the way" SMS fires automatically when driver hits Start on that stop
+##     -> No lookup, no switching apps, no typing
+##   - Also match on customer_name from the scan if address match is ambiguous
+##     (some buildings have multiple residents)
+##
+## LAYER 2 — ONE-TIME CAPTURE PROMPT (10 seconds, saves forever)
+##
+##   When stop_active loads and NO resident phone is found:
+##   - Show a non-blocking prompt card on the stop screen:
+##
+##       [ Add customer phone? ]  <- tappable card, not a modal
+##       "No number on file for this address.
+##        Add it once — UNIT remembers it forever."
+##       [ phone input field ]  [ Save & Notify ]
+##
+##   - Card sits below the address/navigation section, doesn't block delivery flow
+##   - Driver can skip it (X button) and deliver without a number
+##   - If driver enters the number:
+##     -> Save to residents table (address, unit, phone, customer_name from stop)
+##     -> Immediately send "on the way" SMS
+##     -> That address is now permanently in the system
+##   - Input is tel type, numeric keyboard opens automatically on iOS
+##   - After Save: card collapses, confirmation shows "Saved. SMS sent."
+##
+## BUILDING UP OVER TIME:
+##   - Every delivery where driver adds a number populates residents table
+##   - QR code scans from building flyers also populate residents table
+##   - Both sources merge — same table, same auto-match logic
+##   - After 2-3 weeks of routes: most frequent addresses pre-filled
+##   - After 1-2 months: Speed X phone lookup is completely obsolete
+##
+## DASHBOARD INDICATOR:
+##   - On driver_dashboard.html stop list: show a phone icon on stops
+##     where a resident phone is already on file (green = has number,
+##     grey = no number yet)
+##   - Gives driver a visual heads-up before they even leave the warehouse
+##     which stops will need the manual capture step
+##
+## BACKEND:
+##   - No new tables needed — residents table already has phone, address, unit
+##   - Add helper function: get_resident_for_stop(stop_id) — returns resident
+##     or None. Used by stop_active route and dashboard route.
+##   - On stop_active POST (deliver): if phone submitted in form, upsert resident
+##   - Pass resident object to stop_active.html template
+##
+## DO NOT CHANGE:
+##   - Existing resident portal or QR signup flow
+##   - SMS sending logic (Textbelt/Twilio) — just wire it to the auto-match
+##   - residents table schema — only INSERT/UPDATE, no structural changes
+## ─────────────────────────────────────────────────────────
+
 ## Do Not Touch
 - Vehicle zone definitions (suv_midsize confirmed correct)
 - Claude Vision address extraction logic (extend it, don't rewrite it)
