@@ -1452,6 +1452,84 @@ def _osrm_trip(pkgs, start=None, end=None, timeout=12):
     return ordered, dist, dur
 
 
+def _street_name_key(address):
+    """Street name only (no house number, no unit) — for same-street sequencing."""
+    base = _street_base(address)
+    if not base:
+        return ''
+    first = base.split(',')[0].strip()
+    m = re.match(r'^[\d-]+\s+(.*)$', first)
+    return (m.group(1) if m else first).strip()
+
+
+def _group_same_street_runs(ordered):
+    """Pull stops on the same street together so they're delivered back-to-back.
+
+    Keeps the optimizer's order for first occurrences; later stops on an
+    already-visited street are moved up to follow it. Only used within a
+    single compact zone so the distance cost is negligible.
+    """
+    if len(ordered) <= 2:
+        return ordered
+    result, used = [], set()
+    for i, s in enumerate(ordered):
+        if i in used:
+            continue
+        result.append(s)
+        used.add(i)
+        sk = _street_name_key(s.get('address', ''))
+        if not sk:
+            continue
+        for j in range(i + 1, len(ordered)):
+            if j in used:
+                continue
+            if _street_name_key(ordered[j].get('address', '')) == sk:
+                result.append(ordered[j])
+                used.add(j)
+    return result
+
+
+def _serpentine_zone_order(zone_lists, start=None, end=None):
+    """Chain geographic zones into a sweep (S-curve): finish one area, move to
+    the adjacent one, never bounce back. Greedy nearest-centroid ordering.
+
+    - With a start point: sweep outward from the start.
+    - With only an end point: chain backwards from the end, then reverse.
+    - With neither: sweep from the northernmost zone downward.
+    """
+    if len(zone_lists) <= 1:
+        return zone_lists
+    cents = [
+        {'lat': sum(s['lat'] for s in zl) / len(zl),
+         'lng': sum(s['lng'] for s in zl) / len(zl)}
+        for zl in zone_lists
+    ]
+    remaining = list(range(len(zone_lists)))
+    order = []
+    reverse_at_end = False
+
+    if start and start.get('lat') is not None:
+        cur = {'lat': float(start['lat']), 'lng': float(start['lng'])}
+    elif end and end.get('lat') is not None:
+        cur = {'lat': float(end['lat']), 'lng': float(end['lng'])}
+        reverse_at_end = True
+    else:
+        first = max(remaining, key=lambda i: cents[i]['lat'])
+        remaining.remove(first)
+        order.append(first)
+        cur = cents[first]
+
+    while remaining:
+        nxt = min(remaining, key=lambda i: _dsq(cur, cents[i]))
+        remaining.remove(nxt)
+        order.append(nxt)
+        cur = cents[nxt]
+
+    if reverse_at_end:
+        order.reverse()
+    return [zone_lists[i] for i in order]
+
+
 def osrm_optimize_full_route(pkgs, start=None, end=None):
     """
     Globally optimize ALL stops in a single OSRM call (or chunked for large routes).
@@ -1515,11 +1593,14 @@ def osrm_optimize_segment(pkgs):
 
 def build_optimized_route(geocoded, start=None, end=None):
     """
-    Route optimization pipeline:
+    Cluster-first, route-second optimization (zone sweep):
     1. Group packages at same building into one routable stop
-    2. OSRM optimize stops globally (with optional start/end depot)
-    3. Assign zones as sequential chunks of the optimized stop order
-    4. Expand back to per-package list (same building = same zone, consecutive orders)
+    2. K-means geographic zones — compact block-level areas, never split
+    3. Serpentine zone chain — finish one zone, move to the adjacent one (S-curve)
+    4. Per-zone OSRM TSP, entering where the previous zone exited and
+       exiting toward the next zone; same-street stops pulled back-to-back
+    5. Zone letters follow drive order (A = first zone driven)
+    6. Expand back to per-package list (same building = same zone, consecutive orders)
 
     Returns (sorted_pkgs, total_dist_m, total_dur_s)
     """
@@ -1553,20 +1634,60 @@ def build_optimized_route(geocoded, start=None, end=None):
                                     'lat': p.get('lat'), 'lng': p.get('lng'), 'address': p.get('address', '')})
                   for p in geocoded if p.get('lat') and p.get('lng')]
 
-    ordered_stops, total_dist, total_dur = osrm_optimize_full_route(routable, start=start, end=end)
-    n_stops = len(ordered_stops)
+    # ── Geographic zones: k-means on stop coords (block-level clusters) ──
     k = calc_num_zones_adaptive(routable)
-    zone_size = max(1, math.ceil(n_stops / k)) if n_stops else 1
+    if k <= 1 or len(routable) <= 2:
+        zone_lists = [routable]
+    else:
+        assignments = kmeans_geo(routable, k)
+        clusters = {}
+        for stop_pt, ci in zip(routable, assignments):
+            clusters.setdefault(ci, []).append(stop_pt)
+        zone_lists = _serpentine_zone_order(
+            [clusters[ci] for ci in sorted(clusters)], start=start, end=end
+        )
 
+    zone_cents = [
+        {'lat': sum(s['lat'] for s in zl) / len(zl),
+         'lng': sum(s['lng'] for s in zl) / len(zl)}
+        for zl in zone_lists
+    ]
+
+    # ── Per-zone OSRM ordering, chained zone-to-zone (the S-sweep) ──
+    ordered_stops = []
+    total_dist, total_dur = 0, 0
+    prev_pt = start
+    for zi, zone_stops in enumerate(zone_lists):
+        next_hint = zone_cents[zi + 1] if zi + 1 < len(zone_lists) else end
+        try:
+            if len(zone_stops) > OSRM_MAX_WAYPOINTS:
+                ordered, dist, dur = osrm_optimize_full_route(zone_stops, start=prev_pt, end=next_hint)
+            else:
+                ordered, dist, dur = _osrm_trip(zone_stops, start=prev_pt, end=next_hint)
+        except Exception as e:
+            log.warning(f'[zone_sweep] zone {zi} OSRM failed ({e}), using NN')
+            ordered, dist, dur = _nn_sort(zone_stops, start=prev_pt), 0, 0
+        ordered = _group_same_street_runs(ordered)
+        for s in ordered:
+            s['_zone_seq'] = zi
+        ordered_stops.extend(ordered)
+        total_dist += dist
+        total_dur += dur
+        if ordered:
+            prev_pt = {'lat': ordered[-1]['lat'], 'lng': ordered[-1]['lng']}
+
+    n_stops = len(ordered_stops)
     result = []
     delivery_order = 1
+    zone_local_count = {}
     for si, stop_pt in enumerate(ordered_stops):
         group = stop_pt.get('_group') or stop_pt
         pkgs = sorted(group.get('packages', [stop_pt]),
                       key=lambda x: x.get('scan_order') or x.get('id') or 0)
-        zone_seq = min(si // zone_size, k - 1)
-        letter = chr(65 + zone_seq)
-        local_num = (si % zone_size) + 1
+        zone_seq = stop_pt.get('_zone_seq', 0)
+        letter = chr(65 + min(zone_seq, 25))
+        zone_local_count[zone_seq] = zone_local_count.get(zone_seq, 0) + 1
+        local_num = zone_local_count[zone_seq]
         color = ZONE_COLORS.get(letter, {'hex': '#6b7280', 'emoji': '⚪'})
         for p in pkgs:
             conf = p.get('_zone_confidence', 0.0)
