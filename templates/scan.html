@@ -112,7 +112,18 @@
   .ar-fix-btn { display: block; width: 100%; text-align: left; padding: 8px 10px; margin-top: 4px;
                 background: #0f172a; border: 1px solid #374151; border-radius: 8px; color: #93c5fd;
                 font-size: 0.78rem; cursor: pointer; }
-  .pkg-edit { background: none; border: none; color: #60a5fa; font-size: 0.75rem; cursor: pointer; padding: 4px 8px; }
+  .ar-fix-btn.manual { border-color: #60a5fa; color: #60a5fa; font-weight: 700; }
+  .ar-item.ar-fixed { border-color: #10b981; }
+  .ar-edit-form { margin-top: 10px; padding-top: 10px; border-top: 1px solid #374151; }
+  .ar-edit-form input {
+    width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid #4b5563;
+    background: #0f172a; color: #fff; font-size: 0.88rem; margin-bottom: 8px;
+  }
+  .ar-edit-form button {
+    width: 100%; padding: 12px; border: none; border-radius: 10px;
+    background: #10b981; color: #fff; font-weight: 700; font-size: 0.88rem; cursor: pointer;
+  }
+  .pkg-edit { background: none; border: none; color: #60a5fa; font-size: 0.75rem; cursor: pointer; padding: 4px 8px; flex-shrink: 0; }
 
   /* Loading spinner */
   #loading { display: none; text-align: center; padding: 24px; color: #9ca3af; }
@@ -678,7 +689,7 @@
   <div id="addr-review-bg" onclick="if(event.target===this)closeAddressReview()">
     <div id="addr-review-modal">
       <h2>⚠️ Fix addresses before optimizing</h2>
-      <p style="font-size:0.78rem;color:#9ca3af;margin:0 0 14px;">These stops may not exist or look wrong. Tap a suggestion to auto-correct.</p>
+      <p style="font-size:0.78rem;color:#9ca3af;margin:0 0 14px;">Tap <strong>Fix address</strong> on any stop to correct it here — your scans are kept.</p>
       <div id="addr-review-list"></div>
       <button onclick="closeAddressReview()" style="width:100%;padding:14px;margin-top:8px;background:#374151;color:#fff;border:none;border-radius:12px;font-weight:700;">Done reviewing</button>
       <button onclick="closeAddressReview(); runOptimize();" style="width:100%;padding:14px;margin-top:8px;background:#10b981;color:#fff;border:none;border-radius:12px;font-weight:700;">Optimize anyway →</button>
@@ -914,15 +925,90 @@ function showAddressReviewModal(flagged) {
   list.innerHTML = flagged.map(item => `
     <div class="ar-item" id="ar-item-${item.id}">
       <div style="font-weight:700;color:#f59e0b;">#${item.scan_order || '?'}</div>
-      <div class="ar-addr">${item.name ? _escHtml(item.name) + ' — ' : ''}${_escHtml(item.address)}</div>
+      <div class="ar-addr" id="ar-addr-${item.id}">${item.name ? _escHtml(item.name) + ' — ' : ''}${_escHtml(item.address)}</div>
       <div class="ar-issues">${(item.issue_labels || item.issues || []).join(' · ')}</div>
       ${(item.suggestions || []).map((s, i) => `
-        <button type="button" class="ar-fix-btn" onclick="applyRouteAddressFix(${item.id}, ${i})">
+        <button type="button" class="ar-fix-btn" onclick="event.stopPropagation(); applyRouteAddressFix(${item.id}, ${i})">
           ✓ ${s.confidence || '?'}% — ${_escHtml(s.address)}
-        </button>`).join('') || '<div style="font-size:0.72rem;color:#6b7280;">No suggestions — tap package in list to edit</div>'}
+        </button>`).join('')}
+      <button type="button" class="ar-fix-btn manual" onclick="event.stopPropagation(); openAddressReviewEdit(${item.id})">
+        ✏️ Fix address
+      </button>
+      <div class="ar-edit-form" id="ar-edit-${item.id}" style="display:none;">
+        <input type="text" id="ar-input-${item.id}" placeholder="Full delivery address" autocomplete="street-address">
+        <button type="button" onclick="saveAddressReviewEdit(${item.id})">Save address</button>
+      </div>
     </div>`).join('');
   window._flaggedAddressData = flagged;
   document.getElementById('addr-review-bg').classList.add('open');
+}
+
+function openAddressReviewEdit(itemId) {
+  const item = (window._flaggedAddressData || []).find(x => x.id === itemId);
+  if (!item) return;
+  document.querySelectorAll('.ar-edit-form').forEach(f => { f.style.display = 'none'; });
+  const form = document.getElementById('ar-edit-' + itemId);
+  const input = document.getElementById('ar-input-' + itemId);
+  if (!form || !input) return;
+  input.value = item.address || '';
+  form.style.display = 'block';
+  setTimeout(() => { input.focus(); input.select(); }, 50);
+  form.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function saveAddressReviewEdit(itemId) {
+  const item = (window._flaggedAddressData || []).find(x => x.id === itemId);
+  const input = document.getElementById('ar-input-' + itemId);
+  const addr = (input && input.value || '').trim();
+  if (!addr) { showToast('Enter an address', true); return; }
+  if (item && addr === (item.address || '').trim()) {
+    showToast('Address unchanged');
+    return;
+  }
+  const btn = document.querySelector(`#ar-edit-${itemId} button`);
+  if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+  fetch(`/driver/scan/item/${itemId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      address: addr,
+      name: item ? item.name : '',
+      tracking: item ? item.tracking : '',
+    }),
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (!data.ok) { showToast(data.error || 'Could not save', true); return; }
+    if (item) item.address = addr;
+    const addrEl = document.getElementById('ar-addr-' + itemId);
+    if (addrEl) {
+      addrEl.textContent = (item && item.name ? item.name + ' — ' : '') + addr;
+    }
+    const ar = document.getElementById('ar-item-' + itemId);
+    if (ar) {
+      ar.classList.add('ar-fixed');
+      const issues = ar.querySelector('.ar-issues');
+      if (issues) {
+        issues.textContent = data.issues && data.issues.length
+          ? data.issues.join(' · ')
+          : '✓ Address updated';
+        issues.style.color = data.issues && data.issues.length ? '#fca5a5' : '#6ee7b7';
+      }
+    }
+    const listEl = document.getElementById('item-' + itemId);
+    if (listEl) {
+      const pkgAddr = listEl.querySelector('.pkg-addr');
+      if (pkgAddr) pkgAddr.textContent = addr;
+    }
+    const editForm = document.getElementById('ar-edit-' + itemId);
+    if (editForm) editForm.style.display = 'none';
+    showToast(data.geocoded ? 'Address fixed ✓' : 'Saved — still may need tweak', !data.geocoded);
+    setTimeout(refreshLiveSort, 400);
+  })
+  .catch(() => showToast('Network error — try again', true))
+  .finally(() => {
+    if (btn) { btn.disabled = false; btn.textContent = 'Save address'; }
+  });
 }
 
 function applyRouteAddressFix(itemId, sugIdx) {
@@ -1530,6 +1616,7 @@ function refreshLiveSort() {
                 <div class="pkg-addr">${pkg.address}${pkg.unit ? `<span class="unit-badge">APT ${pkg.unit}</span>` : ''}</div>
                 ${pkg.tracking ? `<div class="pkg-tracking">${pkg.tracking}</div>` : ''}
               </div>
+              <button class="pkg-edit" onclick="editPackageAddress(${pkg.id})">Edit</button>
               <button class="pkg-remove" onclick="removeItem(${pkg.id}, this)">✕</button>
             </div>`;
         });
@@ -1590,6 +1677,7 @@ function refreshLiveSort() {
               ${pkg.tracking ? `<div class="pkg-tracking">${pkg.tracking}</div>` : ''}
               ${holdBadge}
             </div>
+            <button class="pkg-edit" onclick="editPackageAddress(${pkg.id})">Edit</button>
             <button class="pkg-remove" onclick="removeItem(${pkg.id}, this)">✕</button>
           </div>`;
       });
@@ -2711,13 +2799,32 @@ function deferAddressSuggestions() {
   setTimeout(fetchAddressSuggestions, 80);
 }
 
+function _pkgAddrText(el) {
+  const addrEl = el && el.querySelector('.pkg-addr');
+  if (!addrEl) return '';
+  const clone = addrEl.cloneNode(true);
+  clone.querySelectorAll('.unit-badge').forEach(b => b.remove());
+  return clone.textContent.trim();
+}
+
+function _pkgNameText(el) {
+  const nameEl = el && el.querySelector('.pkg-name');
+  if (!nameEl) return '';
+  const clone = nameEl.cloneNode(true);
+  clone.querySelectorAll('.sticker-badge, span[style]').forEach(b => b.remove());
+  return clone.textContent.trim();
+}
+
 function editPackageAddress(itemId) {
   const el = document.getElementById('item-' + itemId);
-  if (!el) return;
-  const curAddr = (el.querySelector('.pkg-addr') || {}).textContent || '';
-  const curName = (el.querySelector('.pkg-name') || {}).textContent || '';
+  if (!el) {
+    showToast('Close review and try again — or use Fix address in the review screen', true);
+    return;
+  }
+  const curAddr = _pkgAddrText(el);
+  const curName = _pkgNameText(el);
   const addr = prompt('Fix delivery address:', curAddr);
-  if (!addr || addr.trim() === curAddr) return;
+  if (addr === null || !addr.trim() || addr.trim() === curAddr) return;
   fetch(`/driver/scan/item/${itemId}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
@@ -2726,8 +2833,11 @@ function editPackageAddress(itemId) {
   .then(r => r.json())
   .then(data => {
     if (!data.ok) { showToast(data.error || 'Error', true); return; }
-    const el = document.getElementById('item-' + itemId);
-    if (el) el.querySelector('.pkg-addr').textContent = addr.trim();
+    const row = document.getElementById('item-' + itemId);
+    if (row) {
+      const pkgAddr = row.querySelector('.pkg-addr');
+      if (pkgAddr) pkgAddr.textContent = addr.trim();
+    }
     showToast('Address updated ✓');
     setTimeout(refreshLiveSort, 400);
   });
