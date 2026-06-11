@@ -67,6 +67,34 @@
     100% { box-shadow: 0 0 0 0 rgba(0,255,136,0); }
   }
   .gps-active { animation: gpsPulse 1.5s infinite; }
+
+  .pod-progress { display: flex; gap: 6px; margin-bottom: 12px; }
+  .pod-progress-dot { flex: 1; height: 4px; border-radius: 4px; background: #222; transition: background 0.3s; }
+  .pod-progress-dot.done { background: #00ff88; }
+  .pod-progress-dot.active { background: #0088ff; }
+  .pod-prompt {
+    border: 2px dashed #333; border-radius: 16px; padding: 28px 20px;
+    text-align: center; cursor: pointer; transition: border-color 0.2s, background 0.2s; margin-bottom: 12px;
+  }
+  .pod-prompt:active { background: #151515; border-color: #00ff88; }
+  .pod-prompt-icon { font-size: 2.5rem; color: #00ff88; margin-bottom: 12px; }
+  .pod-preview { border-radius: 14px; overflow: hidden; margin-bottom: 12px; }
+  .pod-preview img { width: 100%; max-height: 220px; object-fit: cover; display: block; border-radius: 14px; }
+  .pod-thumb-row { display: flex; gap: 8px; margin-bottom: 12px; }
+  .pod-thumb { flex: 1; aspect-ratio: 1; border-radius: 10px; overflow: hidden; border: 2px solid #222; position: relative; }
+  .pod-thumb.done { border-color: #00ff88; }
+  .pod-thumb img { width: 100%; height: 100%; object-fit: cover; }
+  .pod-thumb-num {
+    position: absolute; top: 4px; left: 4px; background: rgba(0,0,0,0.7);
+    color: #00ff88; font-size: 0.65rem; font-weight: 700; padding: 2px 6px; border-radius: 6px;
+  }
+  #pod-deliver-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+  .pod-skip { text-align: center; margin-top: 8px; }
+  .pod-skip a { color: #555; font-size: 0.8rem; text-decoration: none; }
+  .pod-camera-warn {
+    display: none; background: #2a1a00; border: 1px solid #ffaa0044;
+    border-radius: 12px; padding: 12px; margin-bottom: 12px; font-size: 0.85rem; color: #ffaa00;
+  }
 </style>
 {% endblock %}
 
@@ -314,23 +342,65 @@
   }
   </script>
 
-  <!-- Delivery Actions -->
-  <div class="row g-3 mb-3">
-    <div class="col-6">
-      <form method="POST" action="/driver/stop/{{ stop.id }}/delivered">
-        <button class="btn btn-primary w-100 py-3 fs-6">
-          <i class="fas fa-check me-2"></i>Delivered
-        </button>
-      </form>
+  <!-- POD 3-Photo Capture -->
+  <div class="card p-3 mb-3" id="pod-section">
+    <div class="d-flex justify-content-between align-items-center mb-2">
+      <h6 class="fw-bold mb-0" style="font-size:0.85rem;letter-spacing:0.05em;">PROOF OF DELIVERY</h6>
+      <span id="pod-step-label" style="color:#00ff88;font-size:0.8rem;font-weight:700;">Step 1 of 3</span>
     </div>
-    <div class="col-6">
-      <form method="POST" action="/driver/stop/{{ stop.id }}/failed">
-        <button class="btn btn-danger w-100 py-3 fs-6">
-          <i class="fas fa-times me-2"></i>Failed
-        </button>
+    <div class="pod-progress" id="pod-progress">
+      <div class="pod-progress-dot active" data-step="0"></div>
+      <div class="pod-progress-dot" data-step="1"></div>
+      <div class="pod-progress-dot" data-step="2"></div>
+    </div>
+    <div class="pod-thumb-row" id="pod-thumb-row">
+      <div class="pod-thumb" data-step="0"><span class="pod-thumb-num">1 Label</span></div>
+      <div class="pod-thumb" data-step="1"><span class="pod-thumb-num">2 Door</span></div>
+      <div class="pod-thumb" data-step="2"><span class="pod-thumb-num">3 Numbers</span></div>
+    </div>
+    <div class="pod-camera-warn" id="pod-camera-warn">
+      <i class="fas fa-camera me-2"></i>
+      Camera access needed. Allow camera in Settings, or use <strong>Skip Photos</strong> below.
+    </div>
+    <div id="pod-capture-area">
+      <div class="pod-prompt" id="pod-prompt" onclick="document.getElementById('pod-file-input').click()">
+        <div class="pod-prompt-icon" id="pod-prompt-icon"><i class="fas fa-barcode"></i></div>
+        <div class="fw-bold mb-1" id="pod-prompt-title">Package Label</div>
+        <div class="text-secondary small" id="pod-prompt-desc">Shoot the package label — tracking number visible</div>
+        <div class="mt-2"><small style="color:#00ff88;"><i class="fas fa-camera me-1"></i>Tap to take photo</small></div>
+      </div>
+      <input type="file" id="pod-file-input" accept="image/*" capture="environment" style="display:none;">
+    </div>
+    <div id="pod-preview-area" style="display:none;">
+      <div class="pod-preview"><img id="pod-preview-img" src="" alt="Preview"></div>
+      <div class="row g-2">
+        <div class="col-6">
+          <button class="btn w-100 py-2" style="border:1px solid #444;color:#aaa;border-radius:12px;" id="pod-retake-btn">
+            <i class="fas fa-redo me-1"></i>Retake
+          </button>
+        </div>
+        <div class="col-6">
+          <button class="btn btn-primary w-100 py-2" id="pod-use-btn">
+            <i class="fas fa-check me-1"></i>Use Photo
+          </button>
+        </div>
+      </div>
+    </div>
+    <button class="btn btn-primary w-100 py-3 fs-6 mt-2" id="pod-deliver-btn" disabled>
+      <i class="fas fa-check me-2"></i>Mark Delivered
+    </button>
+    <div class="pod-skip">
+      <form method="POST" action="/driver/stop/{{ stop.id }}/delivered" id="pod-skip-form" style="display:inline;">
+        <a href="#" onclick="if(confirm('Mark delivered without photos?')) document.getElementById('pod-skip-form').submit(); return false;">Skip Photos</a>
       </form>
     </div>
   </div>
+
+  <form method="POST" action="/driver/stop/{{ stop.id }}/failed" class="mb-3">
+    <button class="btn btn-danger w-100 py-2" style="font-size:0.9rem;">
+      <i class="fas fa-times me-2"></i>Mark Failed
+    </button>
+  </form>
 
 </div>
 
@@ -905,5 +975,152 @@ function setStopUnit(pickedUnit) {
   })
   .catch(() => alert('Network error — try again'));
 }
+
+// ── POD 3-PHOTO CAPTURE ──
+const POD_STEPS = [
+  { icon: 'fa-barcode', title: 'Package Label', desc: 'Shoot the package label — tracking number visible' },
+  { icon: 'fa-door-open', title: 'At the Door', desc: 'Package at the door — show full placement + house' },
+  { icon: 'fa-hashtag', title: 'Address Numbers', desc: 'Close-up of address numbers on the building' },
+];
+const STOP_NUM = {{ stop.stop_number }};
+let podCurrentStep = 0;
+let podPhotos = [null, null, null];
+let podPending = null;
+
+const podFileInput   = document.getElementById('pod-file-input');
+const podCaptureArea = document.getElementById('pod-capture-area');
+const podPreviewArea = document.getElementById('pod-preview-area');
+const podPreviewImg  = document.getElementById('pod-preview-img');
+const podDeliverBtn  = document.getElementById('pod-deliver-btn');
+const podStepLabel   = document.getElementById('pod-step-label');
+
+function podUpdateUI() {
+  const allDone = podPhotos.every(p => p !== null);
+  podDeliverBtn.disabled = !allDone;
+  document.querySelectorAll('.pod-progress-dot').forEach((dot, i) => {
+    dot.classList.remove('active', 'done');
+    if (podPhotos[i]) dot.classList.add('done');
+    else if (i === podCurrentStep) dot.classList.add('active');
+  });
+  document.querySelectorAll('.pod-thumb').forEach((thumb, i) => {
+    thumb.classList.toggle('done', !!podPhotos[i]);
+    if (podPhotos[i]) {
+      let img = thumb.querySelector('img');
+      if (!img) { img = document.createElement('img'); thumb.appendChild(img); }
+      img.src = podPhotos[i].thumb;
+    }
+  });
+  if (allDone) {
+    podStepLabel.textContent = 'All photos captured';
+    podCaptureArea.style.display = 'none';
+    podPreviewArea.style.display = 'none';
+  } else {
+    podStepLabel.textContent = `Step ${podCurrentStep + 1} of 3`;
+    const step = POD_STEPS[podCurrentStep];
+    document.getElementById('pod-prompt-icon').innerHTML = `<i class="fas ${step.icon}"></i>`;
+    document.getElementById('pod-prompt-title').textContent = step.title;
+    document.getElementById('pod-prompt-desc').textContent = step.desc;
+    podCaptureArea.style.display = 'block';
+    podPreviewArea.style.display = 'none';
+  }
+}
+
+function podMakeThumbnail(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('read failed'));
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('image load failed'));
+      img.onload = () => {
+        const max = 480;
+        let w = img.width, h = img.height;
+        if (w > h) { if (w > max) { h = Math.round(h * max / w); w = max; } }
+        else       { if (h > max) { w = Math.round(w * max / h); h = max; } }
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+        canvas.toBlob(blob => resolve({ full: file, thumb: canvas.toDataURL('image/jpeg', 0.72) }), 'image/jpeg', 0.72);
+      };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+podFileInput.addEventListener('change', async () => {
+  const file = podFileInput.files[0];
+  podFileInput.value = '';
+  if (!file) return;
+  try {
+    podPending = await podMakeThumbnail(file);
+    podPreviewImg.src = podPending.thumb;
+    podCaptureArea.style.display = 'none';
+    podPreviewArea.style.display = 'block';
+  } catch (e) {
+    document.getElementById('pod-camera-warn').style.display = 'block';
+  }
+});
+
+document.getElementById('pod-retake-btn').addEventListener('click', () => {
+  podPending = null;
+  podPreviewArea.style.display = 'none';
+  podCaptureArea.style.display = 'block';
+  podFileInput.click();
+});
+
+document.getElementById('pod-use-btn').addEventListener('click', () => {
+  if (!podPending) return;
+  podPhotos[podCurrentStep] = podPending;
+  podPending = null;
+  podCurrentStep = podPhotos.findIndex(p => p === null);
+  if (podCurrentStep === -1) podCurrentStep = 3;
+  podUpdateUI();
+});
+
+function podDownloadToRoll(blob, label) {
+  const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `UNIT-Stop${STOP_NUM}-${label}-${ts}.jpg`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+podDeliverBtn.addEventListener('click', async () => {
+  if (podPhotos.some(p => !p)) return;
+  podDeliverBtn.disabled = true;
+  podDeliverBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Saving...';
+  const labels = ['P1-Label', 'P2-Door', 'P3-Numbers'];
+  podPhotos.forEach((p, i) => podDownloadToRoll(p.full, labels[i]));
+  try {
+    const resp = await fetch(`/driver/stop/${STOP_ID}/deliver`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        pod_photo_1: podPhotos[0].thumb,
+        pod_photo_2: podPhotos[1].thumb,
+        pod_photo_3: podPhotos[2].thumb,
+      }),
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      window.location.href = data.next_stop_id
+        ? `/driver/stop/${data.next_stop_id}`
+        : `/driver/route/${data.route_id}`;
+    } else {
+      throw new Error(data.error || 'Delivery failed');
+    }
+  } catch (e) {
+    podDeliverBtn.disabled = false;
+    podDeliverBtn.innerHTML = '<i class="fas fa-check me-2"></i>Mark Delivered';
+    alert('Could not save delivery. Photos are on your device — tap again or use Skip Photos.');
+  }
+});
+
+podUpdateUI();
 </script>
 {% endblock %}

@@ -2658,6 +2658,11 @@ def init_db():
             notes TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )""",
+        # ── Speed X POD (proof of delivery) ──
+        "ALTER TABLE stops ADD COLUMN pod_photo_1 TEXT",
+        "ALTER TABLE stops ADD COLUMN pod_photo_2 TEXT",
+        "ALTER TABLE stops ADD COLUMN pod_photo_3 TEXT",
+        "ALTER TABLE stops ADD COLUMN pod_captured_at TEXT",
     ]:
         try:
             db.execute(migration)
@@ -5463,49 +5468,113 @@ def stop_pin(stop_id):
     db.close()
     return jsonify({'ok': True})
 
-@app.route('/driver/stop/<int:stop_id>/delivered', methods=['POST'])
-def stop_delivered(stop_id):
-    if 'driver_id' not in session:
-        return redirect(url_for('driver_login'))
-    db = get_db()
-    stop = db.execute("SELECT * FROM stops WHERE id=?", (stop_id,)).fetchone()
-    now_iso = datetime.now().isoformat()
-    db.execute("UPDATE stops SET status='delivered', delivered_at=? WHERE id=?", (now_iso, stop_id))
-    db.commit()
+def _finalize_stop_delivery(db, stop, stop_id, now_iso):
+    """Shared post-delivery bookkeeping (address intel, building memory, route timing)."""
     route_id = stop['route_id'] if stop else None
-
-    # Record delivery in address intelligence (builds spatial memory over time)
     if stop and stop['address']:
         try:
             zone_letter = stop['zone_letter'] if 'zone_letter' in stop.keys() else None
             record_address_delivery(stop['address'], zone_letter=zone_letter)
         except Exception as _ae:
             log.warning(f'[address_intel] delivery record failed: {_ae}')
-        # Building memory: confirmed delivery with a unit number — never ask twice
         if stop['unit']:
             remember_unit_number(stop['address'], stop['unit'])
-
     if route_id:
         route = db.execute("SELECT * FROM routes WHERE id=?", (route_id,)).fetchone()
-        # Record first delivery time on the route
         if route and not route['first_delivery_at']:
             db.execute("UPDATE routes SET first_delivery_at=?, route_started_at=? WHERE id=?",
                        (now_iso, now_iso, route_id))
-            db.commit()
+    return route_id
 
-    # Auto-advance: find next pending stop in route
-    next_stop = None
-    if route_id:
-        next_stop = db.execute(
-            """SELECT id FROM stops
-               WHERE route_id=? AND status='pending'
-               ORDER BY stop_number ASC LIMIT 1""",
-            (route_id,)
-        ).fetchone()
+def _next_pending_stop_id(db, route_id):
+    row = db.execute(
+        """SELECT id FROM stops WHERE route_id=? AND status='pending'
+           ORDER BY stop_number ASC LIMIT 1""",
+        (route_id,)
+    ).fetchone()
+    return row['id'] if row else None
+
+@app.route('/driver/stop/<int:stop_id>/delivered', methods=['POST'])
+def stop_delivered(stop_id):
+    """Mark delivered without POD photos (skip-photos escape hatch)."""
+    if 'driver_id' not in session:
+        return redirect(url_for('driver_login'))
+    db = get_db()
+    stop = db.execute("SELECT * FROM stops WHERE id=?", (stop_id,)).fetchone()
+    if not stop:
+        db.close()
+        return redirect(url_for('driver_dashboard'))
+    now_iso = datetime.now().isoformat()
+    db.execute("UPDATE stops SET status='delivered', delivered_at=? WHERE id=?", (now_iso, stop_id))
+    db.commit()
+    route_id = _finalize_stop_delivery(db, stop, stop_id, now_iso)
+    db.commit()
+    next_id = _next_pending_stop_id(db, route_id) if route_id else None
     db.close()
-    if next_stop:
-        return redirect(url_for('stop_active', stop_id=next_stop['id']))
+    if next_id:
+        return redirect(url_for('stop_active', stop_id=next_id))
     return redirect(url_for('route_detail', route_id=route_id) if route_id else url_for('driver_dashboard'))
+
+@app.route('/driver/stop/<int:stop_id>/deliver', methods=['POST'])
+def stop_deliver(stop_id):
+    """Mark delivered with POD photo thumbnails (JSON body)."""
+    if 'driver_id' not in session:
+        return jsonify({'error': 'not logged in'}), 401
+    db = get_db()
+    stop = db.execute("SELECT * FROM stops WHERE id=?", (stop_id,)).fetchone()
+    if not stop:
+        db.close()
+        return jsonify({'error': 'stop not found'}), 404
+
+    data = request.get_json(silent=True) or {}
+    photos = [data.get('pod_photo_1'), data.get('pod_photo_2'), data.get('pod_photo_3')]
+    now_iso = datetime.now().isoformat()
+
+    try:
+        db.execute(
+            """UPDATE stops SET status='delivered', delivered_at=?, pod_photo_1=?, pod_photo_2=?,
+               pod_photo_3=?, pod_captured_at=? WHERE id=?""",
+            (now_iso, photos[0], photos[1], photos[2], now_iso, stop_id)
+        )
+        db.commit()
+    except Exception as e:
+        log.error(f'POD storage failed for stop {stop_id}: {e}')
+        db.execute("UPDATE stops SET status='delivered', delivered_at=? WHERE id=?", (now_iso, stop_id))
+        db.commit()
+
+    route_id = _finalize_stop_delivery(db, stop, stop_id, now_iso)
+    db.commit()
+    next_id = _next_pending_stop_id(db, route_id) if route_id else None
+    db.close()
+    return jsonify({'ok': True, 'next_stop_id': next_id, 'route_id': route_id})
+
+@app.route('/driver/stop/<int:stop_id>/pod')
+def stop_pod(stop_id):
+    """Return POD thumbnails for a stop."""
+    if 'driver_id' not in session:
+        return jsonify({'error': 'not logged in'}), 401
+    db = get_db()
+    stop = db.execute(
+        "SELECT id, route_id, stop_number, address, customer_name, status, "
+        "pod_photo_1, pod_photo_2, pod_photo_3, pod_captured_at FROM stops WHERE id=?",
+        (stop_id,)
+    ).fetchone()
+    db.close()
+    if not stop:
+        return jsonify({'error': 'stop not found'}), 404
+    return jsonify({
+        'stop_id': stop['id'],
+        'route_id': stop['route_id'],
+        'stop_number': stop['stop_number'],
+        'address': stop['address'],
+        'customer_name': stop['customer_name'],
+        'status': stop['status'],
+        'pod_photo_1': stop['pod_photo_1'],
+        'pod_photo_2': stop['pod_photo_2'],
+        'pod_photo_3': stop['pod_photo_3'],
+        'pod_captured_at': stop['pod_captured_at'],
+        'has_pod': bool(stop['pod_photo_1'] or stop['pod_photo_2'] or stop['pod_photo_3']),
+    })
 
 @app.route('/driver/stop/<int:stop_id>/unit', methods=['POST'])
 def stop_set_unit(stop_id):

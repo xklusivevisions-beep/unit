@@ -25,6 +25,16 @@
   .stop-pin.delivered { background:#10b981; }
   .stop-pin.failed    { background:#ef4444; }
   .stop-pin.en_route  { background:#f59e0b; }
+  .pod-review-thumb {
+    position: relative; aspect-ratio: 1; border-radius: 10px;
+    overflow: hidden; border: 1px solid #222; cursor: pointer;
+  }
+  .pod-review-thumb img { width: 100%; height: 100%; object-fit: cover; }
+  .pod-review-label {
+    position: absolute; bottom: 0; left: 0; right: 0;
+    background: rgba(0,0,0,0.75); color: #00ff88;
+    font-size: 0.6rem; font-weight: 700; text-align: center; padding: 3px;
+  }
 </style>
 {% endblock %}
 {% block content %}
@@ -269,6 +279,9 @@
           </a>
         {% else %}
           <span class="status-pill pill-{{ stop.status }}">{{ stop.status.upper() }}</span>
+          {% if stop.pod_photo_1 %}
+          <div><small style="color:#00ff88;font-size:0.65rem;"><i class="fas fa-camera"></i> POD</small></div>
+          {% endif %}
         {% endif %}
         {% if stop.sms_blast_sent %}
         <div><small style="color:#00ff88;font-size:0.65rem;"><i class="fas fa-sms"></i> Notified</small></div>
@@ -278,6 +291,57 @@
   </div>
   {% endfor %}
 
+  {% set pod_stops = stops | selectattr('status', 'equalto', 'delivered') | selectattr('pod_photo_1') | list %}
+  {% if pod_stops %}
+  <h6 class="text-secondary mb-3 mt-4" style="letter-spacing:0.1em;font-size:0.75rem;">POD REVIEW — UPLOAD TO SPEED X</h6>
+  <p class="text-secondary small mb-3">Photos saved in delivery order. Tap to enlarge before uploading to Speed X.</p>
+  {% for stop in pod_stops %}
+  <div class="card p-3 mb-3" style="border-color:#00ff8822;">
+    <div class="d-flex justify-content-between align-items-start mb-2">
+      <div>
+        <span class="fw-bold" style="color:#00ff88;">Stop #{{ stop.stop_number }}</span>
+        <span class="text-secondary small ms-2">{{ stop.customer_name or 'Customer' }}</span>
+        <div class="text-secondary small text-truncate" style="max-width:240px;">{{ stop.address }}</div>
+      </div>
+      {% if stop.pod_captured_at %}
+      <small class="text-muted" style="font-size:0.65rem;white-space:nowrap;">{{ stop.pod_captured_at[:16].replace('T',' ') }}</small>
+      {% endif %}
+    </div>
+    <div class="row g-2">
+      {% if stop.pod_photo_1 %}
+      <div class="col-4">
+        <div class="pod-review-thumb" onclick="showPodPhoto(this)">
+          <img src="{{ stop.pod_photo_1 }}" alt="Label">
+          <span class="pod-review-label">1 Label</span>
+        </div>
+      </div>
+      {% endif %}
+      {% if stop.pod_photo_2 %}
+      <div class="col-4">
+        <div class="pod-review-thumb" onclick="showPodPhoto(this)">
+          <img src="{{ stop.pod_photo_2 }}" alt="Door">
+          <span class="pod-review-label">2 Door</span>
+        </div>
+      </div>
+      {% endif %}
+      {% if stop.pod_photo_3 %}
+      <div class="col-4">
+        <div class="pod-review-thumb" onclick="showPodPhoto(this)">
+          <img src="{{ stop.pod_photo_3 }}" alt="Numbers">
+          <span class="pod-review-label">3 Numbers</span>
+        </div>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+  {% endfor %}
+  {% endif %}
+
+</div>
+
+<div id="pod-lightbox" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.92);z-index:9999;padding:20px;" onclick="this.style.display='none'">
+  <img id="pod-lightbox-img" src="" style="max-width:100%;max-height:90vh;display:block;margin:40px auto 0;border-radius:12px;">
+  <div class="text-center mt-3"><small class="text-secondary">Tap anywhere to close</small></div>
 </div>
 
 <!-- MAP VIEW -->
@@ -301,6 +365,12 @@
 {% endblock %}
 {% block scripts %}
 <script>
+function showPodPhoto(el) {
+  const src = el.querySelector('img').src;
+  document.getElementById('pod-lightbox-img').src = src;
+  document.getElementById('pod-lightbox').style.display = 'block';
+}
+
 // ── Name formatter ──
 function nameShort(name) {
   if (!name) return 'Unknown';
