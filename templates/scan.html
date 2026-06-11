@@ -160,6 +160,25 @@
               white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .pkg-addr { font-size: 0.8rem; color: #9ca3af; margin-top: 2px;
               white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pkg-addr-edit {
+    cursor: pointer; color: #93c5fd; text-decoration: underline;
+    text-decoration-style: dotted; text-underline-offset: 3px;
+    white-space: normal; word-break: break-word; line-height: 1.35;
+  }
+  .pkg-addr-edit:active { color: #60a5fa; }
+  .pkg-tap-hint { display: block; font-size: 0.72rem; color: #6b7280; font-weight: 400; margin-top: 2px; }
+  .pkg-inline-edit { margin-top: 8px; }
+  .pkg-inline-input {
+    width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid #60a5fa;
+    background: #0f172a; color: #fff; font-size: 0.88rem; margin-bottom: 8px;
+  }
+  .pkg-inline-btns { display: flex; gap: 8px; }
+  .pkg-inline-save, .pkg-inline-cancel {
+    flex: 1; padding: 10px; border: none; border-radius: 10px;
+    font-weight: 700; font-size: 0.85rem; cursor: pointer;
+  }
+  .pkg-inline-save { background: #10b981; color: #fff; }
+  .pkg-inline-cancel { background: #374151; color: #d1d5db; }
   .pkg-tracking { font-size: 0.7rem; color: #6b7280; margin-top: 2px; font-family: monospace; }
   .pkg-num { font-size: 0.75rem; background: #374151; color: #9ca3af;
              padding: 2px 8px; border-radius: 999px; white-space: nowrap; margin-top: 4px; display: inline-block; }
@@ -622,7 +641,7 @@
 
   <!-- Package list -->
   <div class="pkg-list">
-    <h2>Scanned Packages</h2>
+    <h2>Scanned Packages <span class="pkg-tap-hint">— tap address to fix</span></h2>
     <div class="list-view-tabs" id="list-view-tabs">
       <div class="list-tab active" id="tab-by-sticker" onclick="setListView('sticker')">🏷️ By Sticker #</div>
       <div class="list-tab" id="tab-by-zone" onclick="setListView('zone')">🗺️ By Zone</div>
@@ -637,13 +656,12 @@
         <div class="pkg-item" id="item-{{ item.id }}">
           <div class="pkg-info">
             <div class="pkg-name">{{ (item.customer_name or 'Unknown')|name_short }}</div>
-            <div class="pkg-addr">{{ item.address }}</div>
+            <div class="pkg-addr pkg-addr-edit" onclick="editPackageAddress({{ item.id }})" role="button">{{ item.address }}</div>
             {% if item.tracking %}
             <div class="pkg-tracking">{{ item.tracking }}</div>
             {% endif %}
             <span class="sticker-badge">#{{ item.scan_order or loop.index }}</span>
           </div>
-          <button class="pkg-edit" onclick="editPackageAddress({{ item.id }})">Edit</button>
           <button class="pkg-remove" onclick="removeItem({{ item.id }}, this)">✕</button>
         </div>
         {% endfor %}
@@ -1613,10 +1631,9 @@ function refreshLiveSort() {
                   <span class="sticker-badge">#${sn}</span>
                   ${nameShort(pkg.name)}
                 </div>
-                <div class="pkg-addr">${pkg.address}${pkg.unit ? `<span class="unit-badge">APT ${pkg.unit}</span>` : ''}</div>
+                <div class="pkg-addr pkg-addr-edit" onclick="editPackageAddress(${pkg.id})" role="button">${pkg.address}${pkg.unit ? `<span class="unit-badge">APT ${pkg.unit}</span>` : ''}</div>
                 ${pkg.tracking ? `<div class="pkg-tracking">${pkg.tracking}</div>` : ''}
               </div>
-              <button class="pkg-edit" onclick="editPackageAddress(${pkg.id})">Edit</button>
               <button class="pkg-remove" onclick="removeItem(${pkg.id}, this)">✕</button>
             </div>`;
         });
@@ -1673,11 +1690,10 @@ function refreshLiveSort() {
                 <span style="background:${color};color:#fff;border-radius:6px;padding:1px 7px;font-size:0.8rem;font-weight:800;flex-shrink:0;">${label}</span>
                 ${nameShort(pkg.name)}
               </div>
-              <div class="pkg-addr">${pkg.address}</div>
+              <div class="pkg-addr pkg-addr-edit" onclick="editPackageAddress(${pkg.id})" role="button">${pkg.address}</div>
               ${pkg.tracking ? `<div class="pkg-tracking">${pkg.tracking}</div>` : ''}
               ${holdBadge}
             </div>
-            <button class="pkg-edit" onclick="editPackageAddress(${pkg.id})">Edit</button>
             <button class="pkg-remove" onclick="removeItem(${pkg.id}, this)">✕</button>
           </div>`;
       });
@@ -2800,7 +2816,7 @@ function deferAddressSuggestions() {
 }
 
 function _pkgAddrText(el) {
-  const addrEl = el && el.querySelector('.pkg-addr');
+  const addrEl = el && (el.querySelector('.pkg-addr-edit') || el.querySelector('.pkg-addr'));
   if (!addrEl) return '';
   const clone = addrEl.cloneNode(true);
   clone.querySelectorAll('.unit-badge').forEach(b => b.remove());
@@ -2815,32 +2831,100 @@ function _pkgNameText(el) {
   return clone.textContent.trim();
 }
 
-function editPackageAddress(itemId) {
+function cancelInlineAddressEdit(itemId) {
   const el = document.getElementById('item-' + itemId);
-  if (!el) {
-    showToast('Close review and try again — or use Fix address in the review screen', true);
-    return;
-  }
+  if (!el) return;
+  const panel = el.querySelector('.pkg-inline-edit');
+  const addrEl = el.querySelector('.pkg-addr-edit') || el.querySelector('.pkg-addr');
+  if (panel) panel.style.display = 'none';
+  if (addrEl) addrEl.style.display = '';
+}
+
+function saveInlineAddressEdit(itemId) {
+  const el = document.getElementById('item-' + itemId);
+  if (!el) return;
+  const input = el.querySelector('.pkg-inline-input');
+  const addr = (input && input.value || '').trim();
   const curAddr = _pkgAddrText(el);
+  if (!addr) { showToast('Enter an address', true); return; }
+  if (addr === curAddr) { cancelInlineAddressEdit(itemId); return; }
   const curName = _pkgNameText(el);
-  const addr = prompt('Fix delivery address:', curAddr);
-  if (addr === null || !addr.trim() || addr.trim() === curAddr) return;
+  const saveBtn = el.querySelector('.pkg-inline-save');
+  if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Saving…'; }
   fetch(`/driver/scan/item/${itemId}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ address: addr.trim(), name: curName || '' }),
+    body: JSON.stringify({ address: addr, name: curName || '' }),
   })
   .then(r => r.json())
   .then(data => {
     if (!data.ok) { showToast(data.error || 'Error', true); return; }
+    cancelInlineAddressEdit(itemId);
     const row = document.getElementById('item-' + itemId);
     if (row) {
-      const pkgAddr = row.querySelector('.pkg-addr');
-      if (pkgAddr) pkgAddr.textContent = addr.trim();
+      const pkgAddr = row.querySelector('.pkg-addr-edit') || row.querySelector('.pkg-addr');
+      if (pkgAddr) {
+        pkgAddr.innerHTML = addr;
+        pkgAddr.classList.add('pkg-addr-edit');
+        pkgAddr.setAttribute('onclick', `editPackageAddress(${itemId})`);
+        pkgAddr.setAttribute('role', 'button');
+      }
     }
-    showToast('Address updated ✓');
+    showToast(data.geocoded ? 'Address fixed ✓' : 'Saved ✓', !data.geocoded);
     setTimeout(refreshLiveSort, 400);
+  })
+  .catch(() => showToast('Network error — try again', true))
+  .finally(() => {
+    if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = 'Save'; }
   });
+}
+
+function editPackageAddress(itemId) {
+  const el = document.getElementById('item-' + itemId);
+  if (!el) {
+    showToast('Package not found — scroll the list or refresh', true);
+    return;
+  }
+  document.querySelectorAll('.pkg-inline-edit').forEach(panel => {
+    panel.style.display = 'none';
+    const row = panel.closest('.pkg-item');
+    if (row) {
+      const a = row.querySelector('.pkg-addr-edit, .pkg-addr');
+      if (a) a.style.display = '';
+    }
+  });
+  const addrEl = el.querySelector('.pkg-addr-edit') || el.querySelector('.pkg-addr');
+  if (!addrEl) return;
+  let panel = el.querySelector('.pkg-inline-edit');
+  if (!panel) {
+    panel = document.createElement('div');
+    panel.className = 'pkg-inline-edit';
+    panel.onclick = (e) => e.stopPropagation();
+    panel.innerHTML = `
+      <input type="text" class="pkg-inline-input" autocomplete="street-address" placeholder="Full delivery address">
+      <div class="pkg-inline-btns">
+        <button type="button" class="pkg-inline-save">Save</button>
+        <button type="button" class="pkg-inline-cancel">Cancel</button>
+      </div>`;
+    addrEl.insertAdjacentElement('afterend', panel);
+    panel.querySelector('.pkg-inline-save').onclick = (e) => {
+      e.stopPropagation();
+      saveInlineAddressEdit(itemId);
+    };
+    panel.querySelector('.pkg-inline-cancel').onclick = (e) => {
+      e.stopPropagation();
+      cancelInlineAddressEdit(itemId);
+    };
+    panel.querySelector('input').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') saveInlineAddressEdit(itemId);
+      if (e.key === 'Escape') cancelInlineAddressEdit(itemId);
+    });
+  }
+  const input = panel.querySelector('.pkg-inline-input');
+  input.value = _pkgAddrText(el);
+  addrEl.style.display = 'none';
+  panel.style.display = 'block';
+  setTimeout(() => { input.focus(); input.select(); }, 50);
 }
 
 function handleProcessResponse(data, localFallback) {
@@ -3164,11 +3248,10 @@ function appendPackageToList(pkg) {
   el.innerHTML = `
     <div class="pkg-info">
       <div class="pkg-name">${nameShort(pkg.name)}</div>
-      <div class="pkg-addr">${pkg.address}${pkg.unit ? `<span class="unit-badge">APT ${pkg.unit}</span>` : ''}</div>
+      <div class="pkg-addr pkg-addr-edit" onclick="editPackageAddress(${pkg.id})" role="button">${pkg.address}${pkg.unit ? `<span class="unit-badge">APT ${pkg.unit}</span>` : ''}</div>
       ${pkg.tracking ? `<div class="pkg-tracking">${pkg.tracking}</div>` : ''}
       <span class="pkg-num">#${pkgCount}</span>
     </div>
-    <button class="pkg-edit" onclick="editPackageAddress(${pkg.id})">Edit</button>
     <button class="pkg-remove" onclick="removeItem(${pkg.id}, this)">✕</button>`;
   document.getElementById('pkg-list-inner').appendChild(el);
 }
