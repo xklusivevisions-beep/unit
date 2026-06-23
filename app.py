@@ -2028,10 +2028,14 @@ def _extract_zip(address):
     m = re.search(r'\b(\d{5})\b', address)
     return m.group(1) if m else None
 
-def upsert_address_intel(address, lat, lng, zone_letter=None):
+# Confidence ranking — higher wins, never downgraded by a later weaker geocode
+_CONF_RANK = {'low': 1, 'medium': 2, 'high': 3, 'verified': 4}
+
+def upsert_address_intel(address, lat, lng, zone_letter=None, confidence=None):
     """
     Persist a geocoded address to the address_intel table.
     Also updates _geocache immediately so the current session benefits.
+    `confidence` is stored but never downgraded (a verified pin stays verified).
     """
     if not address or not lat or not lng:
         return
@@ -2042,7 +2046,7 @@ def upsert_address_intel(address, lat, lng, zone_letter=None):
     _geocache[address] = (lat, lng)
     try:
         db       = get_db()
-        existing = db.execute("SELECT id, zone_history FROM address_intel WHERE address=?", (key,)).fetchone()
+        existing = db.execute("SELECT id, zone_history, confidence FROM address_intel WHERE address=?", (key,)).fetchone()
         if existing:
             try:
                 hist = json.loads(existing['zone_history'] or '[]')
@@ -2051,18 +2055,33 @@ def upsert_address_intel(address, lat, lng, zone_letter=None):
             if zone_letter and zone_letter not in ('?', None):
                 hist.append(zone_letter)
                 hist = hist[-30:]
-            db.execute(
-                """UPDATE address_intel
-                   SET lat=?, lng=?, zip_code=COALESCE(?,zip_code), zone_history=?, updated_at=?
-                   WHERE address=?""",
-                (lat, lng, zip_code, json.dumps(hist), now, key)
-            )
+            # Keep the strongest confidence we've ever seen for this address
+            old_conf = existing['confidence'] if 'confidence' in existing.keys() else None
+            new_conf = old_conf
+            if confidence and _CONF_RANK.get(confidence, 0) >= _CONF_RANK.get(old_conf or '', 0):
+                new_conf = confidence
+            # A verified pin should also lock the coords — don't let a weak
+            # geocode move a human-corrected point.
+            if old_conf == 'verified' and confidence != 'verified':
+                db.execute(
+                    """UPDATE address_intel
+                       SET zip_code=COALESCE(?,zip_code), zone_history=?, updated_at=?
+                       WHERE address=?""",
+                    (zip_code, json.dumps(hist), now, key)
+                )
+            else:
+                db.execute(
+                    """UPDATE address_intel
+                       SET lat=?, lng=?, zip_code=COALESCE(?,zip_code), zone_history=?, confidence=?, updated_at=?
+                       WHERE address=?""",
+                    (lat, lng, zip_code, json.dumps(hist), new_conf, now, key)
+                )
         else:
             zone_history = json.dumps([zone_letter]) if zone_letter and zone_letter != '?' else '[]'
             db.execute(
-                """INSERT INTO address_intel (address, lat, lng, zip_code, zone_history, created_at, updated_at)
-                   VALUES (?,?,?,?,?,?,?)""",
-                (key, lat, lng, zip_code, zone_history, now, now)
+                """INSERT INTO address_intel (address, lat, lng, zip_code, zone_history, confidence, created_at, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                (key, lat, lng, zip_code, zone_history, confidence, now, now)
             )
         db.commit()
         db.close()
@@ -2730,6 +2749,9 @@ def init_db():
         "ALTER TABLE stops ADD COLUMN delivered_lat REAL",
         "ALTER TABLE stops ADD COLUMN delivered_lng REAL",
         "ALTER TABLE stops ADD COLUMN delivered_distance_ft REAL",
+        # ── Geocode confidence (anti "sent to nowhere") ──
+        "ALTER TABLE address_intel ADD COLUMN confidence TEXT",
+        "ALTER TABLE stops ADD COLUMN geo_confidence TEXT",
     ]:
         try:
             db.execute(migration)
@@ -2816,44 +2838,108 @@ def _census_geocode(address):
         log.warning(f'Census geocode failed for {address}: {e}')
     return None, None
 
-def geocode_address(address):
-    # 0. Check in-memory cache first (already loaded from address_intel on startup)
-    if address in _geocache:
-        cached = _geocache[address]
-        if cached[0]:   # valid hit
-            return cached
+def _mapbox_geocode(address):
+    """Mapbox geocoding — rooftop-grade for US, returns (lat,lng,accuracy,relevance)."""
+    if not MAPBOX_TOKEN:
+        return None, None, None, 0
+    try:
+        url = 'https://api.mapbox.com/geocoding/v5/mapbox.places/' + requests.utils.quote(address) + '.json'
+        r = requests.get(url, params={
+            'country': 'US', 'limit': 1, 'types': 'address', 'autocomplete': 'false',
+            'access_token': MAPBOX_TOKEN
+        }, timeout=8)
+        feats = (r.json() or {}).get('features', [])
+        if feats:
+            f = feats[0]
+            lng, lat = f['center'][0], f['center'][1]
+            acc = (f.get('properties') or {}).get('accuracy')
+            rel = f.get('relevance', 0) or 0
+            return lat, lng, acc, rel
+    except Exception as e:
+        log.warning(f'Mapbox geocode failed for {address}: {e}')
+    return None, None, None, 0
+
+def _mapbox_confidence(accuracy, relevance):
+    """Map Mapbox accuracy/relevance to our confidence tier."""
+    if relevance and relevance < 0.5:
+        return 'low'
+    if accuracy in ('rooftop', 'parcel', 'point', 'address'):
+        return 'high'
+    if accuracy == 'interpolated':
+        return 'medium' if (relevance or 0) >= 0.8 else 'low'
+    # street / intersection / place / region / postcode → not building-level
+    return 'low'
+
+def geocode_address_full(address):
+    """Geocode an address. Returns (lat, lng, confidence). confidence in
+    {high, medium, low} for fresh geocodes, or None for cache hits."""
+    # 0. Check in-memory cache first (learned/corrected coords win)
+    if address in _geocache and _geocache[address][0]:
+        return _geocache[address][0], _geocache[address][1], None
     key = _normalize_addr_key(address)
     if key in _geocache and _geocache[key][0]:
-        _geocache[address] = _geocache[key]   # alias for future hits
-        return _geocache[key]
+        _geocache[address] = _geocache[key]
+        return _geocache[key][0], _geocache[key][1], None
 
-    # Normalize spelled-out numbers (Eight Mile -> 8 Mile)
     normalized = _normalize_street_numbers(address)
-    # Strip apt/unit suffixes before geocoding
     clean = re.sub(r'\s+(Apt|Unit|Suite|Ste|#)\s*[\w-]+', '', normalized, flags=re.IGNORECASE).strip()
 
-    # 1. Try US Census Bureau (most accurate for US addresses, free, no key)
+    # 1. Mapbox first — rooftop-grade and reports match quality
+    lat, lng, acc, rel = _mapbox_geocode(clean)
+    if lat and lng:
+        conf = _mapbox_confidence(acc, rel)
+        log.info(f'Mapbox geocode: {address} -> {lat:.5f},{lng:.5f} [{acc}/{rel:.2f} → {conf}]')
+        _geocache[address] = (lat, lng)
+        upsert_address_intel(address, lat, lng, confidence=conf)
+        return lat, lng, conf
+
+    # 2. US Census Bureau (free, address-range level)
     lat, lng = _census_geocode(clean)
     if lat and lng:
         log.info(f'Census geocode hit: {address} -> {lat:.5f}, {lng:.5f}')
         _geocache[address] = (lat, lng)
-        upsert_address_intel(address, lat, lng)   # persist for future routes
-        return lat, lng
+        upsert_address_intel(address, lat, lng, confidence='medium')
+        return lat, lng, 'medium'
 
-    # 2. Fall back to Nominatim
+    # 3. Nominatim (weakest fallback — flag for verification)
     try:
         geo = Nominatim(user_agent='unit-delivery-app', timeout=8)
         loc = geo.geocode(clean) or geo.geocode(normalized) or geo.geocode(address)
         if loc:
             log.info(f'Nominatim fallback hit: {address} -> {loc.latitude:.5f}, {loc.longitude:.5f}')
             _geocache[address] = (loc.latitude, loc.longitude)
-            upsert_address_intel(address, loc.latitude, loc.longitude)   # persist
-            return loc.latitude, loc.longitude
+            upsert_address_intel(address, loc.latitude, loc.longitude, confidence='low')
+            return loc.latitude, loc.longitude, 'low'
     except Exception as e:
         log.warning(f'Nominatim geocode failed for {address}: {e}')
 
     _geocache[address] = (None, None)
-    return None, None
+    return None, None, None
+
+def geocode_address(address):
+    """Backward-compatible wrapper returning (lat, lng)."""
+    lat, lng, _conf = geocode_address_full(address)
+    return lat, lng
+
+def _address_confidence(db, address):
+    """Best known confidence for an address: a human pin correction beats
+    any geocode. Returns one of {verified, high, medium, low} or None."""
+    if not address:
+        return None
+    key = _normalize_addr_key(address)
+    try:
+        pc = db.execute(
+            "SELECT 1 FROM pin_corrections WHERE address=? OR address=? LIMIT 1",
+            (address, key)
+        ).fetchone()
+        if pc:
+            return 'verified'
+        row = db.execute("SELECT confidence FROM address_intel WHERE address=?", (key,)).fetchone()
+        if row and ('confidence' in row.keys()) and row['confidence']:
+            return row['confidence']
+    except Exception:
+        pass
+    return None
 
 TEXTBELT_KEY = os.environ.get('TEXTBELT_KEY', '')
 
@@ -5565,12 +5651,18 @@ def stop_active(stop_id):
     zone_delivered = sum(1 for s in zone_stops if s.get('status') == 'delivered')
     # Lazy geocode — if no pin yet, geocode now so map loads correctly
     if not stop['dest_lat']:
-        lat, lng = geocode_address(stop['address'])
+        lat, lng, conf = geocode_address_full(stop['address'])
         if lat and lng:
-            db.execute("UPDATE stops SET dest_lat=?, dest_lng=? WHERE id=?", (lat, lng, stop_id))
+            db.execute("UPDATE stops SET dest_lat=?, dest_lng=?, geo_confidence=? WHERE id=?",
+                       (lat, lng, conf, stop_id))
             db.commit()
             stop = db.execute("SELECT * FROM stops WHERE id=?", (stop_id,)).fetchone()
             stop_dict = next((s for s in stops_enriched if s['id'] == stop_id), dict(stop))
+    # Determine location confidence for the "verify location" banner
+    geo_conf = _address_confidence(db, stop['address'])
+    if geo_conf is None and ('geo_confidence' in stop.keys()):
+        geo_conf = stop['geo_confidence']
+    geo_low_confidence = (geo_conf == 'low')
     db.close()
     # Building memory: quick-pick units when the unit number is missing
     known_units = []
@@ -5585,7 +5677,8 @@ def stop_active(stop_id):
         zone_summary=zone_summary, zone_stops=zone_stops,
         zone_position=zone_position, zone_delivered=zone_delivered,
         current_zone=current_zone, gmaps_key=GOOGLE_MAPS_KEY, mapbox_token=MAPBOX_TOKEN,
-        known_units=known_units, multi_unit=multi_unit)
+        known_units=known_units, multi_unit=multi_unit,
+        geo_low_confidence=geo_low_confidence)
 
 @app.route('/driver/stop/<int:stop_id>/pin', methods=['POST'])
 def stop_pin(stop_id):
@@ -5597,7 +5690,7 @@ def stop_pin(stop_id):
         return jsonify({'error': 'missing coords'}), 400
     db = get_db()
     stop = db.execute("SELECT address FROM stops WHERE id=?", (stop_id,)).fetchone()
-    db.execute("UPDATE stops SET dest_lat=?, dest_lng=?, approach_sms_sent=0 WHERE id=?", (lat, lng, stop_id))
+    db.execute("UPDATE stops SET dest_lat=?, dest_lng=?, geo_confidence='verified', approach_sms_sent=0 WHERE id=?", (lat, lng, stop_id))
     if stop:
         # Save to pin_corrections (survives future routes)
         db.execute('''
@@ -5610,7 +5703,7 @@ def stop_pin(stop_id):
         ''', (stop['address'], lat, lng, session.get('driver_name', 'driver'), datetime.now().isoformat()))
         # Sync human-verified coords to address_intel (highest quality signal)
         try:
-            upsert_address_intel(stop['address'], lat, lng)
+            upsert_address_intel(stop['address'], lat, lng, confidence='verified')
             log.info(f'[address_intel] Pin correction saved: {stop["address"]} -> {lat:.5f},{lng:.5f}')
         except Exception as _e:
             log.warning(f'[address_intel] pin sync failed: {_e}')
