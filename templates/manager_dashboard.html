@@ -30,6 +30,12 @@
     <small class="text-secondary">{{ manager_name }} · Today {{ today }}</small>
   </div>
 
+  {% with messages = get_flashed_messages(category_filter=['rescue']) %}
+  {% for m in messages %}
+  <div style="background:#1a1000;border:1px solid #ffaa0066;border-radius:12px;padding:12px 14px;margin-bottom:14px;color:#ffaa00;font-size:0.85rem;">{{ m }}</div>
+  {% endfor %}
+  {% endwith %}
+
   <!-- Attendance summary -->
   <div class="row g-2 mb-4">
     <div class="col-4">
@@ -101,6 +107,18 @@
             <span class="text-secondary">{{ t.route.pending }} left</span>
             <span style="color:{% if 'past 9' in t.route.eta %}#ff3333{% else %}#aaa{% endif %};">Est. finish {{ t.route.eta }}</span>
           </div>
+          {% if t.route.pending > 0 %}
+          <form method="POST" action="/manager/rescue" class="d-flex gap-2 mt-2"
+                onsubmit="return confirm('Move {{ t.route.pending }} unfinished stops to another driver?')">
+            <input type="hidden" name="from_driver_id" value="{{ t.driver.id }}">
+            <select name="to_driver_id" required
+                    style="flex:1;background:#1a1a1a;border:1px solid #333;color:#fff;border-radius:8px;padding:6px 8px;font-size:0.78rem;">
+              <option value="">Rescue to…</option>
+              {% for other in team %}{% if other.driver.id != t.driver.id %}<option value="{{ other.driver.id }}">{{ other.driver.name }}</option>{% endif %}{% endfor %}
+            </select>
+            <button type="submit" class="check-btn" style="background:#ffaa0022;color:#ffaa00;">🚑 Rescue</button>
+          </form>
+          {% endif %}
         </div>
         {% else %}
         <small class="text-secondary d-block mt-2">No route loaded today</small>

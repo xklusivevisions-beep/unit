@@ -6881,6 +6881,68 @@ def manager_assign():
     db.close()
     return redirect(url_for('manager_dashboard'))
 
+@app.route('/manager/rescue', methods=['POST'])
+def manager_rescue():
+    """Reassign a driver's remaining (pending) stops to another driver today."""
+    guard = _require_manager()
+    if guard:
+        return guard
+    _, company_id, _, _ = _manager_session()
+    from_id = request.form.get('from_driver_id', '').strip()
+    to_id = request.form.get('to_driver_id', '').strip()
+    if not (from_id.isdigit() and to_id.isdigit()) or from_id == to_id:
+        flash('Pick a different driver to rescue to.', 'rescue')
+        return redirect(url_for('manager_dashboard'))
+    from_id, to_id = int(from_id), int(to_id)
+    today = datetime.now().strftime('%Y-%m-%d')
+    db = get_db()
+    if not (_driver_in_company(db, from_id, company_id) and _driver_in_company(db, to_id, company_id)):
+        db.close()
+        return redirect(url_for('manager_dashboard'))
+    src_route = db.execute(
+        "SELECT * FROM routes WHERE driver_id=? AND date=? ORDER BY id DESC LIMIT 1",
+        (from_id, today)
+    ).fetchone()
+    if not src_route:
+        db.close()
+        flash('That driver has no route loaded today.', 'rescue')
+        return redirect(url_for('manager_dashboard'))
+    pending = db.execute(
+        "SELECT id FROM stops WHERE route_id=? AND status NOT IN ('delivered','failed')",
+        (src_route['id'],)
+    ).fetchall()
+    if not pending:
+        db.close()
+        flash('No unfinished stops to rescue.', 'rescue')
+        return redirect(url_for('manager_dashboard'))
+    # Find or create target driver's route for today
+    to_driver = db.execute("SELECT name FROM drivers WHERE id=?", (to_id,)).fetchone()
+    dst_route = db.execute(
+        "SELECT * FROM routes WHERE driver_id=? AND date=? ORDER BY id DESC LIMIT 1",
+        (to_id, today)
+    ).fetchone()
+    if not dst_route:
+        db.execute(
+            "INSERT INTO routes (driver_id, driver_name, name, date) VALUES (?,?,?,?)",
+            (to_id, to_driver['name'] if to_driver else '', f'Rescue {today}', today)
+        )
+        db.commit()
+        dst_route = db.execute(
+            "SELECT * FROM routes WHERE driver_id=? AND date=? ORDER BY id DESC LIMIT 1",
+            (to_id, today)
+        ).fetchone()
+    maxrow = db.execute("SELECT COALESCE(MAX(stop_number),0) AS mx FROM stops WHERE route_id=?", (dst_route['id'],)).fetchone()
+    next_num = (maxrow['mx'] or 0) + 1
+    moved = 0
+    for s in pending:
+        db.execute("UPDATE stops SET route_id=?, stop_number=? WHERE id=?", (dst_route['id'], next_num, s['id']))
+        next_num += 1
+        moved += 1
+    db.commit()
+    db.close()
+    flash(f'Rescued {moved} stop(s) to {to_driver["name"] if to_driver else "driver"}.', 'rescue')
+    return redirect(url_for('manager_dashboard'))
+
 @app.route('/manager/team')
 def manager_team():
     guard = _require_manager()
