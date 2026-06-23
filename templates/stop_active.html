@@ -391,7 +391,9 @@
     </button>
     <div class="pod-skip">
       <form method="POST" action="/driver/stop/{{ stop.id }}/delivered" id="pod-skip-form" style="display:inline;">
-        <a href="#" onclick="if(confirm('Mark delivered without photos?')) document.getElementById('pod-skip-form').submit(); return false;">Skip Photos</a>
+        <input type="hidden" name="driver_lat" id="skip-driver-lat">
+        <input type="hidden" name="driver_lng" id="skip-driver-lng">
+        <a href="#" onclick="return podSkipSubmit();">Skip Photos</a>
       </form>
     </div>
   </div>
@@ -1090,8 +1092,40 @@ function podDownloadToRoll(blob, label) {
   setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
 
+// Feet between two lat/lng points (haversine)
+function distanceFt(lat1, lng1, lat2, lng2) {
+  const R = 6371000;
+  const dLat = (lat2-lat1)*Math.PI/180, dLng = (lng2-lng1)*Math.PI/180;
+  const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLng/2)**2;
+  return (R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a))) * 3.28084;
+}
+const POD_GEOFENCE_FT = 250;
+
+function podOffLocationOk() {
+  // Returns true to proceed. Warns if driver is far from the stop pin.
+  if (DEST_LAT === null || DEST_LNG === null || lastDriverLat === null) return true;
+  const ft = distanceFt(lastDriverLat, lastDriverLng, DEST_LAT, DEST_LNG);
+  if (ft > POD_GEOFENCE_FT) {
+    return confirm('⚠️ You appear to be ' + Math.round(ft) + ' ft from this address.\n\nDelivering here will be flagged as off-location. Continue only if this is the correct spot.');
+  }
+  return true;
+}
+
+function podSkipSubmit() {
+  if (!confirm('Mark delivered without photos?')) return false;
+  if (!podOffLocationOk()) return false;
+  if (lastDriverLat !== null) {
+    document.getElementById('skip-driver-lat').value = lastDriverLat;
+    document.getElementById('skip-driver-lng').value = lastDriverLng;
+  }
+  document.getElementById('pod-skip-form').submit();
+  return false;
+}
+window.podSkipSubmit = podSkipSubmit;
+
 podDeliverBtn.addEventListener('click', async () => {
   if (podPhotos.some(p => !p)) return;
+  if (!podOffLocationOk()) return;
   podDeliverBtn.disabled = true;
   podDeliverBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Saving...';
   const labels = ['P1-Label', 'P2-Door', 'P3-Numbers'];
@@ -1104,6 +1138,8 @@ podDeliverBtn.addEventListener('click', async () => {
         pod_photo_1: podPhotos[0].thumb,
         pod_photo_2: podPhotos[1].thumb,
         pod_photo_3: podPhotos[2].thumb,
+        driver_lat: lastDriverLat,
+        driver_lng: lastDriverLng,
       }),
     });
     const data = await resp.json();

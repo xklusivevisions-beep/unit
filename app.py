@@ -2726,6 +2726,10 @@ def init_db():
         )""",
         "CREATE INDEX IF NOT EXISTS idx_manager_messages_company ON manager_messages (company_id)",
         "ALTER TABLE driver_checkins ADD COLUMN assignment TEXT",
+        # ── POD location proof (anti wrong-stop) ──
+        "ALTER TABLE stops ADD COLUMN delivered_lat REAL",
+        "ALTER TABLE stops ADD COLUMN delivered_lng REAL",
+        "ALTER TABLE stops ADD COLUMN delivered_distance_ft REAL",
     ]:
         try:
             db.execute(migration)
@@ -5614,6 +5618,21 @@ def stop_pin(stop_id):
     db.close()
     return jsonify({'ok': True})
 
+# Max distance (ft) from the stop pin before a delivery is flagged "off-location"
+POD_GEOFENCE_FT = 250
+
+def _delivery_distance_ft(stop, lat, lng):
+    """Feet between the stop pin and where the driver tapped Delivered. None if unknown."""
+    try:
+        if lat is None or lng is None:
+            return None
+        if not stop or stop['dest_lat'] is None or stop['dest_lng'] is None:
+            return None
+        meters = geodesic((stop['dest_lat'], stop['dest_lng']), (float(lat), float(lng))).meters
+        return round(meters * 3.28084, 1)
+    except Exception:
+        return None
+
 def _finalize_stop_delivery(db, stop, stop_id, now_iso):
     """Shared post-delivery bookkeeping (address intel, building memory, route timing)."""
     route_id = stop['route_id'] if stop else None
@@ -5651,8 +5670,28 @@ def stop_delivered(stop_id):
         db.close()
         return redirect(url_for('driver_dashboard'))
     now_iso = datetime.now().isoformat()
-    db.execute("UPDATE stops SET status='delivered', delivered_at=? WHERE id=?", (now_iso, stop_id))
-    db.commit()
+    try:
+        d_lat = float(request.form.get('driver_lat')) if request.form.get('driver_lat') else None
+    except Exception:
+        d_lat = None
+    try:
+        d_lng = float(request.form.get('driver_lng')) if request.form.get('driver_lng') else None
+    except Exception:
+        d_lng = None
+    dist_ft = _delivery_distance_ft(stop, d_lat, d_lng)
+    try:
+        db.execute(
+            "UPDATE stops SET status='delivered', delivered_at=?, delivered_lat=?, delivered_lng=?, delivered_distance_ft=? WHERE id=?",
+            (now_iso, d_lat, d_lng, dist_ft, stop_id)
+        )
+        db.commit()
+    except Exception:
+        try: db._conn.rollback()
+        except: pass
+        db.execute("UPDATE stops SET status='delivered', delivered_at=? WHERE id=?", (now_iso, stop_id))
+        db.commit()
+    if dist_ft is not None and dist_ft > POD_GEOFENCE_FT:
+        log.warning(f'[POD] Off-location delivery: stop {stop_id} marked {dist_ft:.0f}ft from pin by {session.get("driver_name","driver")}')
     route_id = _finalize_stop_delivery(db, stop, stop_id, now_iso)
     db.commit()
     next_id = _next_pending_stop_id(db, route_id) if route_id else None
@@ -5675,24 +5714,40 @@ def stop_deliver(stop_id):
     data = request.get_json(silent=True) or {}
     photos = [data.get('pod_photo_1'), data.get('pod_photo_2'), data.get('pod_photo_3')]
     now_iso = datetime.now().isoformat()
+    try:
+        d_lat = float(data.get('driver_lat')) if data.get('driver_lat') is not None else None
+    except Exception:
+        d_lat = None
+    try:
+        d_lng = float(data.get('driver_lng')) if data.get('driver_lng') is not None else None
+    except Exception:
+        d_lng = None
+    dist_ft = _delivery_distance_ft(stop, d_lat, d_lng)
 
     try:
         db.execute(
             """UPDATE stops SET status='delivered', delivered_at=?, pod_photo_1=?, pod_photo_2=?,
-               pod_photo_3=?, pod_captured_at=? WHERE id=?""",
-            (now_iso, photos[0], photos[1], photos[2], now_iso, stop_id)
+               pod_photo_3=?, pod_captured_at=?, delivered_lat=?, delivered_lng=?, delivered_distance_ft=? WHERE id=?""",
+            (now_iso, photos[0], photos[1], photos[2], now_iso, d_lat, d_lng, dist_ft, stop_id)
         )
         db.commit()
     except Exception as e:
         log.error(f'POD storage failed for stop {stop_id}: {e}')
+        try: db._conn.rollback()
+        except: pass
         db.execute("UPDATE stops SET status='delivered', delivered_at=? WHERE id=?", (now_iso, stop_id))
         db.commit()
+
+    off_location = dist_ft is not None and dist_ft > POD_GEOFENCE_FT
+    if off_location:
+        log.warning(f'[POD] Off-location delivery: stop {stop_id} marked {dist_ft:.0f}ft from pin by {session.get("driver_name","driver")}')
 
     route_id = _finalize_stop_delivery(db, stop, stop_id, now_iso)
     db.commit()
     next_id = _next_pending_stop_id(db, route_id) if route_id else None
     db.close()
-    return jsonify({'ok': True, 'next_stop_id': next_id, 'route_id': route_id})
+    return jsonify({'ok': True, 'next_stop_id': next_id, 'route_id': route_id,
+                    'distance_ft': dist_ft, 'off_location': off_location})
 
 @app.route('/driver/stop/<int:stop_id>/pod')
 def stop_pod(stop_id):
@@ -5702,12 +5757,14 @@ def stop_pod(stop_id):
     db = get_db()
     stop = db.execute(
         "SELECT id, route_id, stop_number, address, customer_name, status, "
-        "pod_photo_1, pod_photo_2, pod_photo_3, pod_captured_at FROM stops WHERE id=?",
+        "pod_photo_1, pod_photo_2, pod_photo_3, pod_captured_at, "
+        "delivered_lat, delivered_lng, delivered_distance_ft FROM stops WHERE id=?",
         (stop_id,)
     ).fetchone()
     db.close()
     if not stop:
         return jsonify({'error': 'stop not found'}), 404
+    dist_ft = stop['delivered_distance_ft'] if 'delivered_distance_ft' in stop.keys() else None
     return jsonify({
         'stop_id': stop['id'],
         'route_id': stop['route_id'],
@@ -5720,6 +5777,10 @@ def stop_pod(stop_id):
         'pod_photo_3': stop['pod_photo_3'],
         'pod_captured_at': stop['pod_captured_at'],
         'has_pod': bool(stop['pod_photo_1'] or stop['pod_photo_2'] or stop['pod_photo_3']),
+        'delivered_lat': stop['delivered_lat'],
+        'delivered_lng': stop['delivered_lng'],
+        'distance_ft': dist_ft,
+        'off_location': (dist_ft is not None and dist_ft > POD_GEOFENCE_FT),
     })
 
 @app.route('/driver/stop/<int:stop_id>/unit', methods=['POST'])
