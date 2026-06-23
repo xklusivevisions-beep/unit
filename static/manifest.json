@@ -2,7 +2,7 @@
   "name": "UNIT Delivery",
   "short_name": "UNIT",
   "description": "Smart apartment delivery access platform",
-  "start_url": "/driver/login",
+  "start_url": "/",
   "display": "standalone",
   "background_color": "#0a0a0a",
   "theme_color": "#00ff88",

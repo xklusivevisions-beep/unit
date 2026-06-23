@@ -1,0 +1,31 @@
+{
+  "appId": "com.unitlogistics.unit",
+  "appName": "UNIT",
+  "webDir": "www",
+  "server": {
+    "url": "https://unit-6gxn.onrender.com",
+    "cleartext": false,
+    "allowNavigation": [
+      "unit-6gxn.onrender.com",
+      "*.onrender.com",
+      "api.mapbox.com",
+      "*.mapbox.com",
+      "*.tiles.mapbox.com"
+    ]
+  },
+  "ios": {
+    "contentInset": "always",
+    "limitsNavigationsToAppBoundDomains": false
+  },
+  "plugins": {
+    "SplashScreen": {
+      "launchShowDuration": 1200,
+      "backgroundColor": "#0a0a0a",
+      "showSpinner": false,
+      "androidScaleType": "CENTER_CROP"
+    },
+    "Geolocation": {
+      "permissions": ["location"]
+    }
+  }
+}
