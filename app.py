@@ -2689,6 +2689,33 @@ def init_db():
         "CREATE INDEX IF NOT EXISTS idx_payroll_adjustments_driver_date ON payroll_adjustments (driver_id, work_date)",
         # Per-driver default stop rate so payroll prefills sensibly
         "ALTER TABLE drivers ADD COLUMN default_rate REAL DEFAULT 0",
+        # ── Companies & managers (multi-tenant ops portal) ──
+        """CREATE TABLE IF NOT EXISTS companies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            slug TEXT UNIQUE NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )""",
+        """CREATE TABLE IF NOT EXISTS managers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            phone TEXT,
+            pin TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_managers_pin ON managers (pin)",
+        "ALTER TABLE drivers ADD COLUMN company_id INTEGER",
+        "CREATE INDEX IF NOT EXISTS idx_drivers_company ON drivers (company_id)",
+        """CREATE TABLE IF NOT EXISTS driver_checkins (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            driver_id INTEGER NOT NULL,
+            check_date TEXT NOT NULL,
+            status TEXT DEFAULT 'unknown',
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(driver_id, check_date)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_checkins_date ON driver_checkins (check_date)",
     ]:
         try:
             db.execute(migration)
@@ -2707,7 +2734,41 @@ def init_db():
     except Exception as e:
         log.warning(f'[address_intel] Failed to seed geocache: {e}')
 
+    _seed_companies_and_managers(db)
     db.close()
+
+def _seed_companies_and_managers(db):
+    """Bootstrap Rolling Logistics + default manager; link existing drivers."""
+    try:
+        if not _table_exists(db, 'companies'):
+            return
+        row = db.execute("SELECT id FROM companies WHERE slug = ?", ('rolling-logistics',)).fetchone()
+        if not row:
+            db.execute("INSERT INTO companies (name, slug) VALUES (?, ?)",
+                       ('Rolling Logistics', 'rolling-logistics'))
+            db.commit()
+            cid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+            mgr_pin = os.environ.get('MANAGER_PIN', '5678')
+            db.execute(
+                "INSERT INTO managers (company_id, name, pin) VALUES (?, ?, ?)",
+                (cid, 'Rolling Logistics Manager', mgr_pin)
+            )
+            db.commit()
+            log.info(f'[manager] Created Rolling Logistics (id={cid}), manager PIN={mgr_pin}')
+        else:
+            cid = row['id']
+        # Attach drivers whose company text mentions Rolling, or any unassigned driver
+        db.execute(
+            """UPDATE drivers SET company_id = ?
+               WHERE company_id IS NULL
+                  OR LOWER(COALESCE(company, '')) LIKE '%rolling%'""",
+            (cid,)
+        )
+        db.commit()
+    except Exception as e:
+        log.warning(f'[manager] Seed failed: {e}')
+        try: db._conn.rollback()
+        except: pass
 
 # ─── HELPERS ───────────────────────────────────────────────────
 
@@ -6422,10 +6483,9 @@ def admin():
     db.close()
     return render_template('admin.html', routes=routes, buildings=buildings, deliveries=deliveries, stats=stats, drivers_list=drivers_list)
 
-# ─── PAYROLL (manager operations layer) ──────────────────────
-# Pay week runs Saturday → Friday. Pay = stops × rate per stop, minus
-# claim deductions (e.g. $100 per claimed undelivered package), plus
-# any bonuses/reimbursements.
+# ─── MANAGER PORTAL (company ops — not app-owner admin) ───────
+# Managers (e.g. Rolling Logistics) see only their company's drivers,
+# routes, payroll, and daily check-ins.
 
 PAYROLL_DEDUCTION_KINDS = {'claim', 'deduction'}
 
@@ -6440,24 +6500,56 @@ def _payroll_week_bounds(anchor=None):
             d = datetime.now().date()
     else:
         d = anchor
-    days_since_sat = (d.weekday() - 5) % 7  # Mon=0 … Sun=6 ; Saturday=5
+    days_since_sat = (d.weekday() - 5) % 7
     start = d - timedelta(days=days_since_sat)
     return start, start + timedelta(days=6)
 
-def _build_payroll(db, start, end):
-    """Aggregate payroll for every driver with activity in the [start, end] window."""
+def _manager_session():
+    """Return (manager_id, company_id, manager_name, company_name) or Nones."""
+    return (
+        session.get('manager_id'),
+        session.get('company_id'),
+        session.get('manager_name'),
+        session.get('company_name'),
+    )
+
+def _require_manager():
+    if not session.get('manager_id'):
+        return redirect(url_for('manager_login'))
+    return None
+
+def _driver_in_company(db, driver_id, company_id):
+    row = db.execute("SELECT id FROM drivers WHERE id = ? AND company_id = ?",
+                     (driver_id, company_id)).fetchone()
+    return bool(row)
+
+def _company_driver_ids(db, company_id):
+    rows = db.execute("SELECT id FROM drivers WHERE company_id = ?", (company_id,)).fetchall()
+    return [r['id'] for r in rows]
+
+def _build_payroll(db, start, end, company_id):
+    """Aggregate payroll for one company's drivers in [start, end]."""
     start_s, end_s = start.isoformat(), end.isoformat()
     drivers = db.execute(
         "SELECT id, name, phone, company, COALESCE(default_rate, 0) AS default_rate "
-        "FROM drivers ORDER BY name"
+        "FROM drivers WHERE company_id = ? ORDER BY name",
+        (company_id,)
     ).fetchall()
+    driver_ids = [d['id'] for d in drivers]
+    if not driver_ids:
+        empty = {'gross': 0.0, 'deductions': 0.0, 'additions': 0.0, 'net': 0.0, 'stops': 0, 'drivers_paid': 0}
+        return [], empty, []
+
+    ph = ','.join('?' * len(driver_ids))
     lines = db.execute(
-        "SELECT * FROM payroll_days WHERE work_date >= ? AND work_date <= ? ORDER BY work_date, id",
-        (start_s, end_s)
+        f"SELECT * FROM payroll_days WHERE work_date >= ? AND work_date <= ? "
+        f"AND driver_id IN ({ph}) ORDER BY work_date, id",
+        (start_s, end_s, *driver_ids)
     ).fetchall()
     adjustments = db.execute(
-        "SELECT * FROM payroll_adjustments WHERE work_date >= ? AND work_date <= ? ORDER BY work_date, id",
-        (start_s, end_s)
+        f"SELECT * FROM payroll_adjustments WHERE work_date >= ? AND work_date <= ? "
+        f"AND driver_id IN ({ph}) ORDER BY work_date, id",
+        (start_s, end_s, *driver_ids)
     ).fetchall()
 
     by_driver = {}
@@ -6506,13 +6598,169 @@ def _build_payroll(db, start, end):
     groups.sort(key=lambda g: (g['driver']['name'] or '').lower())
     return groups, summary, drivers
 
-@app.route('/admin/payroll')
-def admin_payroll():
-    if not session.get('admin'):
-        return redirect(url_for('admin_login'))
+def _driver_reliability(db, driver_id, days=7):
+    """Simple reliability: delivery completion % over recent routes."""
+    since = (datetime.now().date() - timedelta(days=days)).isoformat()
+    row = db.execute(
+        """SELECT COUNT(*) AS total,
+                  SUM(CASE WHEN s.status = 'delivered' THEN 1 ELSE 0 END) AS done
+           FROM stops s
+           JOIN routes r ON s.route_id = r.id
+           WHERE r.driver_id = ? AND r.date >= ?""",
+        (driver_id, since)
+    ).fetchone()
+    total = (row['total'] or 0) if row else 0
+    done = (row['done'] or 0) if row else 0
+    if total == 0:
+        return None
+    return round(100 * done / total)
+
+def _route_eta_label(pending_stops):
+    """Rough ETA from remaining stops (~3.5 min/stop)."""
+    if pending_stops <= 0:
+        return 'Done'
+    mins = int(pending_stops * 3.5)
+    finish = datetime.now() + timedelta(minutes=mins)
+    late = finish.hour >= 21 or (finish.hour == 21 and finish.minute > 0)
+    label = finish.strftime('~%I:%M %p').lstrip('0')
+    if late:
+        return label + ' ⚠️ past 9'
+    return label
+
+@app.route('/manager/login', methods=['GET', 'POST'])
+def manager_login():
+    error = None
+    ip = get_real_ip()
+    if request.method == 'POST':
+        if is_rate_limited(ip):
+            return render_template('manager_login.html', error='Too many attempts. Try again in 5 minutes.')
+        pin = request.form.get('pin', '').strip()
+        db = get_db()
+        mgr = db.execute(
+            """SELECT m.*, c.name AS company_name
+               FROM managers m JOIN companies c ON c.id = m.company_id
+               WHERE m.pin = ?""",
+            (pin,)
+        ).fetchone()
+        db.close()
+        if mgr:
+            session['manager_id'] = mgr['id']
+            session['company_id'] = mgr['company_id']
+            session['manager_name'] = mgr['name']
+            session['company_name'] = mgr['company_name']
+            clear_attempts(ip)
+            return redirect(url_for('manager_dashboard'))
+        record_attempt(ip)
+        error = 'Wrong PIN'
+    return render_template('manager_login.html', error=error)
+
+@app.route('/manager/logout')
+def manager_logout():
+    for k in ('manager_id', 'company_id', 'manager_name', 'company_name'):
+        session.pop(k, None)
+    return redirect(url_for('index'))
+
+@app.route('/manager')
+def manager_dashboard():
+    guard = _require_manager()
+    if guard:
+        return guard
+    _, company_id, manager_name, company_name = _manager_session()
+    today = datetime.now().date().isoformat()
+    db = get_db()
+    drivers = db.execute(
+        """SELECT d.*, COALESCE(c.status, 'unknown') AS checkin_status
+           FROM drivers d
+           LEFT JOIN driver_checkins c ON c.driver_id = d.id AND c.check_date = ?
+           WHERE d.company_id = ?
+           ORDER BY d.name""",
+        (today, company_id)
+    ).fetchall()
+    team = []
+    for d in drivers:
+        routes_today = db.execute(
+            """SELECT r.*,
+                      (SELECT COUNT(*) FROM stops WHERE route_id = r.id) AS total_stops,
+                      (SELECT COUNT(*) FROM stops WHERE route_id = r.id AND status = 'delivered') AS done_stops,
+                      (SELECT COUNT(*) FROM stops WHERE route_id = r.id AND status NOT IN ('delivered','failed')) AS pending_stops
+               FROM routes r
+               WHERE r.driver_id = ? AND r.date = ?
+               ORDER BY r.created_at DESC""",
+            (d['id'], today)
+        ).fetchall()
+        route_info = None
+        if routes_today:
+            r = routes_today[0]
+            pending = r['pending_stops'] or 0
+            route_info = {
+                'name': r['name'] or 'Route',
+                'total': r['total_stops'] or 0,
+                'done': r['done_stops'] or 0,
+                'pending': pending,
+                'eta': _route_eta_label(pending),
+            }
+        team.append({
+            'driver': d,
+            'checkin': d['checkin_status'],
+            'reliability': _driver_reliability(db, d['id']),
+            'route': route_info,
+        })
+    checked_in = sum(1 for t in team if t['checkin'] == 'in')
+    not_in = sum(1 for t in team if t['checkin'] == 'out')
+    unknown = sum(1 for t in team if t['checkin'] not in ('in', 'out'))
+    db.close()
+    return render_template(
+        'manager_dashboard.html',
+        team=team, today=today,
+        manager_name=manager_name, company_name=company_name,
+        checked_in=checked_in, not_in=not_in, unknown=unknown,
+    )
+
+@app.route('/manager/checkin', methods=['POST'])
+def manager_checkin():
+    guard = _require_manager()
+    if guard:
+        return guard
+    _, company_id, _, _ = _manager_session()
+    driver_id = request.form.get('driver_id', '').strip()
+    status = request.form.get('status', 'unknown').strip()
+    if status not in ('in', 'out', 'unknown'):
+        status = 'unknown'
+    today = datetime.now().date().isoformat()
+    if not driver_id.isdigit():
+        return redirect(url_for('manager_dashboard'))
+    db = get_db()
+    if not _driver_in_company(db, int(driver_id), company_id):
+        db.close()
+        return redirect(url_for('manager_dashboard'))
+    now = datetime.now().isoformat()
+    existing = db.execute(
+        "SELECT id FROM driver_checkins WHERE driver_id = ? AND check_date = ?",
+        (int(driver_id), today)
+    ).fetchone()
+    if existing:
+        db.execute(
+            "UPDATE driver_checkins SET status = ?, updated_at = ? WHERE id = ?",
+            (status, now, existing['id'])
+        )
+    else:
+        db.execute(
+            "INSERT INTO driver_checkins (driver_id, check_date, status, updated_at) VALUES (?,?,?,?)",
+            (int(driver_id), today, status, now)
+        )
+    db.commit()
+    db.close()
+    return redirect(url_for('manager_dashboard'))
+
+@app.route('/manager/payroll')
+def manager_payroll():
+    guard = _require_manager()
+    if guard:
+        return guard
+    _, company_id, _, company_name = _manager_session()
     start, end = _payroll_week_bounds(request.args.get('week'))
     db = get_db()
-    groups, summary, all_drivers = _build_payroll(db, start, end)
+    groups, summary, all_drivers = _build_payroll(db, start, end, company_id)
     db.close()
     return render_template(
         'payroll.html',
@@ -6523,25 +6771,32 @@ def admin_payroll():
         prev_week=(start - timedelta(days=7)).isoformat(),
         next_week=(start + timedelta(days=7)).isoformat(),
         today_s=datetime.now().date().isoformat(),
+        company_name=company_name,
     )
 
-@app.route('/admin/payroll/pull', methods=['POST'])
-def admin_payroll_pull():
-    """Prefill payroll line items from delivered UNIT stops for the week."""
-    if not session.get('admin'):
-        return redirect(url_for('admin_login'))
+@app.route('/manager/payroll/pull', methods=['POST'])
+def manager_payroll_pull():
+    guard = _require_manager()
+    if guard:
+        return guard
+    _, company_id, _, _ = _manager_session()
     start, end = _payroll_week_bounds(request.form.get('week'))
     start_s, end_s = start.isoformat(), end.isoformat()
-    db = get_db()
+    driver_ids = _company_driver_ids(db := get_db(), company_id)
+    if not driver_ids:
+        db.close()
+        flash('No drivers on your team yet.', 'payroll')
+        return redirect(url_for('manager_payroll', week=start_s))
+    ph = ','.join('?' * len(driver_ids))
     rows = db.execute(
-        """SELECT r.driver_id AS driver_id, substr(s.delivered_at, 1, 10) AS d, COUNT(*) AS cnt
-           FROM stops s
-           JOIN routes r ON s.route_id = r.id
-           WHERE s.status = 'delivered' AND s.delivered_at IS NOT NULL
-             AND substr(s.delivered_at, 1, 10) >= ? AND substr(s.delivered_at, 1, 10) <= ?
-             AND r.driver_id IS NOT NULL
-           GROUP BY r.driver_id, substr(s.delivered_at, 1, 10)""",
-        (start_s, end_s)
+        f"""SELECT r.driver_id AS driver_id, substr(s.delivered_at, 1, 10) AS d, COUNT(*) AS cnt
+            FROM stops s
+            JOIN routes r ON s.route_id = r.id
+            WHERE s.status = 'delivered' AND s.delivered_at IS NOT NULL
+              AND substr(s.delivered_at, 1, 10) >= ? AND substr(s.delivered_at, 1, 10) <= ?
+              AND r.driver_id IN ({ph})
+            GROUP BY r.driver_id, substr(s.delivered_at, 1, 10)""",
+        (start_s, end_s, *driver_ids)
     ).fetchall()
     created = updated = 0
     for row in rows:
@@ -6568,16 +6823,24 @@ def admin_payroll_pull():
     db.commit()
     db.close()
     flash(f'Pulled UNIT deliveries — {created} day(s) added, {updated} updated.', 'payroll')
-    return redirect(url_for('admin_payroll', week=start_s))
+    return redirect(url_for('manager_payroll', week=start_s))
 
-@app.route('/admin/payroll/save', methods=['POST'])
-def admin_payroll_save():
-    """Save inline edits (stops / rate / area) for all line items on the page."""
-    if not session.get('admin'):
-        return redirect(url_for('admin_login'))
+@app.route('/manager/payroll/save', methods=['POST'])
+def manager_payroll_save():
+    guard = _require_manager()
+    if guard:
+        return guard
+    _, company_id, _, _ = _manager_session()
     start, _ = _payroll_week_bounds(request.form.get('week'))
     db = get_db()
     for lid in [x for x in request.form.get('line_ids', '').split(',') if x.strip().isdigit()]:
+        row = db.execute(
+            "SELECT pd.driver_id FROM payroll_days pd JOIN drivers d ON d.id = pd.driver_id "
+            "WHERE pd.id = ? AND d.company_id = ?",
+            (int(lid), company_id)
+        ).fetchone()
+        if not row:
+            continue
         stops = request.form.get(f'stops_{lid}', '').strip()
         rate = request.form.get(f'rate_{lid}', '').strip()
         area = request.form.get(f'area_{lid}', '').strip()
@@ -6592,12 +6855,14 @@ def admin_payroll_save():
     db.commit()
     db.close()
     flash('Payroll saved.', 'payroll')
-    return redirect(url_for('admin_payroll', week=start.isoformat()))
+    return redirect(url_for('manager_payroll', week=start.isoformat()))
 
-@app.route('/admin/payroll/line/add', methods=['POST'])
-def admin_payroll_line_add():
-    if not session.get('admin'):
-        return redirect(url_for('admin_login'))
+@app.route('/manager/payroll/line/add', methods=['POST'])
+def manager_payroll_line_add():
+    guard = _require_manager()
+    if guard:
+        return guard
+    _, company_id, _, _ = _manager_session()
     start, _ = _payroll_week_bounds(request.form.get('week'))
     driver_id = request.form.get('driver_id', '').strip()
     work_date = request.form.get('work_date', '').strip()
@@ -6605,11 +6870,14 @@ def admin_payroll_line_add():
     rate = request.form.get('rate', '').strip()
     area = request.form.get('area', '').strip()
     if driver_id.isdigit() and work_date:
+        db = get_db()
+        if not _driver_in_company(db, int(driver_id), company_id):
+            db.close()
+            return redirect(url_for('manager_payroll', week=start.isoformat()))
         try: stops_v = int(float(stops)) if stops else 0
         except Exception: stops_v = 0
         try: rate_v = float(rate) if rate else 0
         except Exception: rate_v = 0
-        db = get_db()
         db.execute(
             "INSERT INTO payroll_days (driver_id, work_date, stops, rate_per_stop, area, source) "
             "VALUES (?,?,?,?,?,?)",
@@ -6619,23 +6887,31 @@ def admin_payroll_line_add():
             db.execute("UPDATE drivers SET default_rate = ? WHERE id = ?", (rate_v, int(driver_id)))
         db.commit()
         db.close()
-    return redirect(url_for('admin_payroll', week=start.isoformat()))
+    return redirect(url_for('manager_payroll', week=start.isoformat()))
 
-@app.route('/admin/payroll/line/<int:line_id>/delete', methods=['POST'])
-def admin_payroll_line_delete(line_id):
-    if not session.get('admin'):
-        return redirect(url_for('admin_login'))
+@app.route('/manager/payroll/line/<int:line_id>/delete', methods=['POST'])
+def manager_payroll_line_delete(line_id):
+    guard = _require_manager()
+    if guard:
+        return guard
+    _, company_id, _, _ = _manager_session()
     start, _ = _payroll_week_bounds(request.form.get('week'))
     db = get_db()
-    db.execute("DELETE FROM payroll_days WHERE id = ?", (line_id,))
+    db.execute(
+        "DELETE FROM payroll_days WHERE id = ? AND driver_id IN "
+        "(SELECT id FROM drivers WHERE company_id = ?)",
+        (line_id, company_id)
+    )
     db.commit()
     db.close()
-    return redirect(url_for('admin_payroll', week=start.isoformat()))
+    return redirect(url_for('manager_payroll', week=start.isoformat()))
 
-@app.route('/admin/payroll/adjustment/add', methods=['POST'])
-def admin_payroll_adjustment_add():
-    if not session.get('admin'):
-        return redirect(url_for('admin_login'))
+@app.route('/manager/payroll/adjustment/add', methods=['POST'])
+def manager_payroll_adjustment_add():
+    guard = _require_manager()
+    if guard:
+        return guard
+    _, company_id, _, _ = _manager_session()
     start, _ = _payroll_week_bounds(request.form.get('week'))
     driver_id = request.form.get('driver_id', '').strip()
     work_date = request.form.get('work_date', '').strip() or start.isoformat()
@@ -6643,41 +6919,52 @@ def admin_payroll_adjustment_add():
     amount = request.form.get('amount', '').strip()
     note = request.form.get('note', '').strip()
     if driver_id.isdigit():
+        db = get_db()
+        if not _driver_in_company(db, int(driver_id), company_id):
+            db.close()
+            return redirect(url_for('manager_payroll', week=start.isoformat()))
         try: amount_v = abs(float(amount)) if amount else 0
         except Exception: amount_v = 0
         if amount_v:
-            db = get_db()
             db.execute(
                 "INSERT INTO payroll_adjustments (driver_id, work_date, kind, amount, note) "
                 "VALUES (?,?,?,?,?)",
                 (int(driver_id), work_date, kind, amount_v, note or None)
             )
             db.commit()
-            db.close()
-    return redirect(url_for('admin_payroll', week=start.isoformat()))
+        db.close()
+    return redirect(url_for('manager_payroll', week=start.isoformat()))
 
-@app.route('/admin/payroll/adjustment/<int:adj_id>/delete', methods=['POST'])
-def admin_payroll_adjustment_delete(adj_id):
-    if not session.get('admin'):
-        return redirect(url_for('admin_login'))
+@app.route('/manager/payroll/adjustment/<int:adj_id>/delete', methods=['POST'])
+def manager_payroll_adjustment_delete(adj_id):
+    guard = _require_manager()
+    if guard:
+        return guard
+    _, company_id, _, _ = _manager_session()
     start, _ = _payroll_week_bounds(request.form.get('week'))
     db = get_db()
-    db.execute("DELETE FROM payroll_adjustments WHERE id = ?", (adj_id,))
+    db.execute(
+        "DELETE FROM payroll_adjustments WHERE id = ? AND driver_id IN "
+        "(SELECT id FROM drivers WHERE company_id = ?)",
+        (adj_id, company_id)
+    )
     db.commit()
     db.close()
-    return redirect(url_for('admin_payroll', week=start.isoformat()))
+    return redirect(url_for('manager_payroll', week=start.isoformat()))
 
-@app.route('/admin/payroll/export')
-def admin_payroll_export():
-    if not session.get('admin'):
-        return redirect(url_for('admin_login'))
+@app.route('/manager/payroll/export')
+def manager_payroll_export():
+    guard = _require_manager()
+    if guard:
+        return guard
+    _, company_id, _, company_name = _manager_session()
     start, end = _payroll_week_bounds(request.args.get('week'))
     db = get_db()
-    groups, summary, _ = _build_payroll(db, start, end)
+    groups, summary, _ = _build_payroll(db, start, end, company_id)
     db.close()
     out = io.StringIO()
     w = csv.writer(out)
-    w.writerow(['UNIT Payroll', f'{start.isoformat()} to {end.isoformat()}'])
+    w.writerow([f'{company_name} Payroll', f'{start.isoformat()} to {end.isoformat()}'])
     w.writerow([])
     w.writerow(['Driver', 'Phone', 'Stops', 'Gross', 'Additions', 'Deductions', 'Net Pay'])
     for g in groups:
@@ -6688,20 +6975,33 @@ def admin_payroll_export():
     w.writerow(['TOTAL', '', summary['stops'], f"{summary['gross']:.2f}",
                 f"{summary['additions']:.2f}", f"{summary['deductions']:.2f}", f"{summary['net']:.2f}"])
     from flask import Response
+    slug = (company_name or 'payroll').lower().replace(' ', '_')
     return Response(out.getvalue(), mimetype='text/csv',
-                    headers={'Content-Disposition': f'attachment; filename=unit_payroll_{start.isoformat()}.csv'})
+                    headers={'Content-Disposition': f'attachment; filename={slug}_{start.isoformat()}.csv'})
 
-@app.route('/admin/payroll/statement/<int:driver_id>')
-def admin_payroll_statement(driver_id):
-    if not session.get('admin'):
-        return redirect(url_for('admin_login'))
+@app.route('/manager/payroll/statement/<int:driver_id>')
+def manager_payroll_statement(driver_id):
+    guard = _require_manager()
+    if guard:
+        return guard
+    _, company_id, _, _ = _manager_session()
+    if not _driver_in_company(db := get_db(), driver_id, company_id):
+        db.close()
+        return render_template('payroll_statement.html', grp=None,
+                               week_start=datetime.now().date(), week_end=datetime.now().date())
     start, end = _payroll_week_bounds(request.args.get('week'))
-    db = get_db()
-    groups, _, _ = _build_payroll(db, start, end)
+    groups, _, _ = _build_payroll(db, start, end, company_id)
     db.close()
     grp = next((g for g in groups if g['driver']['id'] == driver_id), None)
     return render_template('payroll_statement.html', grp=grp,
                            week_start=start, week_end=end, week_start_s=start.isoformat())
+
+# Legacy admin payroll URLs → manager portal
+@app.route('/admin/payroll')
+@app.route('/admin/payroll/<path:subpath>')
+def admin_payroll_redirect(subpath=None):
+    flash('Payroll moved to the Manager portal.', 'payroll')
+    return redirect(url_for('manager_login'))
 
 # ─── TEST SMS ─────────────────────────────────────────────────
 

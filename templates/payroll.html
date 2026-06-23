@@ -31,8 +31,11 @@
   <div class="d-flex align-items-center mb-3">
     <div class="unit-logo me-auto" style="font-size:1.3rem;">UNIT<span>.</span></div>
     <span class="pay-pill" style="background:#00ff8822;color:#00ff88;">PAYROLL</span>
-    <a href="/admin" class="ms-3" style="color:#555;font-size:0.8rem;">← Admin</a>
+    <a href="/manager" class="ms-3" style="color:#555;font-size:0.8rem;">← Team</a>
   </div>
+  {% if company_name %}
+  <div class="mb-2"><small class="text-secondary">{{ company_name }}</small></div>
+  {% endif %}
 
   {% with messages = get_flashed_messages(category_filter=['payroll']) %}
   {% for msg in messages %}
@@ -42,12 +45,12 @@
 
   <!-- Week navigation -->
   <div class="d-flex align-items-center justify-content-between mb-3 seg">
-    <div class="week-nav"><a href="/admin/payroll?week={{ prev_week }}">‹</a></div>
+    <div class="week-nav"><a href="/manager/payroll?week={{ prev_week }}">‹</a></div>
     <div class="text-center">
       <div style="font-weight:700;font-size:1rem;">{{ week_start.strftime('%b %d') }} – {{ week_end.strftime('%b %d, %Y') }}</div>
       <small class="text-secondary">Pay week · Saturday → Friday</small>
     </div>
-    <div class="week-nav"><a href="/admin/payroll?week={{ next_week }}">›</a></div>
+    <div class="week-nav"><a href="/manager/payroll?week={{ next_week }}">›</a></div>
   </div>
 
   <!-- Summary -->
@@ -60,13 +63,13 @@
 
   <!-- Actions -->
   <div class="d-flex gap-2 mb-3 flex-wrap">
-    <form method="POST" action="/admin/payroll/pull" style="flex:1;min-width:160px;">
+    <form method="POST" action="/manager/payroll/pull" style="flex:1;min-width:160px;">
       <input type="hidden" name="week" value="{{ week_start_s }}">
       <button type="submit" class="btn btn-sm w-100" style="background:#0088ff22;color:#0088ff;border:1px solid #0088ff44;font-weight:700;">
         <i class="fas fa-rotate me-1"></i> Pull UNIT Deliveries
       </button>
     </form>
-    <a href="/admin/payroll/export?week={{ week_start_s }}" class="btn btn-sm" style="background:#1a1a1a;color:#aaa;border:1px solid #333;font-weight:700;min-width:120px;">
+    <a href="/manager/payroll/export?week={{ week_start_s }}" class="btn btn-sm" style="background:#1a1a1a;color:#aaa;border:1px solid #333;font-weight:700;min-width:120px;">
       <i class="fas fa-download me-1"></i> Export CSV
     </a>
   </div>
@@ -74,7 +77,7 @@
   <!-- Add pay line -->
   <div class="seg">
     <div class="seg-title"><i class="fas fa-plus me-1"></i> ADD PAY LINE</div>
-    <form method="POST" action="/admin/payroll/line/add">
+    <form method="POST" action="/manager/payroll/line/add">
       <input type="hidden" name="week" value="{{ week_start_s }}">
       <div class="row g-2">
         <div class="col-6 col-md-3">
@@ -99,7 +102,7 @@
   <!-- Add adjustment -->
   <div class="seg">
     <div class="seg-title"><i class="fas fa-sliders me-1"></i> ADD DEDUCTION / BONUS</div>
-    <form method="POST" action="/admin/payroll/adjustment/add">
+    <form method="POST" action="/manager/payroll/adjustment/add">
       <input type="hidden" name="week" value="{{ week_start_s }}">
       <div class="row g-2">
         <div class="col-6 col-md-3">
@@ -129,7 +132,7 @@
   </div>
 
   <!-- Hidden save form: editable inputs below attach to it via form="payrollSaveForm" -->
-  <form id="payrollSaveForm" method="POST" action="/admin/payroll/save">
+  <form id="payrollSaveForm" method="POST" action="/manager/payroll/save">
     <input type="hidden" name="week" value="{{ week_start_s }}">
     {% set ns = namespace(ids=[]) %}
     {% for g in groups %}{% for l in g.lines %}{% set ns.ids = ns.ids + [l.row.id|string] %}{% endfor %}{% endfor %}
@@ -146,7 +149,7 @@
       </div>
       <div class="text-end">
         <div style="font-size:1.2rem;font-weight:900;color:#00ff88;">${{ '%.2f'|format(g.net) }}</div>
-        <a href="/admin/payroll/statement/{{ g.driver.id }}?week={{ week_start_s }}" target="_blank" style="color:#0088ff;font-size:0.72rem;text-decoration:none;"><i class="fas fa-file-lines me-1"></i>Statement</a>
+        <a href="/manager/payroll/statement/{{ g.driver.id }}?week={{ week_start_s }}" target="_blank" style="color:#0088ff;font-size:0.72rem;text-decoration:none;"><i class="fas fa-file-lines me-1"></i>Statement</a>
       </div>
     </div>
 
@@ -161,7 +164,7 @@
       <input class="mini-input pay-stops" form="payrollSaveForm" name="stops_{{ l.row.id }}" type="number" min="0" value="{{ l.row.stops or 0 }}" data-id="{{ l.row.id }}">
       <input class="mini-input pay-rate" form="payrollSaveForm" name="rate_{{ l.row.id }}" type="number" step="0.01" min="0" value="{{ '%.2f'|format(l.row.rate_per_stop or 0) }}" data-id="{{ l.row.id }}">
       <div class="amt" id="amt-{{ l.row.id }}">${{ '%.2f'|format(l.amount) }}</div>
-      <form method="POST" action="/admin/payroll/line/{{ l.row.id }}/delete" onsubmit="return confirm('Delete this line?')">
+      <form method="POST" action="/manager/payroll/line/{{ l.row.id }}/delete" onsubmit="return confirm('Delete this line?')">
         <input type="hidden" name="week" value="{{ week_start_s }}">
         <button type="submit" class="icon-btn" title="Delete"><i class="fas fa-xmark"></i></button>
       </form>
@@ -180,7 +183,7 @@
         {% endif %}
         <span style="color:#aaa;text-transform:capitalize;">{{ a.kind }}</span>
         <span class="text-secondary" style="flex:1;">{{ a.note or '' }} <span style="color:#444;">· {{ a.work_date }}</span></span>
-        <form method="POST" action="/admin/payroll/adjustment/{{ a.id }}/delete">
+        <form method="POST" action="/manager/payroll/adjustment/{{ a.id }}/delete">
           <input type="hidden" name="week" value="{{ week_start_s }}">
           <button type="submit" class="icon-btn" title="Remove"><i class="fas fa-xmark"></i></button>
         </form>
@@ -214,9 +217,9 @@
 <!-- Bottom Nav -->
 <div class="nav-bottom">
   <div class="d-flex justify-content-around">
-    <a href="/driver"><i class="fas fa-home"></i>Home</a>
-    <a href="/admin"><i class="fas fa-chart-bar"></i>Admin</a>
-    <a href="/admin/payroll" class="active"><i class="fas fa-money-check-dollar"></i>Payroll</a>
+    <a href="/manager"><i class="fas fa-users"></i>Team</a>
+    <a href="/manager/payroll" class="active"><i class="fas fa-money-check-dollar"></i>Payroll</a>
+    <a href="/manager/logout"><i class="fas fa-right-from-bracket"></i>Logout</a>
   </div>
 </div>
 

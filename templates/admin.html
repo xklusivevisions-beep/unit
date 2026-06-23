@@ -77,15 +77,10 @@
     </div>
   </div>
 
-  <!-- Payroll entry -->
-  <a href="/admin/payroll" class="card p-3 mb-4 text-decoration-none d-flex align-items-center justify-content-between"
-     style="border-color:#00ff8855;background:#00ff8810;">
-    <div>
-      <div class="fw-bold small" style="color:#00ff88;"><i class="fas fa-money-check-dollar me-2"></i>Payroll</div>
-      <small class="text-secondary">Weekly driver pay (Sat→Fri) — stops × rate, claims &amp; bonuses, CSV export</small>
-    </div>
-    <i class="fas fa-chevron-right" style="color:#00ff88;"></i>
-  </a>
+  <!-- Owner-only: backend tools, not day-to-day ops -->
+  <p class="text-secondary small mb-3" style="font-size:0.8rem;">
+    App owner panel — SMS, geocoding, global buildings. Managers use the <a href="/manager/login" style="color:#0088ff;">Manager portal</a> for team &amp; payroll.
+  </p>
 
   <!-- Tabs -->
   <div class="d-flex mb-3" style="border-bottom:1px solid #222;">
@@ -278,8 +273,8 @@
 <div class="nav-bottom">
   <div class="d-flex justify-content-around">
     <a href="/driver"><i class="fas fa-home"></i>Home</a>
-    <a href="/admin/payroll"><i class="fas fa-money-check-dollar"></i>Payroll</a>
-    <a href="/admin" class="active"><i class="fas fa-chart-bar"></i>Admin</a>
+    <a href="/driver/lookup"><i class="fas fa-search"></i>Lookup</a>
+    <a href="/admin" class="active"><i class="fas fa-wrench"></i>Owner</a>
   </div>
 </div>
 

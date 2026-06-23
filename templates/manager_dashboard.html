@@ -1,0 +1,129 @@
+{% extends 'base.html' %}
+{% block title %}UNIT — {{ company_name }}{% endblock %}
+{% block content %}
+<style>
+  .team-card {
+    background:#111; border:1px solid #222; border-radius:14px;
+    padding:14px 16px; margin-bottom:10px;
+  }
+  .dot { width:12px; height:12px; border-radius:50%; display:inline-block; flex-shrink:0; }
+  .dot-in { background:#00ff88; box-shadow:0 0 8px #00ff8866; }
+  .dot-out { background:#ff3333; box-shadow:0 0 8px #ff333366; }
+  .dot-unknown { background:#444; }
+  .check-btn {
+    border:none; border-radius:8px; padding:6px 12px; font-size:0.72rem;
+    font-weight:700; cursor:pointer;
+  }
+  .pill { display:inline-block; padding:2px 10px; border-radius:20px; font-size:0.7rem; font-weight:700; }
+</style>
+
+<div class="container-fluid p-3 pb-nav">
+
+  <div class="d-flex align-items-center mb-3">
+    <div class="unit-logo me-auto" style="font-size:1.3rem;">UNIT<span>.</span></div>
+    <span class="pill" style="background:#0088ff22;color:#0088ff;">MANAGER</span>
+    <a href="/manager/logout" class="ms-3" style="color:#555;font-size:0.8rem;">Logout</a>
+  </div>
+
+  <div class="mb-3">
+    <div class="fw-bold" style="font-size:1.1rem;">{{ company_name }}</div>
+    <small class="text-secondary">{{ manager_name }} · Today {{ today }}</small>
+  </div>
+
+  <!-- Attendance summary -->
+  <div class="row g-2 mb-4">
+    <div class="col-4">
+      <div class="stat-card">
+        <div class="stat-number" style="color:#00ff88;font-size:1.6rem;">{{ checked_in }}</div>
+        <small class="text-secondary" style="font-size:0.7rem;">🟢 Coming in</small>
+      </div>
+    </div>
+    <div class="col-4">
+      <div class="stat-card">
+        <div class="stat-number" style="color:#ff3333;font-size:1.6rem;">{{ not_in }}</div>
+        <small class="text-secondary" style="font-size:0.7rem;">🔴 Not in</small>
+      </div>
+    </div>
+    <div class="col-4">
+      <div class="stat-card">
+        <div class="stat-number" style="color:#666;font-size:1.6rem;">{{ unknown }}</div>
+        <small class="text-secondary" style="font-size:0.7rem;">⚪ Unknown</small>
+      </div>
+    </div>
+  </div>
+
+  <div class="d-flex justify-content-between align-items-center mb-2">
+    <div class="fw-bold small" style="color:#aaa;letter-spacing:0.08em;">TODAY'S TEAM</div>
+    <a href="/manager/payroll" style="color:#00ff88;font-size:0.8rem;text-decoration:none;">
+      <i class="fas fa-money-check-dollar me-1"></i>Payroll
+    </a>
+  </div>
+
+  {% for t in team %}
+  <div class="team-card">
+    <div class="d-flex align-items-start gap-3">
+      <span class="dot mt-1 {% if t.checkin == 'in' %}dot-in{% elif t.checkin == 'out' %}dot-out{% else %}dot-unknown{% endif %}"></span>
+      <div style="flex:1;min-width:0;">
+        <div class="d-flex justify-content-between align-items-start">
+          <div>
+            <div class="fw-bold">{{ t.driver.name }}</div>
+            <small class="text-secondary">{{ t.driver.phone or '—' }}</small>
+          </div>
+          {% if t.reliability is not none %}
+          <span class="pill" style="background:{% if t.reliability >= 90 %}#00ff8822;color:#00ff88{% elif t.reliability >= 75 %}#ffaa0022;color:#ffaa00{% else %}#ff333322;color:#ff3333{% endif %};">
+            {{ t.reliability|int }}% reliable
+          </span>
+          {% endif %}
+        </div>
+
+        {% if t.route %}
+        <div class="mt-2 p-2" style="background:#0a0a0a;border-radius:10px;font-size:0.82rem;">
+          <div class="d-flex justify-content-between">
+            <span class="text-secondary"><i class="fas fa-route me-1"></i>{{ t.route.name }}</span>
+            <span style="color:#00ff88;">{{ t.route.done }}/{{ t.route.total }} delivered</span>
+          </div>
+          <div class="d-flex justify-content-between mt-1">
+            <span class="text-secondary">{{ t.route.pending }} left</span>
+            <span style="color:{% if 'past 9' in t.route.eta %}#ff3333{% else %}#aaa{% endif %};">Est. finish {{ t.route.eta }}</span>
+          </div>
+        </div>
+        {% else %}
+        <small class="text-secondary d-block mt-2">No route loaded today</small>
+        {% endif %}
+
+        <div class="d-flex gap-2 mt-3">
+          <form method="POST" action="/manager/checkin">
+            <input type="hidden" name="driver_id" value="{{ t.driver.id }}">
+            <input type="hidden" name="status" value="in">
+            <button type="submit" class="check-btn" style="background:#00ff8822;color:#00ff88;">🟢 In</button>
+          </form>
+          <form method="POST" action="/manager/checkin">
+            <input type="hidden" name="driver_id" value="{{ t.driver.id }}">
+            <input type="hidden" name="status" value="out">
+            <button type="submit" class="check-btn" style="background:#ff333322;color:#ff3333;">🔴 Out</button>
+          </form>
+          <form method="POST" action="/manager/checkin">
+            <input type="hidden" name="driver_id" value="{{ t.driver.id }}">
+            <input type="hidden" name="status" value="unknown">
+            <button type="submit" class="check-btn" style="background:#222;color:#888;">Reset</button>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+  {% else %}
+  <div class="text-center text-secondary py-5">
+    <p>No drivers on your team yet.<br>Assign drivers to <strong>{{ company_name }}</strong> from the owner admin panel.</p>
+  </div>
+  {% endfor %}
+
+</div>
+
+<div class="nav-bottom">
+  <div class="d-flex justify-content-around">
+    <a href="/manager" class="active"><i class="fas fa-users"></i>Team</a>
+    <a href="/manager/payroll"><i class="fas fa-money-check-dollar"></i>Payroll</a>
+    <a href="/manager/logout"><i class="fas fa-right-from-bracket"></i>Logout</a>
+  </div>
+</div>
+{% endblock %}
