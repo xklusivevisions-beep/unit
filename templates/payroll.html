@@ -1,0 +1,236 @@
+{% extends 'base.html' %}
+{% block title %}UNIT — Payroll{% endblock %}
+{% block content %}
+<style>
+  .pay-card { background:#111; border:1px solid #222; border-radius:14px; padding:16px; margin-bottom:14px; }
+  .pay-pill { display:inline-block; padding:2px 10px; border-radius:20px; font-size:0.7rem; font-weight:700; }
+  .line-grid {
+    display:grid; grid-template-columns: 88px 1fr 64px 78px 92px 34px;
+    gap:8px; align-items:center; margin-bottom:8px;
+  }
+  .line-grid input { padding:8px 10px !important; min-height:40px; font-size:0.85rem; }
+  .line-head { color:#666; font-size:0.65rem; letter-spacing:0.05em; text-transform:uppercase; }
+  .mini-input { background:#1a1a1a; border:1px solid #333; color:#fff; border-radius:8px; width:100%; }
+  .amt { font-weight:700; color:#00ff88; text-align:right; font-size:0.85rem; }
+  .icon-btn { background:none; border:none; color:#555; cursor:pointer; font-size:0.9rem; padding:6px; }
+  .icon-btn:hover { color:#ff3333; }
+  .week-nav a { color:#00ff88; text-decoration:none; font-size:1.1rem; padding:4px 12px; }
+  .seg { background:#0d0d0d; border:1px solid #222; border-radius:12px; padding:14px; margin-bottom:14px; }
+  .seg-title { color:#00ff88; font-size:0.8rem; font-weight:700; letter-spacing:0.05em; margin-bottom:10px; }
+  .adj-row { display:flex; align-items:center; gap:8px; font-size:0.82rem; padding:6px 0; border-top:1px solid #1c1c1c; }
+  .sum-num { font-size:1.5rem; font-weight:900; }
+  @media (max-width:768px){
+    .line-grid { grid-template-columns: 70px 1fr 52px 64px 76px 30px; gap:6px; }
+    .line-grid input { font-size:16px !important; }
+  }
+</style>
+
+<div class="container-fluid p-3 pb-nav">
+
+  <!-- Header -->
+  <div class="d-flex align-items-center mb-3">
+    <div class="unit-logo me-auto" style="font-size:1.3rem;">UNIT<span>.</span></div>
+    <span class="pay-pill" style="background:#00ff8822;color:#00ff88;">PAYROLL</span>
+    <a href="/admin" class="ms-3" style="color:#555;font-size:0.8rem;">← Admin</a>
+  </div>
+
+  {% with messages = get_flashed_messages(category_filter=['payroll']) %}
+  {% for msg in messages %}
+  <div style="background:#001a00;border:1px solid #00ff8866;border-radius:12px;padding:12px 14px;margin-bottom:14px;color:#00ff88;font-size:0.85rem;">{{ msg }}</div>
+  {% endfor %}
+  {% endwith %}
+
+  <!-- Week navigation -->
+  <div class="d-flex align-items-center justify-content-between mb-3 seg">
+    <div class="week-nav"><a href="/admin/payroll?week={{ prev_week }}">‹</a></div>
+    <div class="text-center">
+      <div style="font-weight:700;font-size:1rem;">{{ week_start.strftime('%b %d') }} – {{ week_end.strftime('%b %d, %Y') }}</div>
+      <small class="text-secondary">Pay week · Saturday → Friday</small>
+    </div>
+    <div class="week-nav"><a href="/admin/payroll?week={{ next_week }}">›</a></div>
+  </div>
+
+  <!-- Summary -->
+  <div class="row g-2 mb-3">
+    <div class="col-6 col-md-3"><div class="stat-card"><div class="sum-num" style="color:#00ff88;">${{ '%.2f'|format(summary.net) }}</div><small class="text-secondary">Net Payout</small></div></div>
+    <div class="col-6 col-md-3"><div class="stat-card"><div class="sum-num">{{ summary.stops }}</div><small class="text-secondary">Stops</small></div></div>
+    <div class="col-6 col-md-3"><div class="stat-card"><div class="sum-num" style="color:#fff;">${{ '%.2f'|format(summary.gross) }}</div><small class="text-secondary">Gross</small></div></div>
+    <div class="col-6 col-md-3"><div class="stat-card"><div class="sum-num" style="color:#ff3333;">${{ '%.2f'|format(summary.deductions) }}</div><small class="text-secondary">Deductions</small></div></div>
+  </div>
+
+  <!-- Actions -->
+  <div class="d-flex gap-2 mb-3 flex-wrap">
+    <form method="POST" action="/admin/payroll/pull" style="flex:1;min-width:160px;">
+      <input type="hidden" name="week" value="{{ week_start_s }}">
+      <button type="submit" class="btn btn-sm w-100" style="background:#0088ff22;color:#0088ff;border:1px solid #0088ff44;font-weight:700;">
+        <i class="fas fa-rotate me-1"></i> Pull UNIT Deliveries
+      </button>
+    </form>
+    <a href="/admin/payroll/export?week={{ week_start_s }}" class="btn btn-sm" style="background:#1a1a1a;color:#aaa;border:1px solid #333;font-weight:700;min-width:120px;">
+      <i class="fas fa-download me-1"></i> Export CSV
+    </a>
+  </div>
+
+  <!-- Add pay line -->
+  <div class="seg">
+    <div class="seg-title"><i class="fas fa-plus me-1"></i> ADD PAY LINE</div>
+    <form method="POST" action="/admin/payroll/line/add">
+      <input type="hidden" name="week" value="{{ week_start_s }}">
+      <div class="row g-2">
+        <div class="col-6 col-md-3">
+          <select name="driver_id" class="form-select form-select-sm" required>
+            <option value="">Driver…</option>
+            {% for d in all_drivers %}<option value="{{ d.id }}">{{ d.name }}</option>{% endfor %}
+          </select>
+        </div>
+        <div class="col-6 col-md-3">
+          <select name="work_date" class="form-select form-select-sm" required>
+            {% for day in week_days %}<option value="{{ day.isoformat() }}" {% if day.isoformat()==today_s %}selected{% endif %}>{{ day.strftime('%a %m/%d') }}</option>{% endfor %}
+          </select>
+        </div>
+        <div class="col-4 col-md-2"><input name="stops" type="number" min="0" class="form-control form-control-sm" placeholder="Stops"></div>
+        <div class="col-4 col-md-2"><input name="rate" type="number" step="0.01" min="0" class="form-control form-control-sm" placeholder="$/stop"></div>
+        <div class="col-4 col-md-2"><button type="submit" class="btn btn-sm w-100" style="background:#00ff88;color:#000;font-weight:700;">Add</button></div>
+        <div class="col-12"><input name="area" type="text" class="form-control form-control-sm" placeholder="Area / route label (optional)"></div>
+      </div>
+    </form>
+  </div>
+
+  <!-- Add adjustment -->
+  <div class="seg">
+    <div class="seg-title"><i class="fas fa-sliders me-1"></i> ADD DEDUCTION / BONUS</div>
+    <form method="POST" action="/admin/payroll/adjustment/add">
+      <input type="hidden" name="week" value="{{ week_start_s }}">
+      <div class="row g-2">
+        <div class="col-6 col-md-3">
+          <select name="driver_id" class="form-select form-select-sm" required>
+            <option value="">Driver…</option>
+            {% for d in all_drivers %}<option value="{{ d.id }}">{{ d.name }}</option>{% endfor %}
+          </select>
+        </div>
+        <div class="col-6 col-md-3">
+          <select name="kind" class="form-select form-select-sm" onchange="if(this.value=='claim'){this.form.amount.value='100';}">
+            <option value="claim">Claim (−$100)</option>
+            <option value="deduction">Deduction (−)</option>
+            <option value="bonus">Bonus (+)</option>
+            <option value="reimbursement">Reimbursement (+)</option>
+          </select>
+        </div>
+        <div class="col-6 col-md-2"><input name="amount" type="number" step="0.01" min="0" value="100" class="form-control form-control-sm" placeholder="$"></div>
+        <div class="col-6 col-md-2">
+          <select name="work_date" class="form-select form-select-sm">
+            {% for day in week_days %}<option value="{{ day.isoformat() }}" {% if day.isoformat()==today_s %}selected{% endif %}>{{ day.strftime('%a %m/%d') }}</option>{% endfor %}
+          </select>
+        </div>
+        <div class="col-12 col-md-2"><button type="submit" class="btn btn-sm w-100" style="background:#ffaa0022;color:#ffaa00;border:1px solid #ffaa0044;font-weight:700;">Add</button></div>
+        <div class="col-12"><input name="note" type="text" class="form-control form-control-sm" placeholder="Note (e.g. tracking #, reason)"></div>
+      </div>
+    </form>
+  </div>
+
+  <!-- Hidden save form: editable inputs below attach to it via form="payrollSaveForm" -->
+  <form id="payrollSaveForm" method="POST" action="/admin/payroll/save">
+    <input type="hidden" name="week" value="{{ week_start_s }}">
+    {% set ns = namespace(ids=[]) %}
+    {% for g in groups %}{% for l in g.lines %}{% set ns.ids = ns.ids + [l.row.id|string] %}{% endfor %}{% endfor %}
+    <input type="hidden" name="line_ids" value="{{ ns.ids|join(',') }}">
+  </form>
+
+  <!-- Per-driver cards -->
+  {% for g in groups %}
+  <div class="pay-card">
+    <div class="d-flex justify-content-between align-items-start mb-2">
+      <div>
+        <div class="fw-bold" style="font-size:1rem;">{{ g.driver.name }}</div>
+        <small class="text-secondary">{{ g.total_stops }} stops · {{ g.driver.phone or '—' }}</small>
+      </div>
+      <div class="text-end">
+        <div style="font-size:1.2rem;font-weight:900;color:#00ff88;">${{ '%.2f'|format(g.net) }}</div>
+        <a href="/admin/payroll/statement/{{ g.driver.id }}?week={{ week_start_s }}" target="_blank" style="color:#0088ff;font-size:0.72rem;text-decoration:none;"><i class="fas fa-file-lines me-1"></i>Statement</a>
+      </div>
+    </div>
+
+    {% if g.lines %}
+    <div class="line-grid line-head">
+      <div>Date</div><div>Area</div><div>Stops</div><div>$/Stop</div><div style="text-align:right;">Amount</div><div></div>
+    </div>
+    {% for l in g.lines %}
+    <div class="line-grid">
+      <input class="mini-input" form="payrollSaveForm" name="" value="{{ l.row.work_date }}" disabled style="opacity:0.7;">
+      <input class="mini-input" form="payrollSaveForm" name="area_{{ l.row.id }}" value="{{ l.row.area or '' }}" placeholder="—">
+      <input class="mini-input pay-stops" form="payrollSaveForm" name="stops_{{ l.row.id }}" type="number" min="0" value="{{ l.row.stops or 0 }}" data-id="{{ l.row.id }}">
+      <input class="mini-input pay-rate" form="payrollSaveForm" name="rate_{{ l.row.id }}" type="number" step="0.01" min="0" value="{{ '%.2f'|format(l.row.rate_per_stop or 0) }}" data-id="{{ l.row.id }}">
+      <div class="amt" id="amt-{{ l.row.id }}">${{ '%.2f'|format(l.amount) }}</div>
+      <form method="POST" action="/admin/payroll/line/{{ l.row.id }}/delete" onsubmit="return confirm('Delete this line?')">
+        <input type="hidden" name="week" value="{{ week_start_s }}">
+        <button type="submit" class="icon-btn" title="Delete"><i class="fas fa-xmark"></i></button>
+      </form>
+    </div>
+    {% endfor %}
+    {% endif %}
+
+    {% if g.adjustments %}
+    <div class="mt-2">
+      {% for a in g.adjustments %}
+      <div class="adj-row">
+        {% if a.kind|lower in ['claim','deduction'] %}
+        <span class="pay-pill" style="background:#ff333322;color:#ff3333;">−${{ '%.2f'|format(a.amount) }}</span>
+        {% else %}
+        <span class="pay-pill" style="background:#00ff8822;color:#00ff88;">+${{ '%.2f'|format(a.amount) }}</span>
+        {% endif %}
+        <span style="color:#aaa;text-transform:capitalize;">{{ a.kind }}</span>
+        <span class="text-secondary" style="flex:1;">{{ a.note or '' }} <span style="color:#444;">· {{ a.work_date }}</span></span>
+        <form method="POST" action="/admin/payroll/adjustment/{{ a.id }}/delete">
+          <input type="hidden" name="week" value="{{ week_start_s }}">
+          <button type="submit" class="icon-btn" title="Remove"><i class="fas fa-xmark"></i></button>
+        </form>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    <div class="d-flex justify-content-end gap-3 mt-2 pt-2" style="border-top:1px solid #222;font-size:0.8rem;">
+      <span class="text-secondary">Gross <strong style="color:#fff;">${{ '%.2f'|format(g.gross) }}</strong></span>
+      {% if g.additions %}<span class="text-secondary">Bonus <strong style="color:#00ff88;">+${{ '%.2f'|format(g.additions) }}</strong></span>{% endif %}
+      {% if g.deductions %}<span class="text-secondary">Deduct <strong style="color:#ff3333;">−${{ '%.2f'|format(g.deductions) }}</strong></span>{% endif %}
+      <span class="text-secondary">Net <strong style="color:#00ff88;">${{ '%.2f'|format(g.net) }}</strong></span>
+    </div>
+  </div>
+  {% else %}
+  <div class="text-center text-secondary py-5">
+    <i class="fas fa-money-check-dollar" style="font-size:2rem;color:#333;"></i>
+    <p class="mt-3">No payroll yet for this week.<br>Tap <strong style="color:#0088ff;">Pull UNIT Deliveries</strong> or add a pay line above.</p>
+  </div>
+  {% endfor %}
+
+  {% if groups %}
+  <button type="submit" form="payrollSaveForm" class="btn w-100 mt-2" style="background:#00ff88;color:#000;font-weight:800;position:sticky;bottom:90px;">
+    <i class="fas fa-floppy-disk me-1"></i> SAVE CHANGES
+  </button>
+  {% endif %}
+
+</div>
+
+<!-- Bottom Nav -->
+<div class="nav-bottom">
+  <div class="d-flex justify-content-around">
+    <a href="/driver"><i class="fas fa-home"></i>Home</a>
+    <a href="/admin"><i class="fas fa-chart-bar"></i>Admin</a>
+    <a href="/admin/payroll" class="active"><i class="fas fa-money-check-dollar"></i>Payroll</a>
+  </div>
+</div>
+
+<script>
+function recalc(id) {
+  var s = document.querySelector('.pay-stops[data-id="' + id + '"]');
+  var r = document.querySelector('.pay-rate[data-id="' + id + '"]');
+  var out = document.getElementById('amt-' + id);
+  if (!s || !r || !out) return;
+  var v = (parseFloat(s.value) || 0) * (parseFloat(r.value) || 0);
+  out.textContent = '$' + v.toFixed(2);
+}
+document.querySelectorAll('.pay-stops, .pay-rate').forEach(function(el){
+  el.addEventListener('input', function(){ recalc(el.getAttribute('data-id')); });
+});
+</script>
+{% endblock %}

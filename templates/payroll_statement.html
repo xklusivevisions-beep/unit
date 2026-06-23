@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pay Statement{% if grp %} — {{ grp.driver.name }}{% endif %}</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background:#f4f4f5; color:#111; margin:0; padding:24px; }
+  .sheet { max-width:680px; margin:0 auto; background:#fff; border-radius:14px; padding:28px; box-shadow:0 2px 16px rgba(0,0,0,0.08); }
+  .brand { font-size:1.4rem; font-weight:900; letter-spacing:0.3em; color:#0a9d57; }
+  .brand span { color:#111; }
+  .muted { color:#777; }
+  h1 { font-size:1.1rem; margin:18px 0 2px; }
+  table { width:100%; border-collapse:collapse; margin-top:14px; font-size:0.9rem; }
+  th { text-align:left; color:#888; font-size:0.7rem; text-transform:uppercase; letter-spacing:0.05em; border-bottom:2px solid #eee; padding:8px 6px; }
+  td { padding:8px 6px; border-bottom:1px solid #f0f0f0; }
+  td.r, th.r { text-align:right; }
+  .totals { margin-top:18px; border-top:2px solid #eee; padding-top:12px; }
+  .totals .row { display:flex; justify-content:space-between; padding:4px 0; font-size:0.92rem; }
+  .net { font-size:1.4rem; font-weight:900; color:#0a9d57; }
+  .neg { color:#c0392b; }
+  .pos { color:#0a9d57; }
+  .actions { max-width:680px; margin:14px auto 0; text-align:right; }
+  .btn { background:#0a9d57; color:#fff; border:none; border-radius:8px; padding:10px 18px; font-weight:700; cursor:pointer; text-decoration:none; }
+  @media print { body { background:#fff; padding:0; } .sheet { box-shadow:none; } .actions { display:none; } }
+</style>
+</head>
+<body>
+{% if not grp %}
+  <div class="sheet"><p class="muted">No payroll activity for this driver in this week.</p></div>
+{% else %}
+<div class="sheet">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start;">
+    <div class="brand">UNIT<span>.</span></div>
+    <div style="text-align:right;" class="muted">
+      <div style="font-size:0.8rem;">Pay Statement</div>
+      <div style="font-size:0.85rem;">{{ week_start.strftime('%b %d') }} – {{ week_end.strftime('%b %d, %Y') }}</div>
+      <div style="font-size:0.75rem;">Pay week: Sat → Fri</div>
+    </div>
+  </div>
+
+  <h1>{{ grp.driver.name }}</h1>
+  <div class="muted" style="font-size:0.85rem;">{{ grp.driver.phone or '' }}{% if grp.driver.company %} · {{ grp.driver.company }}{% endif %}</div>
+
+  {% if grp.lines %}
+  <table>
+    <thead><tr><th>Date</th><th>Area / Route</th><th class="r">Stops</th><th class="r">Rate</th><th class="r">Amount</th></tr></thead>
+    <tbody>
+      {% for l in grp.lines %}
+      <tr>
+        <td>{{ l.row.work_date }}</td>
+        <td>{{ l.row.area or '—' }}</td>
+        <td class="r">{{ l.row.stops or 0 }}</td>
+        <td class="r">${{ '%.2f'|format(l.row.rate_per_stop or 0) }}</td>
+        <td class="r">${{ '%.2f'|format(l.amount) }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  {% if grp.adjustments %}
+  <table>
+    <thead><tr><th>Adjustment</th><th>Note</th><th class="r">Amount</th></tr></thead>
+    <tbody>
+      {% for a in grp.adjustments %}
+      <tr>
+        <td style="text-transform:capitalize;">{{ a.kind }} <span class="muted">· {{ a.work_date }}</span></td>
+        <td class="muted">{{ a.note or '' }}</td>
+        {% if a.kind|lower in ['claim','deduction'] %}
+        <td class="r neg">−${{ '%.2f'|format(a.amount) }}</td>
+        {% else %}
+        <td class="r pos">+${{ '%.2f'|format(a.amount) }}</td>
+        {% endif %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  <div class="totals">
+    <div class="row"><span class="muted">Total stops</span><span>{{ grp.total_stops }}</span></div>
+    <div class="row"><span class="muted">Gross pay</span><span>${{ '%.2f'|format(grp.gross) }}</span></div>
+    {% if grp.additions %}<div class="row"><span class="muted">Bonuses / reimbursements</span><span class="pos">+${{ '%.2f'|format(grp.additions) }}</span></div>{% endif %}
+    {% if grp.deductions %}<div class="row"><span class="muted">Deductions / claims</span><span class="neg">−${{ '%.2f'|format(grp.deductions) }}</span></div>{% endif %}
+    <div class="row" style="margin-top:8px;"><span style="font-weight:700;">NET PAY</span><span class="net">${{ '%.2f'|format(grp.net) }}</span></div>
+  </div>
+</div>
+<div class="actions"><a href="#" class="btn" onclick="window.print();return false;">Print / Save PDF</a></div>
+{% endif %}
+</body>
+</html>
