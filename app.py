@@ -3169,6 +3169,19 @@ def driver_dashboard():
     zone_summary = []
     zone_centroids = []
     current_zone = None
+    checkin_status = 'unknown'
+    try:
+        dbc = get_db()
+        crow = dbc.execute(
+            "SELECT status FROM driver_checkins WHERE driver_id=? AND check_date=?",
+            (session['driver_id'], today)
+        ).fetchone()
+        if crow:
+            checkin_status = crow['status']
+        dbc.close()
+    except Exception:
+        pass
+
     next_stop = None
     finish_estimate = None
     if route and stops:
@@ -3197,8 +3210,36 @@ def driver_dashboard():
         next_stop=next_stop,
         vehicle_type=vehicle_type,
         finish_estimate=finish_estimate,
+        checkin_status=checkin_status,
     )
 
+
+@app.route('/driver/checkin', methods=['POST'])
+def driver_checkin():
+    """Driver sets their own attendance for today (green/red dot for manager)."""
+    if 'driver_id' not in session:
+        return redirect(url_for('driver_login'))
+    status = request.form.get('status', 'in').strip()
+    if status not in ('in', 'out'):
+        status = 'in'
+    today = datetime.now().strftime('%Y-%m-%d')
+    now = datetime.now().isoformat()
+    db = get_db()
+    existing = db.execute(
+        "SELECT id FROM driver_checkins WHERE driver_id=? AND check_date=?",
+        (session['driver_id'], today)
+    ).fetchone()
+    if existing:
+        db.execute("UPDATE driver_checkins SET status=?, updated_at=? WHERE id=?",
+                   (status, now, existing['id']))
+    else:
+        db.execute(
+            "INSERT INTO driver_checkins (driver_id, check_date, status, updated_at) VALUES (?,?,?,?)",
+            (session['driver_id'], today, status, now)
+        )
+    db.commit()
+    db.close()
+    return redirect(url_for('driver_dashboard'))
 
 # ─── LIVE EARNINGS API ─────────────────────────────────
 @app.route('/api/driver/earnings')
