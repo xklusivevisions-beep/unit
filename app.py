@@ -3159,11 +3159,13 @@ def driver_dashboard():
     zone_centroids = []
     current_zone = None
     next_stop = None
+    finish_estimate = None
     if route and stops:
         db2 = get_db()
         stops, zone_summary, zone_centroids, current_zone, next_stop = build_route_zone_context(
             stops, route, vehicle_type, db2
         )
+        finish_estimate = _route_finish_estimate(db2, route['id'])
         db2.close()
 
     return render_template('driver_dashboard.html',
@@ -3183,6 +3185,7 @@ def driver_dashboard():
         current_zone=current_zone,
         next_stop=next_stop,
         vehicle_type=vehicle_type,
+        finish_estimate=finish_estimate,
     )
 
 
@@ -6615,17 +6618,49 @@ def _driver_reliability(db, driver_id, days=7):
         return None
     return round(100 * done / total)
 
-def _route_eta_label(pending_stops):
-    """Rough ETA from remaining stops (~3.5 min/stop)."""
-    if pending_stops <= 0:
-        return 'Done'
-    mins = int(pending_stops * 3.5)
-    finish = datetime.now() + timedelta(minutes=mins)
-    late = finish.hour >= 21 or (finish.hour == 21 and finish.minute > 0)
-    label = finish.strftime('~%I:%M %p').lstrip('0')
-    if late:
-        return label + ' ⚠️ past 9'
-    return label
+# ── Finish-by-9 estimation ──────────────────────────────────
+# Goal: tell drivers/managers a realistic finish time BEFORE overload.
+SERVICE_MIN_PER_STOP = 3.5     # park, walk, deliver, photo (avg)
+DRIVE_MIN_PER_STOP_FALLBACK = 4.0  # used when no Mapbox drive estimate exists
+DEADLINE_HOUR = 21             # 9:00 PM
+
+def _fmt_time(dt):
+    return dt.strftime('%I:%M %p').lstrip('0')
+
+def _route_finish_estimate(db, route_id, total=None, pending=None, now=None):
+    """Estimate finish time from remaining stops + prorated drive time.
+
+    Returns dict: pending, minutes_remaining, finish_label, late, eta (short label).
+    """
+    now = now or datetime.now()
+    if total is None or pending is None:
+        row = db.execute(
+            """SELECT COUNT(*) AS total,
+                      SUM(CASE WHEN status NOT IN ('delivered','failed') THEN 1 ELSE 0 END) AS pending
+               FROM stops WHERE route_id=?""",
+            (route_id,)
+        ).fetchone()
+        total = (row['total'] or 0) if row else 0
+        pending = (row['pending'] or 0) if row else 0
+    if total <= 0 or pending <= 0:
+        return {'pending': 0, 'minutes_remaining': 0, 'finish_label': 'Done',
+                'late': False, 'eta': 'Done'}
+    rt = db.execute("SELECT est_duration_mins FROM routes WHERE id=?", (route_id,)).fetchone()
+    if rt and rt['est_duration_mins'] and total > 0:
+        drive_min = (rt['est_duration_mins'] / total) * pending
+    else:
+        drive_min = pending * DRIVE_MIN_PER_STOP_FALLBACK
+    minutes = int(round(drive_min + pending * SERVICE_MIN_PER_STOP))
+    finish = now + timedelta(minutes=minutes)
+    late = finish.hour > DEADLINE_HOUR or (finish.hour == DEADLINE_HOUR and finish.minute > 0)
+    label = _fmt_time(finish)
+    return {
+        'pending': pending,
+        'minutes_remaining': minutes,
+        'finish_label': label,
+        'late': late,
+        'eta': ('~' + label + (' ⚠️ past 9' if late else '')),
+    }
 
 @app.route('/manager/login', methods=['GET', 'POST'])
 def manager_login():
@@ -6692,12 +6727,15 @@ def manager_dashboard():
         if routes_today:
             r = routes_today[0]
             pending = r['pending_stops'] or 0
+            total = r['total_stops'] or 0
+            est = _route_finish_estimate(db, r['id'], total=total, pending=pending)
             route_info = {
                 'name': r['name'] or 'Route',
-                'total': r['total_stops'] or 0,
+                'total': total,
                 'done': r['done_stops'] or 0,
                 'pending': pending,
-                'eta': _route_eta_label(pending),
+                'eta': est['eta'],
+                'late': est['late'],
             }
         team.append({
             'driver': d,

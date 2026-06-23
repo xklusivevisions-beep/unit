@@ -651,9 +651,9 @@ function fetchRoute(fromLng, fromLat) {
   if (!DEST_LAT || !DEST_LNG) return;
   document.getElementById('turn-instruction').textContent = 'Loading route…';
   document.getElementById('turn-distance').textContent = '';
-  fetch('https://api.mapbox.com/directions/v5/mapbox/driving/' +
+  fetch('https://api.mapbox.com/directions/v5/mapbox/driving-traffic/' +
     fromLng+','+fromLat+';'+DEST_LNG+','+DEST_LAT+
-    '?geometries=geojson&overview=full&steps=true&banner_instructions=true&access_token=' + mapboxgl.accessToken)
+    '?geometries=geojson&overview=full&steps=true&banner_instructions=true&annotations=duration,congestion&access_token=' + mapboxgl.accessToken)
   .then(r=>r.json()).then(d => {
     if (!d.routes || !d.routes[0]) return;
     const route = d.routes[0];
