@@ -1,0 +1,74 @@
+{% extends 'base.html' %}
+{% block title %}UNIT — Messages{% endblock %}
+{% block content %}
+<style>
+  .seg { background:#0d0d0d; border:1px solid #222; border-radius:12px; padding:16px; margin-bottom:14px; }
+  .seg-title { color:#00ff88; font-size:0.8rem; font-weight:700; letter-spacing:0.05em; margin-bottom:10px; }
+  .pill { display:inline-block; padding:2px 10px; border-radius:20px; font-size:0.7rem; font-weight:700; }
+  .msg-card { background:#111; border:1px solid #222; border-radius:12px; padding:12px 14px; margin-bottom:10px; }
+  textarea.mini { background:#1a1a1a; border:1px solid #333; color:#fff; border-radius:10px; padding:12px; width:100%; font-size:0.9rem; resize:vertical; }
+</style>
+
+<div class="container-fluid p-3 pb-nav">
+
+  <div class="d-flex align-items-center mb-3">
+    <div class="unit-logo me-auto" style="font-size:1.3rem;">UNIT<span>.</span></div>
+    <span class="pill" style="background:#0088ff22;color:#0088ff;">MANAGER</span>
+    <a href="/manager" class="ms-3" style="color:#555;font-size:0.8rem;">← Team</a>
+  </div>
+
+  <div class="mb-3">
+    <div class="fw-bold" style="font-size:1.1rem;">Team Broadcast</div>
+    <small class="text-secondary">{{ company_name }} · texts {{ reachable }} of {{ total }} drivers</small>
+  </div>
+
+  {% with messages = get_flashed_messages(category_filter=['msg']) %}
+  {% for m in messages %}
+  <div style="background:#001a00;border:1px solid #00ff8866;border-radius:12px;padding:12px 14px;margin-bottom:14px;color:#00ff88;font-size:0.85rem;">{{ m }}</div>
+  {% endfor %}
+  {% endwith %}
+
+  {% if reachable == 0 %}
+  <div class="seg" style="border-color:#ffaa0044;background:#1a1000;">
+    <div style="color:#ffaa00;font-size:0.85rem;">No drivers have phone numbers yet. Add phones in <a href="/manager/team" style="color:#ffaa00;">Roster</a> to send broadcasts.</div>
+  </div>
+  {% endif %}
+
+  <div class="seg">
+    <div class="seg-title"><i class="fas fa-bullhorn me-1"></i> NEW MESSAGE</div>
+    <form method="POST" action="/manager/messages/send" onsubmit="return confirm('Send this text to all {{ reachable }} drivers?')">
+      <textarea name="body" class="mini" rows="4" maxlength="320" placeholder="e.g. Be at the warehouse by 9:30am. Routes are loading now." required></textarea>
+      <div class="d-flex justify-content-between align-items-center mt-2">
+        <small class="text-secondary">Sends as SMS · prefixed with {{ company_name }}</small>
+        <button type="submit" class="btn btn-sm" style="background:#00ff88;color:#000;font-weight:700;" {% if reachable == 0 %}disabled{% endif %}>
+          <i class="fas fa-paper-plane me-1"></i> Send to {{ reachable }}
+        </button>
+      </div>
+    </form>
+  </div>
+
+  {% if history %}
+  <div class="fw-bold small mb-2" style="color:#aaa;letter-spacing:0.08em;">RECENT BROADCASTS</div>
+  {% for h in history %}
+  <div class="msg-card">
+    <div style="font-size:0.9rem;">{{ h.body }}</div>
+    <div class="d-flex justify-content-between mt-2">
+      <small class="text-secondary">{{ h.created_at[:16] }}</small>
+      <small><span class="pill" style="background:#00ff8822;color:#00ff88;">{{ h.sent_count }} sent</span>
+      {% if h.fail_count %}<span class="pill ms-1" style="background:#ff333322;color:#ff3333;">{{ h.fail_count }} failed</span>{% endif %}</small>
+    </div>
+  </div>
+  {% endfor %}
+  {% endif %}
+
+</div>
+
+<div class="nav-bottom">
+  <div class="d-flex justify-content-around">
+    <a href="/manager"><i class="fas fa-users"></i>Team</a>
+    <a href="/manager/team"><i class="fas fa-user-gear"></i>Roster</a>
+    <a href="/manager/messages" class="active"><i class="fas fa-bullhorn"></i>Message</a>
+    <a href="/manager/payroll"><i class="fas fa-money-check-dollar"></i>Payroll</a>
+  </div>
+</div>
+{% endblock %}

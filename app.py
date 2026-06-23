@@ -2716,6 +2716,15 @@ def init_db():
             UNIQUE(driver_id, check_date)
         )""",
         "CREATE INDEX IF NOT EXISTS idx_checkins_date ON driver_checkins (check_date)",
+        """CREATE TABLE IF NOT EXISTS manager_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER NOT NULL,
+            body TEXT NOT NULL,
+            sent_count INTEGER DEFAULT 0,
+            fail_count INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_manager_messages_company ON manager_messages (company_id)",
     ]:
         try:
             db.execute(migration)
@@ -6874,6 +6883,62 @@ def manager_team_remove(driver_id):
     db.close()
     flash('Driver removed from team.', 'team')
     return redirect(url_for('manager_team'))
+
+@app.route('/manager/messages')
+def manager_messages():
+    guard = _require_manager()
+    if guard:
+        return guard
+    _, company_id, _, company_name = _manager_session()
+    db = get_db()
+    drivers = db.execute(
+        "SELECT id, name, phone FROM drivers WHERE company_id = ? ORDER BY name",
+        (company_id,)
+    ).fetchall()
+    with_phone = [d for d in drivers if d['phone']]
+    history = db.execute(
+        "SELECT * FROM manager_messages WHERE company_id = ? ORDER BY id DESC LIMIT 20",
+        (company_id,)
+    ).fetchall()
+    db.close()
+    return render_template('manager_messages.html',
+                           company_name=company_name, total=len(drivers),
+                           reachable=len(with_phone), history=history)
+
+@app.route('/manager/messages/send', methods=['POST'])
+def manager_messages_send():
+    guard = _require_manager()
+    if guard:
+        return guard
+    _, company_id, _, company_name = _manager_session()
+    body = request.form.get('body', '').strip()
+    if not body:
+        flash('Message is empty.', 'msg')
+        return redirect(url_for('manager_messages'))
+    db = get_db()
+    drivers = db.execute(
+        "SELECT name, phone FROM drivers WHERE company_id = ? AND phone IS NOT NULL AND phone != ''",
+        (company_id,)
+    ).fetchall()
+    prefix = f'[{company_name}] '
+    sent = fail = 0
+    for d in drivers:
+        ok, _info = send_sms(d['phone'], prefix + body)
+        if ok:
+            sent += 1
+        else:
+            fail += 1
+    db.execute(
+        "INSERT INTO manager_messages (company_id, body, sent_count, fail_count) VALUES (?,?,?,?)",
+        (company_id, body, sent, fail)
+    )
+    db.commit()
+    db.close()
+    if sent:
+        flash(f'Sent to {sent} driver(s){f", {fail} failed" if fail else ""}.', 'msg')
+    else:
+        flash('No messages sent — check that drivers have phone numbers.', 'msg')
+    return redirect(url_for('manager_messages'))
 
 @app.route('/manager/payroll')
 def manager_payroll():
