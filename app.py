@@ -2757,11 +2757,13 @@ def _seed_companies_and_managers(db):
             log.info(f'[manager] Created Rolling Logistics (id={cid}), manager PIN={mgr_pin}')
         else:
             cid = row['id']
-        # Attach drivers whose company text mentions Rolling, or any unassigned driver
+        # Only auto-link drivers whose company text mentions Rolling.
+        # Everyone else is curated by the manager via the roster page —
+        # this avoids sweeping legacy/test drivers into the live team.
         db.execute(
             """UPDATE drivers SET company_id = ?
                WHERE company_id IS NULL
-                  OR LOWER(COALESCE(company, '')) LIKE '%rolling%'""",
+                 AND LOWER(COALESCE(company, '')) LIKE '%rolling%'""",
             (cid,)
         )
         db.commit()
@@ -6790,6 +6792,89 @@ def manager_checkin():
     db.close()
     return redirect(url_for('manager_dashboard'))
 
+@app.route('/manager/team')
+def manager_team():
+    guard = _require_manager()
+    if guard:
+        return guard
+    _, company_id, _, company_name = _manager_session()
+    db = get_db()
+    drivers = db.execute(
+        """SELECT d.*,
+                  COALESCE(d.default_rate, d.pay_rate, 0) AS rate
+           FROM drivers d WHERE d.company_id = ? ORDER BY d.name""",
+        (company_id,)
+    ).fetchall()
+    db.close()
+    return render_template('manager_team.html', drivers=drivers, company_name=company_name)
+
+@app.route('/manager/team/add', methods=['POST'])
+def manager_team_add():
+    guard = _require_manager()
+    if guard:
+        return guard
+    _, company_id, _, _ = _manager_session()
+    name = request.form.get('name', '').strip()
+    phone = format_phone(request.form.get('phone', '').strip())
+    area = request.form.get('area', '').strip()
+    rate = request.form.get('rate', '').strip()
+    if not name:
+        flash('Driver name is required.', 'team')
+        return redirect(url_for('manager_team'))
+    try: rate_v = float(rate) if rate else 1.50
+    except Exception: rate_v = 1.50
+    pin = str(secrets.randbelow(9000) + 1000)
+    db = get_db()
+    db.execute(
+        "INSERT INTO drivers (name, phone, company, pin, is_beta, company_id, pay_rate, default_rate, assigned_zips) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        (name, phone, 'Rolling Logistics', pin, 1, company_id, rate_v, rate_v, area or None)
+    )
+    db.commit()
+    db.close()
+    if phone:
+        send_sms(phone, f"You've been added to UNIT for Rolling Logistics. Your driver PIN is: {pin}\nLog in: {get_base_url()}/driver/login")
+    flash(f'Added {name} — PIN: {pin}{" (texted)" if phone else ""}', 'team')
+    return redirect(url_for('manager_team'))
+
+@app.route('/manager/team/<int:driver_id>/update', methods=['POST'])
+def manager_team_update(driver_id):
+    guard = _require_manager()
+    if guard:
+        return guard
+    _, company_id, _, _ = _manager_session()
+    db = get_db()
+    if not _driver_in_company(db, driver_id, company_id):
+        db.close()
+        return redirect(url_for('manager_team'))
+    phone = format_phone(request.form.get('phone', '').strip())
+    area = request.form.get('area', '').strip()
+    rate = request.form.get('rate', '').strip()
+    try: rate_v = float(rate) if rate else 0
+    except Exception: rate_v = 0
+    db.execute(
+        "UPDATE drivers SET phone=?, assigned_zips=?, pay_rate=?, default_rate=? WHERE id=?",
+        (phone or None, area or None, rate_v, rate_v, driver_id)
+    )
+    db.commit()
+    db.close()
+    flash('Driver updated.', 'team')
+    return redirect(url_for('manager_team'))
+
+@app.route('/manager/team/<int:driver_id>/remove', methods=['POST'])
+def manager_team_remove(driver_id):
+    guard = _require_manager()
+    if guard:
+        return guard
+    _, company_id, _, _ = _manager_session()
+    db = get_db()
+    if _driver_in_company(db, driver_id, company_id):
+        db.execute("UPDATE drivers SET company_id=NULL WHERE id=?", (driver_id,))
+        db.commit()
+    db.close()
+    flash('Driver removed from team.', 'team')
+    return redirect(url_for('manager_team'))
+
 @app.route('/manager/payroll')
 def manager_payroll():
     guard = _require_manager()
@@ -7262,7 +7347,9 @@ def health():
         return jsonify({'status': 'ok', 'time': datetime.now().isoformat(), 'version': git_hash,
                         'model': _vision_provider_label(),
                         'vision_key': 'set' if _vision_available() else 'MISSING',
-                        'vision_provider': 'gemini' if GEMINI_API_KEY else ('anthropic' if ANTHROPIC_KEY else 'none')})
+                        'vision_provider': 'gemini' if GEMINI_API_KEY else ('anthropic' if ANTHROPIC_KEY else 'none'),
+                        'mapbox_token': 'set' if MAPBOX_TOKEN else 'MISSING',
+                        'in_app_nav': 'live' if MAPBOX_TOKEN else 'fallback-only (set MAPBOX_TOKEN)'})
     except Exception as e:
         return jsonify({'status': 'error', 'msg': str(e)}), 500
 
