@@ -6902,20 +6902,46 @@ def manager_login():
                WHERE m.pin = ?""",
             (pin,)
         ).fetchone()
-        # Fallback: accept the MANAGER_PIN env var directly (source of truth on Render),
-        # logging into the first/default company even if the DB pin drifted.
+        # Self-heal fallback: accept the MANAGER_PIN env var (source of truth on Render).
+        # If the company/manager rows are missing or drifted, repair them so the
+        # correct env PIN always works regardless of DB seed state.
         if not mgr and pin and pin == os.environ.get('MANAGER_PIN', '5678'):
-            mgr = db.execute(
-                """SELECT m.*, c.name AS company_name
-                   FROM managers m JOIN companies c ON c.id = m.company_id
-                   ORDER BY m.id LIMIT 1"""
-            ).fetchone()
-            if mgr:
-                try:
-                    db.execute("UPDATE managers SET pin = ? WHERE id = ?", (pin, mgr['id']))
+            try:
+                comp = db.execute(
+                    "SELECT id, name FROM companies WHERE slug = ?",
+                    ('rolling-logistics',)
+                ).fetchone()
+                if not comp:
+                    db.execute("INSERT INTO companies (name, slug) VALUES (?, ?)",
+                               ('Rolling Logistics', 'rolling-logistics'))
                     db.commit()
-                except Exception:
-                    pass
+                    cid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+                    cname = 'Rolling Logistics'
+                else:
+                    cid = comp['id']
+                    cname = comp['name']
+                existing = db.execute(
+                    "SELECT id FROM managers WHERE company_id = ? ORDER BY id LIMIT 1",
+                    (cid,)
+                ).fetchone()
+                if existing:
+                    db.execute("UPDATE managers SET pin = ? WHERE id = ?", (pin, existing['id']))
+                else:
+                    db.execute(
+                        "INSERT INTO managers (company_id, name, pin) VALUES (?, ?, ?)",
+                        (cid, 'Rolling Logistics Manager', pin)
+                    )
+                db.commit()
+                mgr = db.execute(
+                    """SELECT m.*, c.name AS company_name
+                       FROM managers m JOIN companies c ON c.id = m.company_id
+                       WHERE m.company_id = ? ORDER BY m.id LIMIT 1""",
+                    (cid,)
+                ).fetchone()
+            except Exception as e:
+                log.warning(f'[manager] Login self-heal failed: {e}')
+                try: db._conn.rollback()
+                except Exception: pass
         db.close()
         if mgr:
             session['manager_id'] = mgr['id']
