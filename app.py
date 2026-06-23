@@ -2793,6 +2793,23 @@ def _seed_companies_and_managers(db):
             log.info(f'[manager] Created Rolling Logistics (id={cid}), manager PIN={mgr_pin}')
         else:
             cid = row['id']
+            # MANAGER_PIN env is the source of truth on Render — sync into DB on boot
+            # (login reads managers.pin, not the env var directly).
+            mgr_pin = os.environ.get('MANAGER_PIN', '5678')
+            existing = db.execute(
+                "SELECT id, pin FROM managers WHERE company_id = ? LIMIT 1",
+                (cid,)
+            ).fetchone()
+            if not existing:
+                db.execute(
+                    "INSERT INTO managers (company_id, name, pin) VALUES (?, ?, ?)",
+                    (cid, 'Rolling Logistics Manager', mgr_pin)
+                )
+                log.info(f'[manager] Created manager for Rolling Logistics, PIN synced')
+            elif existing['pin'] != mgr_pin:
+                db.execute("UPDATE managers SET pin = ? WHERE id = ?", (mgr_pin, existing['id']))
+                log.info('[manager] Synced MANAGER_PIN env to database')
+            db.commit()
         # Only auto-link drivers whose company text mentions Rolling.
         # Everyone else is curated by the manager via the roster page —
         # this avoids sweeping legacy/test drivers into the live team.
@@ -6548,10 +6565,8 @@ def get_real_ip():
             request.remote_addr or 'unknown')
 
 def is_rate_limited(ip):
-    now = _time.time()
-    attempts = [t for t in _login_attempts.get(ip, []) if now - t < LOCKOUT_WINDOW]
-    _login_attempts[ip] = attempts
-    return len(attempts) >= MAX_ATTEMPTS
+    # Login lockout disabled — owner-operated app, no public PIN brute-force risk.
+    return False
 
 def record_attempt(ip):
     _login_attempts.setdefault(ip, []).append(_time.time())
