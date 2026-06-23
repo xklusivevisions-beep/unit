@@ -2663,6 +2663,32 @@ def init_db():
         "ALTER TABLE stops ADD COLUMN pod_photo_2 TEXT",
         "ALTER TABLE stops ADD COLUMN pod_photo_3 TEXT",
         "ALTER TABLE stops ADD COLUMN pod_captured_at TEXT",
+        # ── Payroll (manager operations layer) ──
+        """CREATE TABLE IF NOT EXISTS payroll_days (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            driver_id INTEGER NOT NULL,
+            work_date TEXT NOT NULL,
+            stops INTEGER DEFAULT 0,
+            rate_per_stop REAL DEFAULT 0,
+            area TEXT,
+            source TEXT DEFAULT 'manual',
+            note TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_payroll_days_driver_date ON payroll_days (driver_id, work_date)",
+        """CREATE TABLE IF NOT EXISTS payroll_adjustments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            driver_id INTEGER NOT NULL,
+            work_date TEXT,
+            kind TEXT DEFAULT 'claim',
+            amount REAL DEFAULT 0,
+            note TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_payroll_adjustments_driver_date ON payroll_adjustments (driver_id, work_date)",
+        # Per-driver default stop rate so payroll prefills sensibly
+        "ALTER TABLE drivers ADD COLUMN default_rate REAL DEFAULT 0",
     ]:
         try:
             db.execute(migration)
@@ -6395,6 +6421,287 @@ def admin():
     }
     db.close()
     return render_template('admin.html', routes=routes, buildings=buildings, deliveries=deliveries, stats=stats, drivers_list=drivers_list)
+
+# ─── PAYROLL (manager operations layer) ──────────────────────
+# Pay week runs Saturday → Friday. Pay = stops × rate per stop, minus
+# claim deductions (e.g. $100 per claimed undelivered package), plus
+# any bonuses/reimbursements.
+
+PAYROLL_DEDUCTION_KINDS = {'claim', 'deduction'}
+
+def _payroll_week_bounds(anchor=None):
+    """Return (start_date, end_date) for the Saturday–Friday week containing anchor."""
+    if not anchor:
+        d = datetime.now().date()
+    elif isinstance(anchor, str):
+        try:
+            d = datetime.strptime(anchor.strip(), '%Y-%m-%d').date()
+        except Exception:
+            d = datetime.now().date()
+    else:
+        d = anchor
+    days_since_sat = (d.weekday() - 5) % 7  # Mon=0 … Sun=6 ; Saturday=5
+    start = d - timedelta(days=days_since_sat)
+    return start, start + timedelta(days=6)
+
+def _build_payroll(db, start, end):
+    """Aggregate payroll for every driver with activity in the [start, end] window."""
+    start_s, end_s = start.isoformat(), end.isoformat()
+    drivers = db.execute(
+        "SELECT id, name, phone, company, COALESCE(default_rate, 0) AS default_rate "
+        "FROM drivers ORDER BY name"
+    ).fetchall()
+    lines = db.execute(
+        "SELECT * FROM payroll_days WHERE work_date >= ? AND work_date <= ? ORDER BY work_date, id",
+        (start_s, end_s)
+    ).fetchall()
+    adjustments = db.execute(
+        "SELECT * FROM payroll_adjustments WHERE work_date >= ? AND work_date <= ? ORDER BY work_date, id",
+        (start_s, end_s)
+    ).fetchall()
+
+    by_driver = {}
+    for d in drivers:
+        by_driver[d['id']] = {
+            'driver': d, 'lines': [], 'adjustments': [],
+            'gross': 0.0, 'deductions': 0.0, 'additions': 0.0,
+            'net': 0.0, 'total_stops': 0,
+        }
+    for r in lines:
+        grp = by_driver.get(r['driver_id'])
+        if not grp:
+            continue
+        amt = round((r['stops'] or 0) * (r['rate_per_stop'] or 0), 2)
+        grp['lines'].append({'row': r, 'amount': amt})
+        grp['gross'] += amt
+        grp['total_stops'] += (r['stops'] or 0)
+    for a in adjustments:
+        grp = by_driver.get(a['driver_id'])
+        if not grp:
+            continue
+        grp['adjustments'].append(a)
+        if (a['kind'] or '').lower() in PAYROLL_DEDUCTION_KINDS:
+            grp['deductions'] += (a['amount'] or 0)
+        else:
+            grp['additions'] += (a['amount'] or 0)
+
+    summary = {'gross': 0.0, 'deductions': 0.0, 'additions': 0.0,
+               'net': 0.0, 'stops': 0, 'drivers_paid': 0}
+    groups = []
+    for grp in by_driver.values():
+        grp['gross'] = round(grp['gross'], 2)
+        grp['deductions'] = round(grp['deductions'], 2)
+        grp['additions'] = round(grp['additions'], 2)
+        grp['net'] = round(grp['gross'] + grp['additions'] - grp['deductions'], 2)
+        if grp['lines'] or grp['adjustments']:
+            groups.append(grp)
+            summary['gross'] += grp['gross']
+            summary['deductions'] += grp['deductions']
+            summary['additions'] += grp['additions']
+            summary['net'] += grp['net']
+            summary['stops'] += grp['total_stops']
+            summary['drivers_paid'] += 1
+    for k in ('gross', 'deductions', 'additions', 'net'):
+        summary[k] = round(summary[k], 2)
+    groups.sort(key=lambda g: (g['driver']['name'] or '').lower())
+    return groups, summary, drivers
+
+@app.route('/admin/payroll')
+def admin_payroll():
+    if not session.get('admin'):
+        return redirect(url_for('admin_login'))
+    start, end = _payroll_week_bounds(request.args.get('week'))
+    db = get_db()
+    groups, summary, all_drivers = _build_payroll(db, start, end)
+    db.close()
+    return render_template(
+        'payroll.html',
+        groups=groups, summary=summary, all_drivers=all_drivers,
+        week_start=start, week_end=end,
+        week_start_s=start.isoformat(), week_end_s=end.isoformat(),
+        week_days=[start + timedelta(days=i) for i in range(7)],
+        prev_week=(start - timedelta(days=7)).isoformat(),
+        next_week=(start + timedelta(days=7)).isoformat(),
+        today_s=datetime.now().date().isoformat(),
+    )
+
+@app.route('/admin/payroll/pull', methods=['POST'])
+def admin_payroll_pull():
+    """Prefill payroll line items from delivered UNIT stops for the week."""
+    if not session.get('admin'):
+        return redirect(url_for('admin_login'))
+    start, end = _payroll_week_bounds(request.form.get('week'))
+    start_s, end_s = start.isoformat(), end.isoformat()
+    db = get_db()
+    rows = db.execute(
+        """SELECT r.driver_id AS driver_id, substr(s.delivered_at, 1, 10) AS d, COUNT(*) AS cnt
+           FROM stops s
+           JOIN routes r ON s.route_id = r.id
+           WHERE s.status = 'delivered' AND s.delivered_at IS NOT NULL
+             AND substr(s.delivered_at, 1, 10) >= ? AND substr(s.delivered_at, 1, 10) <= ?
+             AND r.driver_id IS NOT NULL
+           GROUP BY r.driver_id, substr(s.delivered_at, 1, 10)""",
+        (start_s, end_s)
+    ).fetchall()
+    created = updated = 0
+    for row in rows:
+        did, wd, cnt = row['driver_id'], row['d'], row['cnt']
+        if not did or not wd:
+            continue
+        existing = db.execute(
+            "SELECT id FROM payroll_days WHERE driver_id = ? AND work_date = ? AND source = 'auto'",
+            (did, wd)
+        ).fetchone()
+        drow = db.execute("SELECT COALESCE(default_rate, 0) AS dr FROM drivers WHERE id = ?", (did,)).fetchone()
+        rate = (drow['dr'] if drow else 0) or 0
+        if existing:
+            db.execute("UPDATE payroll_days SET stops = ?, updated_at = ? WHERE id = ?",
+                       (cnt, datetime.now().isoformat(), existing['id']))
+            updated += 1
+        else:
+            db.execute(
+                "INSERT INTO payroll_days (driver_id, work_date, stops, rate_per_stop, area, source) "
+                "VALUES (?,?,?,?,?,?)",
+                (did, wd, cnt, rate, 'UNIT deliveries', 'auto')
+            )
+            created += 1
+    db.commit()
+    db.close()
+    flash(f'Pulled UNIT deliveries — {created} day(s) added, {updated} updated.', 'payroll')
+    return redirect(url_for('admin_payroll', week=start_s))
+
+@app.route('/admin/payroll/save', methods=['POST'])
+def admin_payroll_save():
+    """Save inline edits (stops / rate / area) for all line items on the page."""
+    if not session.get('admin'):
+        return redirect(url_for('admin_login'))
+    start, _ = _payroll_week_bounds(request.form.get('week'))
+    db = get_db()
+    for lid in [x for x in request.form.get('line_ids', '').split(',') if x.strip().isdigit()]:
+        stops = request.form.get(f'stops_{lid}', '').strip()
+        rate = request.form.get(f'rate_{lid}', '').strip()
+        area = request.form.get(f'area_{lid}', '').strip()
+        try: stops_v = int(float(stops)) if stops != '' else 0
+        except Exception: stops_v = 0
+        try: rate_v = float(rate) if rate != '' else 0
+        except Exception: rate_v = 0
+        db.execute(
+            "UPDATE payroll_days SET stops = ?, rate_per_stop = ?, area = ?, updated_at = ? WHERE id = ?",
+            (stops_v, rate_v, area or None, datetime.now().isoformat(), int(lid))
+        )
+    db.commit()
+    db.close()
+    flash('Payroll saved.', 'payroll')
+    return redirect(url_for('admin_payroll', week=start.isoformat()))
+
+@app.route('/admin/payroll/line/add', methods=['POST'])
+def admin_payroll_line_add():
+    if not session.get('admin'):
+        return redirect(url_for('admin_login'))
+    start, _ = _payroll_week_bounds(request.form.get('week'))
+    driver_id = request.form.get('driver_id', '').strip()
+    work_date = request.form.get('work_date', '').strip()
+    stops = request.form.get('stops', '').strip()
+    rate = request.form.get('rate', '').strip()
+    area = request.form.get('area', '').strip()
+    if driver_id.isdigit() and work_date:
+        try: stops_v = int(float(stops)) if stops else 0
+        except Exception: stops_v = 0
+        try: rate_v = float(rate) if rate else 0
+        except Exception: rate_v = 0
+        db = get_db()
+        db.execute(
+            "INSERT INTO payroll_days (driver_id, work_date, stops, rate_per_stop, area, source) "
+            "VALUES (?,?,?,?,?,?)",
+            (int(driver_id), work_date, stops_v, rate_v, area or None, 'manual')
+        )
+        if rate_v:
+            db.execute("UPDATE drivers SET default_rate = ? WHERE id = ?", (rate_v, int(driver_id)))
+        db.commit()
+        db.close()
+    return redirect(url_for('admin_payroll', week=start.isoformat()))
+
+@app.route('/admin/payroll/line/<int:line_id>/delete', methods=['POST'])
+def admin_payroll_line_delete(line_id):
+    if not session.get('admin'):
+        return redirect(url_for('admin_login'))
+    start, _ = _payroll_week_bounds(request.form.get('week'))
+    db = get_db()
+    db.execute("DELETE FROM payroll_days WHERE id = ?", (line_id,))
+    db.commit()
+    db.close()
+    return redirect(url_for('admin_payroll', week=start.isoformat()))
+
+@app.route('/admin/payroll/adjustment/add', methods=['POST'])
+def admin_payroll_adjustment_add():
+    if not session.get('admin'):
+        return redirect(url_for('admin_login'))
+    start, _ = _payroll_week_bounds(request.form.get('week'))
+    driver_id = request.form.get('driver_id', '').strip()
+    work_date = request.form.get('work_date', '').strip() or start.isoformat()
+    kind = request.form.get('kind', 'claim').strip() or 'claim'
+    amount = request.form.get('amount', '').strip()
+    note = request.form.get('note', '').strip()
+    if driver_id.isdigit():
+        try: amount_v = abs(float(amount)) if amount else 0
+        except Exception: amount_v = 0
+        if amount_v:
+            db = get_db()
+            db.execute(
+                "INSERT INTO payroll_adjustments (driver_id, work_date, kind, amount, note) "
+                "VALUES (?,?,?,?,?)",
+                (int(driver_id), work_date, kind, amount_v, note or None)
+            )
+            db.commit()
+            db.close()
+    return redirect(url_for('admin_payroll', week=start.isoformat()))
+
+@app.route('/admin/payroll/adjustment/<int:adj_id>/delete', methods=['POST'])
+def admin_payroll_adjustment_delete(adj_id):
+    if not session.get('admin'):
+        return redirect(url_for('admin_login'))
+    start, _ = _payroll_week_bounds(request.form.get('week'))
+    db = get_db()
+    db.execute("DELETE FROM payroll_adjustments WHERE id = ?", (adj_id,))
+    db.commit()
+    db.close()
+    return redirect(url_for('admin_payroll', week=start.isoformat()))
+
+@app.route('/admin/payroll/export')
+def admin_payroll_export():
+    if not session.get('admin'):
+        return redirect(url_for('admin_login'))
+    start, end = _payroll_week_bounds(request.args.get('week'))
+    db = get_db()
+    groups, summary, _ = _build_payroll(db, start, end)
+    db.close()
+    out = io.StringIO()
+    w = csv.writer(out)
+    w.writerow(['UNIT Payroll', f'{start.isoformat()} to {end.isoformat()}'])
+    w.writerow([])
+    w.writerow(['Driver', 'Phone', 'Stops', 'Gross', 'Additions', 'Deductions', 'Net Pay'])
+    for g in groups:
+        w.writerow([g['driver']['name'], g['driver']['phone'] or '', g['total_stops'],
+                    f"{g['gross']:.2f}", f"{g['additions']:.2f}",
+                    f"{g['deductions']:.2f}", f"{g['net']:.2f}"])
+    w.writerow([])
+    w.writerow(['TOTAL', '', summary['stops'], f"{summary['gross']:.2f}",
+                f"{summary['additions']:.2f}", f"{summary['deductions']:.2f}", f"{summary['net']:.2f}"])
+    from flask import Response
+    return Response(out.getvalue(), mimetype='text/csv',
+                    headers={'Content-Disposition': f'attachment; filename=unit_payroll_{start.isoformat()}.csv'})
+
+@app.route('/admin/payroll/statement/<int:driver_id>')
+def admin_payroll_statement(driver_id):
+    if not session.get('admin'):
+        return redirect(url_for('admin_login'))
+    start, end = _payroll_week_bounds(request.args.get('week'))
+    db = get_db()
+    groups, _, _ = _build_payroll(db, start, end)
+    db.close()
+    grp = next((g for g in groups if g['driver']['id'] == driver_id), None)
+    return render_template('payroll_statement.html', grp=grp,
+                           week_start=start, week_end=end, week_start_s=start.isoformat())
 
 # ─── TEST SMS ─────────────────────────────────────────────────
 
