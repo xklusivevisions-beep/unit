@@ -54,6 +54,9 @@
           {% if checkin_status == 'in' %}🟢 You're in today{% elif checkin_status == 'out' %}🔴 Marked not coming in{% else %}⚪ Are you working today?{% endif %}
         </div>
         <small class="text-secondary">Your manager sees this instantly</small>
+        {% if assignment_today %}
+        <div class="mt-1" style="font-size:0.8rem;color:#0088ff;font-weight:700;"><i class="fas fa-route me-1"></i>{{ assignment_today }}</div>
+        {% endif %}
       </div>
       <div class="d-flex gap-2">
         <form method="POST" action="/driver/checkin">

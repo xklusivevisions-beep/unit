@@ -84,6 +84,13 @@
           {% endif %}
         </div>
 
+        <form method="POST" action="/manager/assign" class="d-flex gap-2 mt-2">
+          <input type="hidden" name="driver_id" value="{{ t.driver.id }}">
+          <input name="assignment" value="{{ t.assignment or '' }}" placeholder="Route / area today"
+                 style="flex:1;background:#1a1a1a;border:1px solid #333;color:#fff;border-radius:8px;padding:6px 10px;font-size:0.8rem;">
+          <button type="submit" class="check-btn" style="background:#0088ff22;color:#0088ff;">Set</button>
+        </form>
+
         {% if t.route %}
         <div class="mt-2 p-2" style="background:#0a0a0a;border-radius:10px;font-size:0.82rem;">
           <div class="d-flex justify-content-between">

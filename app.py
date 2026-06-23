@@ -2725,6 +2725,7 @@ def init_db():
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )""",
         "CREATE INDEX IF NOT EXISTS idx_manager_messages_company ON manager_messages (company_id)",
+        "ALTER TABLE driver_checkins ADD COLUMN assignment TEXT",
     ]:
         try:
             db.execute(migration)
@@ -3170,14 +3171,16 @@ def driver_dashboard():
     zone_centroids = []
     current_zone = None
     checkin_status = 'unknown'
+    assignment_today = None
     try:
         dbc = get_db()
         crow = dbc.execute(
-            "SELECT status FROM driver_checkins WHERE driver_id=? AND check_date=?",
+            "SELECT status, assignment FROM driver_checkins WHERE driver_id=? AND check_date=?",
             (session['driver_id'], today)
         ).fetchone()
         if crow:
             checkin_status = crow['status']
+            assignment_today = crow['assignment'] if 'assignment' in crow.keys() else None
         dbc.close()
     except Exception:
         pass
@@ -3211,6 +3214,7 @@ def driver_dashboard():
         vehicle_type=vehicle_type,
         finish_estimate=finish_estimate,
         checkin_status=checkin_status,
+        assignment_today=assignment_today,
     )
 
 
@@ -6756,7 +6760,8 @@ def manager_dashboard():
     today = datetime.now().date().isoformat()
     db = get_db()
     drivers = db.execute(
-        """SELECT d.*, COALESCE(c.status, 'unknown') AS checkin_status
+        """SELECT d.*, COALESCE(c.status, 'unknown') AS checkin_status,
+                  c.assignment AS assignment
            FROM drivers d
            LEFT JOIN driver_checkins c ON c.driver_id = d.id AND c.check_date = ?
            WHERE d.company_id = ?
@@ -6792,6 +6797,7 @@ def manager_dashboard():
         team.append({
             'driver': d,
             'checkin': d['checkin_status'],
+            'assignment': d['assignment'] if 'assignment' in d.keys() else None,
             'reliability': _driver_reliability(db, d['id']),
             'route': route_info,
         })
@@ -6837,6 +6843,39 @@ def manager_checkin():
         db.execute(
             "INSERT INTO driver_checkins (driver_id, check_date, status, updated_at) VALUES (?,?,?,?)",
             (int(driver_id), today, status, now)
+        )
+    db.commit()
+    db.close()
+    return redirect(url_for('manager_dashboard'))
+
+@app.route('/manager/assign', methods=['POST'])
+def manager_assign():
+    """Set a driver's route/area assignment for today."""
+    guard = _require_manager()
+    if guard:
+        return guard
+    _, company_id, _, _ = _manager_session()
+    driver_id = request.form.get('driver_id', '').strip()
+    assignment = request.form.get('assignment', '').strip()
+    if not driver_id.isdigit():
+        return redirect(url_for('manager_dashboard'))
+    today = datetime.now().date().isoformat()
+    now = datetime.now().isoformat()
+    db = get_db()
+    if not _driver_in_company(db, int(driver_id), company_id):
+        db.close()
+        return redirect(url_for('manager_dashboard'))
+    existing = db.execute(
+        "SELECT id FROM driver_checkins WHERE driver_id=? AND check_date=?",
+        (int(driver_id), today)
+    ).fetchone()
+    if existing:
+        db.execute("UPDATE driver_checkins SET assignment=?, updated_at=? WHERE id=?",
+                   (assignment or None, now, existing['id']))
+    else:
+        db.execute(
+            "INSERT INTO driver_checkins (driver_id, check_date, status, assignment, updated_at) VALUES (?,?,?,?,?)",
+            (int(driver_id), today, 'unknown', assignment or None, now)
         )
     db.commit()
     db.close()
