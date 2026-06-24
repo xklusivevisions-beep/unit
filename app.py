@@ -7491,6 +7491,35 @@ def manager_payroll_adjustment_delete(adj_id):
     db.close()
     return redirect(url_for('manager_payroll', week=start.isoformat()))
 
+@app.route('/manager/payroll/clear', methods=['POST'])
+def manager_payroll_clear():
+    guard = _require_manager()
+    if guard:
+        return guard
+    _, company_id, _, _ = _manager_session()
+    start, end = _payroll_week_bounds(request.form.get('week'))
+    start_s, end_s = start.isoformat(), end.isoformat()
+    db = get_db()
+    driver_ids = _company_driver_ids(db, company_id)
+    if driver_ids:
+        ph = ','.join('?' * len(driver_ids))
+        db.execute(
+            f"""DELETE FROM payroll_days
+                WHERE driver_id IN ({ph})
+                  AND work_date >= ? AND work_date <= ?""",
+            (*driver_ids, start_s, end_s)
+        )
+        db.execute(
+            f"""DELETE FROM payroll_adjustments
+                WHERE driver_id IN ({ph})
+                  AND work_date >= ? AND work_date <= ?""",
+            (*driver_ids, start_s, end_s)
+        )
+        db.commit()
+    db.close()
+    flash('Payroll cleared for this week.', 'payroll')
+    return redirect(url_for('manager_payroll', week=start_s))
+
 @app.route('/manager/payroll/export')
 def manager_payroll_export():
     guard = _require_manager()

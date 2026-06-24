@@ -72,6 +72,12 @@
     <a href="/manager/payroll/export?week={{ week_start_s }}" class="btn btn-sm" style="background:#1a1a1a;color:#aaa;border:1px solid #333;font-weight:700;min-width:120px;">
       <i class="fas fa-download me-1"></i> Export CSV
     </a>
+    <form method="POST" action="/manager/payroll/clear" onsubmit="return confirm('Clear ALL pay lines and adjustments for this week? This cannot be undone.');" style="min-width:120px;">
+      <input type="hidden" name="week" value="{{ week_start_s }}">
+      <button type="submit" class="btn btn-sm w-100" style="background:#2a0a0a;color:#ff6666;border:1px solid #ff333344;font-weight:700;">
+        <i class="fas fa-trash me-1"></i> Clear Week
+      </button>
+    </form>
   </div>
 
   <!-- Add pay line -->

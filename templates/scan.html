@@ -29,23 +29,71 @@
   #camera-placeholder svg { width: 48px; height: 48px; }
   #camera-placeholder span { font-size: 0.95rem; }
 
-  /* Live scan (Spoke-style) — native app only */
+  /* Live scan (Spoke-style continuous camera + address detection) */
   .live-scan-banner {
     display: none;
     background: linear-gradient(135deg, #065f46, #047857);
     border: 1px solid #10b981;
     border-radius: 14px;
-    padding: 14px 16px;
+    padding: 12px 16px;
     margin-bottom: 12px;
     text-align: center;
   }
   .live-scan-banner.active { display: block; }
   .live-scan-banner .live-title { font-weight: 800; font-size: 1rem; color: #6ee7b7; }
   .live-scan-banner .live-sub { font-size: 0.82rem; color: #a7f3d0; margin-top: 4px; }
-  .unit-native-app .camera-zone.manual-fallback { margin-top: 8px; }
-  .unit-native-app.live-scan-on #camera-placeholder,
-  .unit-native-app.live-scan-on #capture-btn,
-  .unit-native-app.live-scan-on .file-btn { display: none !important; }
+
+  /* Camera fills more of the screen in live mode — scanner feel */
+  .live-scan-on .camera-zone video { max-height: 60vh !important; }
+  .live-scan-on #camera-placeholder { display: none !important; }
+
+  /* Scan reticle overlay */
+  .scan-reticle {
+    display: none;
+    position: absolute; left: 8%; right: 8%; top: 28%; bottom: 34%;
+    border: 2px solid rgba(16,185,129,0.9);
+    border-radius: 14px;
+    box-shadow: 0 0 0 9999px rgba(0,0,0,0.28);
+    pointer-events: none;
+  }
+  .live-scan-on .scan-reticle { display: block; }
+  .scan-reticle::after {
+    content: 'Point at SHIP TO address';
+    position: absolute; top: -26px; left: 0; right: 0; text-align: center;
+    font-size: 0.72rem; color: #6ee7b7; font-weight: 700;
+  }
+
+  /* Live detected-address card pinned over the camera */
+  .live-detect {
+    display: none;
+    position: absolute; left: 10px; right: 10px; bottom: 10px;
+    background: rgba(6,20,14,0.96);
+    border: 1px solid #10b981;
+    border-radius: 14px;
+    padding: 12px 14px;
+    z-index: 5;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+  }
+  .live-detect.show { display: block; animation: ldpop 0.18s ease; }
+  @keyframes ldpop { from { transform: translateY(8px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+  .live-detect .ld-label { font-size: 0.7rem; letter-spacing: 0.08em; color: #6ee7b7; font-weight: 700; margin-bottom: 4px; }
+  .live-detect .ld-addr { font-size: 0.98rem; font-weight: 700; color: #fff; line-height: 1.3; margin-bottom: 4px; word-break: break-word; }
+  .live-detect .ld-name { font-size: 0.82rem; color: #a7f3d0; margin-bottom: 10px; }
+  .live-detect .ld-actions { display: flex; gap: 8px; }
+  .live-detect .ld-add, .live-detect .ld-edit {
+    flex: 1; padding: 12px; border: none; border-radius: 10px;
+    font-size: 0.95rem; font-weight: 800; cursor: pointer;
+  }
+  .live-detect .ld-add { background: #10b981; color: #042014; }
+  .live-detect .ld-edit { background: #1f2937; color: #e5e7eb; }
+  .live-scan-toggle {
+    display: none;
+    width: 100%; margin-bottom: 10px; padding: 12px;
+    background: #1a1a1a; color: #10b981; border: 1px solid #10b98155;
+    border-radius: 12px; font-weight: 700; cursor: pointer;
+  }
+  .live-paused .live-scan-toggle { display: block; }
+  .live-scan-on .live-scan-toggle { display: none; }
 
   /* Capture button */
   .capture-btn { width: 100%; padding: 16px; font-size: 1.05rem; font-weight: 700;
@@ -507,26 +555,40 @@
     <div class="sticker-prompt-hint">Use a marker or sticker — this number stays with the package through sorting</div>
   </div>
 
-  <!-- Live scan banner (native app — Spoke-style continuous barcode) -->
+  <!-- Live scan banner (Spoke-style continuous camera + address detect) -->
   <div class="live-scan-banner" id="live-scan-banner">
     <div class="live-title">📷 Live Scan ON</div>
-    <div class="live-sub">Point at barcode — auto-adds · beep on scan</div>
+    <div class="live-sub">Point at the label — it reads the address &amp; barcode live</div>
   </div>
 
+  <!-- Resume button shown when live scan is paused -->
+  <button class="live-scan-toggle" id="live-scan-toggle" onclick="startLiveScanMode()">📷 Resume Live Scan</button>
+
   <!-- Camera zone -->
-  <div class="camera-zone" id="camera-zone">
-    <div id="camera-placeholder" onclick="startCamera()">
+  <div class="camera-zone" id="camera-zone" style="position:relative;">
+    <div id="camera-placeholder" onclick="startLiveScanMode()">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
         <path d="M6.827 6.175A2.31 2.31 0 015.186 7.23c-.38.054-.757.112-1.134.175C2.999 7.58 2.25 8.507 2.25 9.574V18a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9.574c0-1.067-.75-1.994-1.802-2.169a47.865 47.865 0 00-1.134-.175 2.31 2.31 0 01-1.64-1.055l-.822-1.316a2.192 2.192 0 00-1.736-1.039 48.774 48.774 0 00-5.232 0 2.192 2.192 0 00-1.736 1.039l-.821 1.316z"/>
         <path d="M16.5 12.75a4.5 4.5 0 11-9 0 4.5 4.5 0 019 0zM18.75 10.5h.008v.008h-.008V10.5z"/>
       </svg>
-      <span>Tap to open camera</span>
+      <span>Tap to start live scan</span>
     </div>
-    <video id="camera-feed" autoplay playsinline style="display:none"></video>
+    <video id="camera-feed" autoplay playsinline muted style="display:none"></video>
+    <div class="scan-reticle" id="scan-reticle"></div>
     <canvas id="canvas"></canvas>
+    <!-- Live detected address — Spoke-style add/edit options -->
+    <div class="live-detect" id="live-detect">
+      <div class="ld-label">📍 DETECTED ADDRESS</div>
+      <div class="ld-addr" id="ld-addr"></div>
+      <div class="ld-name" id="ld-name"></div>
+      <div class="ld-actions">
+        <button class="ld-add" onclick="liveDetectAdd()">✓ Add to stop</button>
+        <button class="ld-edit" onclick="liveDetectEdit()">✎ Edit</button>
+      </div>
+    </div>
   </div>
 
-  <button class="capture-btn" id="capture-btn" onclick="capturePhoto()">📸 Capture Label</button>
+  <button class="capture-btn" id="capture-btn" onclick="capturePhoto()">📸 Capture (manual)</button>
 
   <!-- File fallback — label wrapper is iOS-safe, no programmatic .click() needed -->
   <label for="file-input" class="file-btn" style="display:block;text-align:center;cursor:pointer;">📁 Upload Label Photo</label>
@@ -1831,40 +1893,50 @@ async function processBarcodeLive(rawValue) {
   }
 }
 
-async function startLiveScanMode() {
+async function startLiveScanMode(auto) {
   const banner = document.getElementById('live-scan-banner');
   _liveScanActive = true;
+  _liveDetectParsed = null;
   document.documentElement.classList.add('live-scan-on');
+  document.documentElement.classList.remove('live-paused');
   if (banner) banner.classList.add('active');
+  hideLiveDetect();
 
-  await startCamera();
-  if (await startLiveBarcodeLoop()) {
-    showToast('Live scan ready — point at barcode');
+  await startCamera(auto === true);
+  const video = document.getElementById('camera-feed');
+  if (!video || video.style.display === 'none') {
+    _liveScanActive = false;
+    document.documentElement.classList.remove('live-scan-on');
+    if (banner) banner.classList.remove('active');
+    if (auto === true) {
+      // First load may need a tap (iOS gesture) — show placeholder, no error
+      document.documentElement.classList.remove('live-paused');
+      const ph = document.getElementById('camera-placeholder');
+      if (ph) ph.style.display = 'flex';
+    } else {
+      document.documentElement.classList.add('live-paused');
+      showToast('Camera unavailable — use Capture (manual)', true);
+    }
     return;
   }
-  _liveScanActive = false;
-  document.documentElement.classList.remove('live-scan-on');
-  if (banner) banner.classList.remove('active');
-  showToast('Live scan unavailable — use Capture button', true);
+  startLiveBarcodeLoop();      // instant tracking lookup (best-effort)
+  startLiveOcrLoop();          // Spoke-style live address detection
+  if (auto !== true) showToast('Live scan on — point at the label');
 }
 
 let _liveScanLoopId = null;
 let _barcodeDetector = null;
 
-async function startLiveBarcodeLoop() {
+function startLiveBarcodeLoop() {
   const video = document.getElementById('camera-feed');
   if (!video) return false;
-
-  if ('BarcodeDetector' in window) {
+  if ('BarcodeDetector' in window && !_barcodeDetector) {
     try {
       _barcodeDetector = new BarcodeDetector({
         formats: ['code_128', 'code_39', 'itf', 'qr_code', 'pdf417', 'data_matrix']
       });
-    } catch (e) {
-      _barcodeDetector = null;
-    }
+    } catch (e) { _barcodeDetector = null; }
   }
-
   if (!_barcodeDetector) return false;
 
   const tick = async () => {
@@ -1884,11 +1956,147 @@ async function startLiveBarcodeLoop() {
   return true;
 }
 
+// ── Spoke-style live ADDRESS detection ──
+let _liveOcrTimer = null;
+let _liveOcrBusy = false;
+let _liveDetectParsed = null;
+let _liveDetectAddrKey = '';
+
+function grabCameraBlob(quality) {
+  return new Promise((resolve) => {
+    const video = document.getElementById('camera-feed');
+    if (!video || !video.videoWidth || !video.videoHeight) return resolve(null);
+    const canvas = document.getElementById('canvas');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    canvas.getContext('2d').drawImage(video, 0, 0);
+    canvas.toBlob((b) => resolve(b), 'image/jpeg', quality || 0.9);
+  });
+}
+
+function startLiveOcrLoop() {
+  if (_liveOcrTimer) clearInterval(_liveOcrTimer);
+  _liveOcrTimer = setInterval(runLiveOcrTick, 1300);
+}
+
+async function runLiveOcrTick() {
+  if (!_liveScanActive || _liveOcrBusy || _addInFlight || _previewOpen) return;
+  // Don't fight a detection the driver is acting on
+  if (_liveDetectParsed) return;
+  _liveOcrBusy = true;
+  try {
+    const blob = await grabCameraBlob(0.9);
+    if (!blob) return;
+    const parsed = await ocrLabelLocally(blob);
+    if (!parsed) return;
+    const addr = _cleanAddress(parsed.address || '');
+    if (!addr || isSenderAddress(addr) || !isPlausibleAddress(addr) || _isDirtyAddress(addr)) return;
+    parsed.address = addr;
+    _lastLabelBlob = blob;       // reuse for Edit fix panel
+    _lastLocalParsed = parsed;
+    showLiveDetect(parsed);
+    if (window.UNITNative) UNITNative.hapticSuccess();
+  } catch (e) {
+    /* keep scanning */
+  } finally {
+    _liveOcrBusy = false;
+  }
+}
+
+function showLiveDetect(parsed) {
+  _liveDetectParsed = parsed;
+  _liveDetectAddrKey = (parsed.address || '').toLowerCase().replace(/\s+/g, ' ');
+  const card = document.getElementById('live-detect');
+  document.getElementById('ld-addr').textContent = parsed.address || '';
+  const nameEl = document.getElementById('ld-name');
+  const nm = (parsed.name || '').trim();
+  nameEl.textContent = nm ? ('👤 ' + nm) : '';
+  nameEl.style.display = nm ? 'block' : 'none';
+  card.classList.add('show');
+}
+
+function hideLiveDetect() {
+  const card = document.getElementById('live-detect');
+  if (card) card.classList.remove('show');
+  _liveDetectParsed = null;
+  _liveDetectAddrKey = '';
+}
+
+async function liveDetectAdd() {
+  if (!_liveDetectParsed || _addInFlight) return;
+  const parsed = _liveDetectParsed;
+  const name = (parsed.name || '').trim();
+  const address = _cleanAddress(parsed.address || '');
+  const tracking = (parsed.tracking || '').trim();
+  const zip = parsed.zip || (address.match(/\b(\d{5})\b/) || ['', ''])[1];
+  hideLiveDetect();
+  _addInFlight = true;
+  try {
+    const data = await fetch('/driver/scan/add', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, address, tracking, zip })
+    }).then(r => r.json());
+    if (!data.ok) {
+      if (window.UNITNative) await UNITNative.hapticError();
+      showToast(data.error || 'Could not add — tap Edit', true);
+      liveDetectEditWith(parsed);
+      return;
+    }
+    if (data.duplicate) {
+      showToast('Already in list ✓');
+    } else {
+      _lastAddKey = (tracking || '') + '|' + address.toLowerCase().replace(/\s+/g, ' ');
+      _lastAddTime = Date.now();
+      _finishAddResponse(data, name, address, tracking, zip);
+      showAutoAddFlash(data, { name, address, tracking });
+      if (window.UNITNative) { await UNITNative.playBeep(); await UNITNative.hapticSuccess(); }
+      showToast('Added ✓ — keep scanning');
+    }
+  } catch (e) {
+    if (window.UNITNative) await UNITNative.hapticError();
+    showToast('Network error — tap Edit to retry', true);
+    liveDetectEditWith(parsed);
+  } finally {
+    _addInFlight = false;
+  }
+}
+
+function liveDetectEdit() {
+  if (!_liveDetectParsed) return;
+  liveDetectEditWith(_liveDetectParsed);
+}
+
+function liveDetectEditWith(parsed) {
+  pauseLiveScan();
+  showPreviewFields(parsed, 'local');
+  try { checkParsedLabel(parsed, 'local'); } catch (e) {}
+  document.getElementById('preview-card').scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+function pauseLiveScan() {
+  _liveScanActive = false;
+  if (_liveScanLoopId) cancelAnimationFrame(_liveScanLoopId);
+  _liveScanLoopId = null;
+  if (_liveOcrTimer) clearInterval(_liveOcrTimer);
+  _liveOcrTimer = null;
+  hideLiveDetect();
+  document.documentElement.classList.remove('live-scan-on');
+  document.documentElement.classList.add('live-paused');
+  const banner = document.getElementById('live-scan-banner');
+  if (banner) banner.classList.remove('active');
+  // Keep the camera stream alive so resume is instant
+}
+
 function stopLiveScanMode() {
   _liveScanActive = false;
   if (_liveScanLoopId) cancelAnimationFrame(_liveScanLoopId);
   _liveScanLoopId = null;
+  if (_liveOcrTimer) clearInterval(_liveOcrTimer);
+  _liveOcrTimer = null;
+  hideLiveDetect();
   document.documentElement.classList.remove('live-scan-on');
+  document.documentElement.classList.remove('live-paused');
   const banner = document.getElementById('live-scan-banner');
   if (banner) banner.classList.remove('active');
   stopCamera();
@@ -1897,7 +2105,8 @@ function stopLiveScanMode() {
 window.addEventListener('pagehide', stopLiveScanMode);
 
 // ── Camera ──
-async function startCamera() {
+async function startCamera(silent) {
+  if (stream) return; // already running — keep stream for instant resume
   try {
     stream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
@@ -1908,7 +2117,7 @@ async function startCamera() {
     document.getElementById('camera-placeholder').style.display = 'none';
     document.getElementById('capture-btn').style.display = 'block';
   } catch (e) {
-    showToast('Camera not available — use the upload button', true);
+    if (!silent) showToast('Camera not available — use the upload button', true);
   }
 }
 
@@ -3283,10 +3492,8 @@ if (typeof Tesseract !== 'undefined') {
     getTesseractWorker().catch(() => {});
     syncLabelMemoryFromServer();
     initRecipientBoxHandles();
-    // Live scan in native app + modern mobile Safari (BarcodeDetector)
-    if (window.UNITNative?.isNative || 'BarcodeDetector' in window) {
-      startLiveScanMode();
-    }
+    // Spoke-style live camera + address detection (auto-start; falls back to tap)
+    startLiveScanMode(true);
   });
 }
 
