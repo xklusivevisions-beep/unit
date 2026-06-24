@@ -54,6 +54,19 @@
           {% if checkin_status == 'in' %}🟢 You're in today{% elif checkin_status == 'out' %}🔴 Marked not coming in{% else %}⚪ Are you working today?{% endif %}
         </div>
         <small class="text-secondary">Your manager sees this instantly</small>
+        {% if schedule and schedule.scheduled_today is sameas true %}
+        <div class="mt-1" style="font-size:0.78rem;color:#10b981;font-weight:700;">📅 You're scheduled to work today</div>
+        {% elif schedule and schedule.scheduled_today is sameas false %}
+        <div class="mt-1" style="font-size:0.78rem;color:#888;font-weight:700;">📅 Not scheduled today</div>
+        {% endif %}
+        {% if schedule and schedule.days %}
+        <div class="mt-1">
+          {% for wd in ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'] %}
+          <span style="font-size:0.62rem;font-weight:700;padding:1px 5px;border-radius:5px;margin-right:2px;
+            {% if wd in schedule.days %}background:#10b98122;color:#10b981;{% else %}background:#161616;color:#444;{% endif %}">{{ wd[0] }}</span>
+          {% endfor %}
+        </div>
+        {% endif %}
         {% if assignment_today %}
         <div class="mt-1" style="font-size:0.8rem;color:#0088ff;font-weight:700;"><i class="fas fa-route me-1"></i>{{ assignment_today }}</div>
         {% endif %}

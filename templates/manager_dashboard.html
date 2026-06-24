@@ -37,26 +37,38 @@
   {% endwith %}
 
   <!-- Attendance summary -->
-  <div class="row g-2 mb-4">
-    <div class="col-4">
+  <div class="row g-2 mb-3">
+    <div class="col-3">
       <div class="stat-card">
-        <div class="stat-number" style="color:#00ff88;font-size:1.6rem;">{{ checked_in }}</div>
-        <small class="text-secondary" style="font-size:0.7rem;">🟢 Coming in</small>
+        <div class="stat-number" style="color:#00ff88;font-size:1.5rem;">{{ checked_in }}</div>
+        <small class="text-secondary" style="font-size:0.66rem;">🟢 In</small>
       </div>
     </div>
-    <div class="col-4">
+    <div class="col-3">
       <div class="stat-card">
-        <div class="stat-number" style="color:#ff3333;font-size:1.6rem;">{{ not_in }}</div>
-        <small class="text-secondary" style="font-size:0.7rem;">🔴 Not in</small>
+        <div class="stat-number" style="color:#0088ff;font-size:1.5rem;">{{ scheduled_count }}</div>
+        <small class="text-secondary" style="font-size:0.66rem;">📅 Scheduled</small>
       </div>
     </div>
-    <div class="col-4">
+    <div class="col-3">
       <div class="stat-card">
-        <div class="stat-number" style="color:#666;font-size:1.6rem;">{{ unknown }}</div>
-        <small class="text-secondary" style="font-size:0.7rem;">⚪ Unknown</small>
+        <div class="stat-number" style="color:#ff3333;font-size:1.5rem;">{{ no_show_count }}</div>
+        <small class="text-secondary" style="font-size:0.66rem;">⚠️ No-show</small>
+      </div>
+    </div>
+    <div class="col-3">
+      <div class="stat-card">
+        <div class="stat-number" style="color:#666;font-size:1.5rem;">{{ unknown }}</div>
+        <small class="text-secondary" style="font-size:0.66rem;">⚪ Unknown</small>
       </div>
     </div>
   </div>
+
+  {% if no_show_count %}
+  <div style="background:#2a0a0a;border:1px solid #ff333366;border-radius:12px;padding:11px 14px;margin-bottom:14px;color:#ff6666;font-size:0.84rem;">
+    <strong>⚠️ {{ no_show_count }} scheduled driver(s) haven't checked in.</strong> Follow up for accountability.
+  </div>
+  {% endif %}
 
   <div class="d-flex justify-content-between align-items-center mb-2">
     <div class="fw-bold small" style="color:#aaa;letter-spacing:0.08em;">TODAY'S TEAM</div>
@@ -80,8 +92,24 @@
       <div style="flex:1;min-width:0;">
         <div class="d-flex justify-content-between align-items-start">
           <div>
-            <div class="fw-bold">{{ t.driver.name }}</div>
+            <div class="fw-bold">
+              {{ t.driver.name }}
+              {% if t.scheduled_today is sameas true %}
+                <span class="pill" style="background:#0088ff22;color:#0088ff;margin-left:4px;">📅 Scheduled</span>
+              {% elif t.scheduled_today is sameas false %}
+                <span class="pill" style="background:#222;color:#777;margin-left:4px;">Off today</span>
+              {% endif %}
+              {% if t.no_show %}<span class="pill" style="background:#ff333322;color:#ff3333;margin-left:4px;">⚠️ NO-SHOW</span>{% endif %}
+            </div>
             <small class="text-secondary">{{ t.driver.phone or '—' }}</small>
+            {% if t.scheduled_days %}
+            <div style="margin-top:3px;">
+              {% for wd in ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'] %}
+              <span style="font-size:0.62rem;font-weight:700;padding:1px 5px;border-radius:5px;margin-right:2px;
+                {% if wd in t.scheduled_days %}background:#0088ff22;color:#0088ff;{% else %}background:#161616;color:#444;{% endif %}">{{ wd[0] }}</span>
+              {% endfor %}
+            </div>
+            {% endif %}
           </div>
           {% if t.reliability is not none %}
           <span class="pill" style="background:{% if t.reliability >= 90 %}#00ff8822;color:#00ff88{% elif t.reliability >= 75 %}#ffaa0022;color:#ffaa00{% else %}#ff333322;color:#ff3333{% endif %};">
@@ -146,7 +174,7 @@
   </div>
   {% else %}
   <div class="text-center text-secondary py-5">
-    <p>No drivers on your team yet.<br>Assign drivers to <strong>{{ company_name }}</strong> from the owner admin panel.</p>
+    <p>No drivers on your team yet.<br>Go to <a href="/manager/team" style="color:#00ff88;">Roster</a> to add drivers or claim existing ones.</p>
   </div>
   {% endfor %}
 

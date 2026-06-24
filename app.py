@@ -7,6 +7,25 @@ import pdfplumber, math
 from PIL import Image
 import anthropic
 
+# ── Local time (Romulus, MI / Eastern) ──────────────────────────
+# Render runs in UTC. Everything in this app — check-ins, payroll days,
+# the 9 PM finish forecast, "today" — must use the warehouse's local time.
+try:
+    from zoneinfo import ZoneInfo
+    APP_TZ = ZoneInfo(os.environ.get('APP_TIMEZONE', 'America/Detroit'))
+except Exception:
+    APP_TZ = None
+
+def _now_local():
+    """Naive local (Eastern) datetime — drop-in replacement for _now_local()."""
+    if APP_TZ is None:
+        return datetime.today()
+    return datetime.now(APP_TZ).replace(tzinfo=None)  # noqa: UNIT-local-time
+
+def _today_local():
+    """Local date (date object)."""
+    return _now_local().date()
+
 ANTHROPIC_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
 # Free vision: get a key at https://aistudio.google.com/apikey
 GEMINI_API_KEY  = os.environ.get('GEMINI_API_KEY') or os.environ.get('GOOGLE_API_KEY', '')
@@ -383,7 +402,7 @@ def upsert_label_memory(tracking, name='', address='', zip_code='', source='conf
     try:
         db = get_db()
         existing = db.execute("SELECT id FROM label_memory WHERE tracking=?", (key,)).fetchone()
-        now = datetime.now().isoformat()
+        now = _now_local().isoformat()
         if existing:
             db.execute(
                 """UPDATE label_memory SET customer_name=?, address=?, zip_code=?,
@@ -2041,7 +2060,7 @@ def upsert_address_intel(address, lat, lng, zone_letter=None, confidence=None):
         return
     key      = _normalize_addr_key(address)
     zip_code = _extract_zip(address)
-    now      = datetime.now().isoformat()
+    now      = _now_local().isoformat()
     _geocache[key]     = (lat, lng)
     _geocache[address] = (lat, lng)
     try:
@@ -2096,7 +2115,7 @@ def record_address_delivery(address, zone_letter=None):
     if not address:
         return
     key = _normalize_addr_key(address)
-    now = datetime.now().isoformat()
+    now = _now_local().isoformat()
     try:
         db  = get_db()
         row = db.execute(
@@ -2208,7 +2227,7 @@ def remember_unit_number(address, unit):
             "SELECT id, known_units FROM address_intel WHERE address IN (?,?) LIMIT 1",
             (base_key, full_key),
         ).fetchone()
-        now = datetime.now().isoformat()
+        now = _now_local().isoformat()
         if row:
             try:
                 units = json.loads(row['known_units'] or '[]')
@@ -2745,6 +2764,8 @@ def init_db():
         )""",
         "CREATE INDEX IF NOT EXISTS idx_manager_messages_company ON manager_messages (company_id)",
         "ALTER TABLE driver_checkins ADD COLUMN assignment TEXT",
+        # Agreed-upon scheduled work days (comma list: Mon,Tue,Wed,Thu,Fri,Sat,Sun)
+        "ALTER TABLE drivers ADD COLUMN scheduled_days TEXT",
         # ── POD location proof (anti wrong-stop) ──
         "ALTER TABLE stops ADD COLUMN delivered_lat REAL",
         "ALTER TABLE stops ADD COLUMN delivered_lng REAL",
@@ -3207,7 +3228,7 @@ def driver_dashboard():
     if 'driver_id' not in session:
         return redirect(url_for('driver_login'))
     db = get_db()
-    today = datetime.now().strftime('%Y-%m-%d')
+    today = _now_local().strftime('%Y-%m-%d')
     driver_row = db.execute("SELECT * FROM drivers WHERE id=?", (session['driver_id'],)).fetchone()
     pay_rate = float(driver_row['pay_rate']) if driver_row and driver_row['pay_rate'] else 1.50
 
@@ -3237,8 +3258,7 @@ def driver_dashboard():
     ).fetchone()[0]
 
     # Week earnings (Mon-Sun of current week)
-    from datetime import date
-    today_date = date.today()
+    today_date = _today_local()
     week_start = (today_date - timedelta(days=today_date.weekday())).strftime('%Y-%m-%d')
     week_stop_count = db.execute(
         """SELECT COUNT(*) FROM stops s
@@ -3292,6 +3312,12 @@ def driver_dashboard():
     except Exception:
         pass
 
+    sched_days = _ss_val(driver_row, 'scheduled_days', None)
+    schedule = {
+        'days': _parse_days(sched_days),
+        'scheduled_today': _is_scheduled_today(sched_days),
+    }
+
     next_stop = None
     finish_estimate = None
     if route and stops:
@@ -3322,6 +3348,7 @@ def driver_dashboard():
         finish_estimate=finish_estimate,
         checkin_status=checkin_status,
         assignment_today=assignment_today,
+        schedule=schedule,
     )
 
 
@@ -3333,8 +3360,8 @@ def driver_checkin():
     status = request.form.get('status', 'in').strip()
     if status not in ('in', 'out'):
         status = 'in'
-    today = datetime.now().strftime('%Y-%m-%d')
-    now = datetime.now().isoformat()
+    today = _now_local().strftime('%Y-%m-%d')
+    now = _now_local().isoformat()
     db = get_db()
     existing = db.execute(
         "SELECT id FROM driver_checkins WHERE driver_id=? AND check_date=?",
@@ -3358,11 +3385,10 @@ def api_driver_earnings():
     """Returns current driver earnings — called live from dashboard."""
     if 'driver_id' not in session:
         return jsonify({'error': 'unauthorized'}), 401
-    from datetime import date
     db       = get_db()
     driver   = db.execute("SELECT pay_rate FROM drivers WHERE id=?", (session['driver_id'],)).fetchone()
     pay_rate = float(driver['pay_rate']) if driver and driver['pay_rate'] else 1.50
-    today    = date.today().strftime('%Y-%m-%d')
+    today    = _today_local().strftime('%Y-%m-%d')
     today_delivered = db.execute(
         """SELECT COUNT(*) FROM stops s JOIN routes r ON s.route_id=r.id
            WHERE r.driver_id=? AND r.date=? AND s.status='delivered'""",
@@ -3373,13 +3399,13 @@ def api_driver_earnings():
            WHERE r.driver_id=? AND r.date=?""",
         (session['driver_id'], today)
     ).fetchone()[0]
-    week_start = (date.today() - timedelta(days=date.today().weekday())).strftime('%Y-%m-%d')
+    week_start = (_today_local() - timedelta(days=_today_local().weekday())).strftime('%Y-%m-%d')
     week_delivered = db.execute(
         """SELECT COUNT(*) FROM stops s JOIN routes r ON s.route_id=r.id
            WHERE r.driver_id=? AND r.date>=? AND s.status='delivered'""",
         (session['driver_id'], week_start)
     ).fetchone()[0]
-    month_start = date.today().replace(day=1).strftime('%Y-%m-%d')
+    month_start = _today_local().replace(day=1).strftime('%Y-%m-%d')
     month_delivered = db.execute(
         """SELECT COUNT(*) FROM stops s JOIN routes r ON s.route_id=r.id
            WHERE r.driver_id=? AND r.date>=? AND s.status='delivered'""",
@@ -3400,7 +3426,7 @@ def api_driver_earnings():
 def debug_dashboard():
     try:
         db = get_db()
-        today = datetime.now().strftime('%Y-%m-%d')
+        today = _now_local().strftime('%Y-%m-%d')
         route = db.execute(
             "SELECT * FROM routes WHERE driver_id=? AND date=? ORDER BY id DESC LIMIT 1",
             (1, today)
@@ -3414,7 +3440,7 @@ def debug_dashboard():
 
 def _get_or_create_scan_session(db, driver_id):
     """Get today's open scan session or create one."""
-    today = datetime.now().strftime('%Y-%m-%d')
+    today = _now_local().strftime('%Y-%m-%d')
     ss = db.execute(
         "SELECT * FROM scan_sessions WHERE driver_id=? AND date=? AND status='scanning' ORDER BY id DESC LIMIT 1",
         (driver_id, today)
@@ -3715,7 +3741,7 @@ def _finish_scan_label_result(result):
     tracking = (result.get('tracking') or '').strip()
     if tracking:
         db = get_db()
-        today = datetime.now().strftime('%Y-%m-%d')
+        today = _now_local().strftime('%Y-%m-%d')
         ss = db.execute(
             "SELECT * FROM scan_sessions WHERE driver_id=? AND date=? AND status='scanning' ORDER BY id DESC LIMIT 1",
             (session['driver_id'], today)
@@ -3805,7 +3831,7 @@ def scan_add():
 
     # ─ Import-first fast path: zones locked, match by tracking ─
     db0 = get_db()
-    today0 = datetime.now().strftime('%Y-%m-%d')
+    today0 = _now_local().strftime('%Y-%m-%d')
     ss0 = db0.execute(
         "SELECT * FROM scan_sessions WHERE driver_id=? AND date=? AND status='scanning' ORDER BY id DESC LIMIT 1",
         (session['driver_id'], today0)
@@ -3919,7 +3945,7 @@ def scan_live_sort():
     if 'driver_id' not in session:
         return jsonify({'ok': False, 'error': 'not logged in'}), 401
     db = get_db()
-    today = datetime.now().strftime('%Y-%m-%d')
+    today = _now_local().strftime('%Y-%m-%d')
     ss = db.execute(
         "SELECT id FROM scan_sessions WHERE driver_id=? AND date=? AND status='scanning' ORDER BY id DESC LIMIT 1",
         (session['driver_id'], today)
@@ -4109,7 +4135,7 @@ def scan_optimize():
     start, end, end_mode = _parse_route_endpoints(req_data)
 
     db = get_db()
-    today = datetime.now().strftime('%Y-%m-%d')
+    today = _now_local().strftime('%Y-%m-%d')
     ss = db.execute(
         "SELECT * FROM scan_sessions WHERE driver_id=? AND date=? AND status='scanning' ORDER BY id DESC LIMIT 1",
         (session['driver_id'], today)
@@ -4212,7 +4238,7 @@ def scan_optimize():
                route_start_lat=?, route_start_lng=?, route_end_lat=?, route_end_lng=?, route_end_mode=?
            WHERE id=?""",
         (
-            json.dumps(centroids), datetime.now().isoformat(),
+            json.dumps(centroids), _now_local().isoformat(),
             start['lat'] if start else None, start['lng'] if start else None,
             end['lat'] if end else None, end['lng'] if end else None,
             end_mode,
@@ -4291,7 +4317,7 @@ def scan_validate_addresses():
 
 def _scan_validate_addresses_impl():
     db = get_db()
-    today = datetime.now().strftime('%Y-%m-%d')
+    today = _now_local().strftime('%Y-%m-%d')
     ss = db.execute(
         "SELECT id FROM scan_sessions WHERE driver_id=? AND date=? AND status='scanning' ORDER BY id DESC LIMIT 1",
         (session['driver_id'], today),
@@ -4586,7 +4612,7 @@ def scan_import_route():
 
     db.execute(
         "UPDATE scan_sessions SET zones_locked=1, zone_centroids=?, locked_at=?, phase='optimized' WHERE id=?",
-        (json.dumps(centroids), datetime.now().isoformat(), ss_id)
+        (json.dumps(centroids), _now_local().isoformat(), ss_id)
     )
     db.commit()
 
@@ -4783,7 +4809,7 @@ def screenshots_to_pdf():
             resolution=150
         )
         buf.seek(0)
-        today_file = datetime.now().strftime('%Y%m%d')
+        today_file = _now_local().strftime('%Y%m%d')
         return send_file(
             buf,
             mimetype='application/pdf',
@@ -4800,7 +4826,7 @@ def scan_clear():
     if 'driver_id' not in session:
         return jsonify({'ok': False}), 401
     db = get_db()
-    today = datetime.now().strftime('%Y-%m-%d')
+    today = _now_local().strftime('%Y-%m-%d')
     ss = db.execute(
         "SELECT id FROM scan_sessions WHERE driver_id=? AND date=? AND status='scanning' ORDER BY id DESC LIMIT 1",
         (session['driver_id'], today)
@@ -4834,7 +4860,7 @@ def scan_quick_navigate():
         return jsonify({'ok': False, 'error': 'No address provided'})
 
     db   = get_db()
-    today = datetime.now().strftime('%Y-%m-%d')
+    today = _now_local().strftime('%Y-%m-%d')
 
     # Geocode immediately — this is what captures the precise coord for address_intel
     lat, lng = None, None
@@ -4910,7 +4936,7 @@ def scan_build_route():
     if 'driver_id' not in session:
         return jsonify({'ok': False, 'error': 'not logged in'}), 401
     db = get_db()
-    today = datetime.now().strftime('%Y-%m-%d')
+    today = _now_local().strftime('%Y-%m-%d')
     ss = db.execute(
         "SELECT * FROM scan_sessions WHERE driver_id=? AND date=? AND status='scanning' ORDER BY id DESC LIMIT 1",
         (session['driver_id'], today)
@@ -5142,7 +5168,7 @@ def route_new():
 
     if request.method == 'POST':
         db = get_db()
-        today = datetime.now().strftime('%Y-%m-%d')
+        today = _now_local().strftime('%Y-%m-%d')
         route_name = request.form.get('route_name', f'Route {today}')
 
         # Create route
@@ -5353,7 +5379,7 @@ def route_manual():
 
     if request.method == 'POST':
         db = get_db()
-        today = datetime.now().strftime('%Y-%m-%d')
+        today = _now_local().strftime('%Y-%m-%d')
         route_name = request.form.get('route_name', f'Route {today}')
         if USE_PG:
             route_id = db.execute(
@@ -5541,7 +5567,7 @@ def stop_edit(stop_id):
                         lat=excluded.lat, lng=excluded.lng,
                         corrected_by=excluded.corrected_by,
                         corrected_at=excluded.corrected_at
-                ''', (address, lat, lng, session.get('driver_name','driver'), datetime.now().isoformat()))
+                ''', (address, lat, lng, session.get('driver_name','driver'), _now_local().isoformat()))
                 upsert_address_intel(address, lat, lng)
             except (ValueError, TypeError):
                 pass
@@ -5612,7 +5638,7 @@ def route_blast(route_id):
             failed += 1
 
     db.execute("UPDATE routes SET blast_sent=1, blast_sent_at=? WHERE id=?",
-               (datetime.now().isoformat(), route_id))
+               (_now_local().isoformat(), route_id))
     db.commit()
     db.close()
     return redirect(url_for('route_detail', route_id=route_id, blast_sent=sent, blast_failed=failed))
@@ -5717,7 +5743,7 @@ def stop_pin(stop_id):
                 lat=excluded.lat, lng=excluded.lng,
                 corrected_by=excluded.corrected_by,
                 corrected_at=excluded.corrected_at
-        ''', (stop['address'], lat, lng, session.get('driver_name', 'driver'), datetime.now().isoformat()))
+        ''', (stop['address'], lat, lng, session.get('driver_name', 'driver'), _now_local().isoformat()))
         # Sync human-verified coords to address_intel (highest quality signal)
         try:
             upsert_address_intel(stop['address'], lat, lng, confidence='verified')
@@ -5779,7 +5805,7 @@ def stop_delivered(stop_id):
     if not stop:
         db.close()
         return redirect(url_for('driver_dashboard'))
-    now_iso = datetime.now().isoformat()
+    now_iso = _now_local().isoformat()
     try:
         d_lat = float(request.form.get('driver_lat')) if request.form.get('driver_lat') else None
     except Exception:
@@ -5823,7 +5849,7 @@ def stop_deliver(stop_id):
 
     data = request.get_json(silent=True) or {}
     photos = [data.get('pod_photo_1'), data.get('pod_photo_2'), data.get('pod_photo_3')]
-    now_iso = datetime.now().isoformat()
+    now_iso = _now_local().isoformat()
     try:
         d_lat = float(data.get('driver_lat')) if data.get('driver_lat') is not None else None
     except Exception:
@@ -5986,7 +6012,7 @@ def route_eta(route_id):
 
     if n_done >= 1 and route['first_delivery_at']:
         start = datetime.fromisoformat(route['first_delivery_at'])
-        now   = datetime.now()
+        now   = _now_local()
         elapsed_mins = (now - start).total_seconds() / 60
 
         if n_done >= 2:
@@ -6158,7 +6184,7 @@ def update_location():
 
     db = get_db()
     db.execute("UPDATE drivers SET current_lat=?, current_lng=?, last_seen=? WHERE id=?",
-               (lat, lng, datetime.now().isoformat(), session['driver_id']))
+               (lat, lng, _now_local().isoformat(), session['driver_id']))
 
     result = {'status': 'ok', 'sms_triggered': False, 'distance_miles': None, 'at_stop': False, 'distance_feet': None}
 
@@ -6343,7 +6369,7 @@ def live_update_location(token):
         return jsonify({'ok': False, 'status': 'ended'}), 200
     db.execute(
         "UPDATE live_sessions SET driver_lat=?, driver_lng=?, last_seen=? WHERE token=?",
-        (lat, lng, datetime.now().isoformat(), token)
+        (lat, lng, _now_local().isoformat(), token)
     )
     db.commit()
     db.close()
@@ -6358,7 +6384,7 @@ def live_poll(token):
         db.close()
         return jsonify({'error': 'not found'}), 404
     # Log view — first time sets viewed_at, always increments view_count
-    now = datetime.now().isoformat()
+    now = _now_local().isoformat()
     if not sess['viewed_at']:
         db.execute("UPDATE live_sessions SET viewed_at=?, view_count=1 WHERE token=?", (now, token))
     else:
@@ -6446,7 +6472,7 @@ def live_signup(token):
         if not existing:
             db.execute(
                 "INSERT INTO residents (address, unit, phone, customer_name, drop_spot, sms_consent, sms_consent_at) VALUES (?,?,?,?,?,1,?)",
-                ('', '', phone, name, drop_spot, datetime.now().isoformat())
+                ('', '', phone, name, drop_spot, _now_local().isoformat())
             )
             db.commit()
             log.info(f'Customer signup from live track ({sess["status"]}): {name} {phone} drop_spot={drop_spot}')
@@ -6484,7 +6510,7 @@ def track_signup(token):
         if not existing:
             db.execute(
                 "INSERT INTO residents (address, unit, phone, customer_name, sms_consent, sms_consent_at) VALUES (?,?,?,?,1,?)",
-                (address, unit, phone, name, datetime.now().isoformat())
+                (address, unit, phone, name, _now_local().isoformat())
             )
             db.commit()
             log.info(f'Customer signup from track page: {name} {phone} @ {address}')
@@ -6539,7 +6565,7 @@ def resident_portal():
              request.form.get('phone'),   request.form.get('backup_phone'),
              request.form.get('drop_spot'), request.form.get('door_notes'),
              1 if request.form.get('sms_consent') else 0,
-             datetime.now().isoformat() if request.form.get('sms_consent') else None)
+             _now_local().isoformat() if request.form.get('sms_consent') else None)
         )
         db.commit()
         db.close()
@@ -6720,12 +6746,12 @@ PAYROLL_DEDUCTION_KINDS = {'claim', 'deduction'}
 def _payroll_week_bounds(anchor=None):
     """Return (start_date, end_date) for the Saturday–Friday week containing anchor."""
     if not anchor:
-        d = datetime.now().date()
+        d = _now_local().date()
     elif isinstance(anchor, str):
         try:
             d = datetime.strptime(anchor.strip(), '%Y-%m-%d').date()
         except Exception:
-            d = datetime.now().date()
+            d = _now_local().date()
     else:
         d = anchor
     days_since_sat = (d.weekday() - 5) % 7
@@ -6828,7 +6854,7 @@ def _build_payroll(db, start, end, company_id):
 
 def _driver_reliability(db, driver_id, days=7):
     """Simple reliability: delivery completion % over recent routes."""
-    since = (datetime.now().date() - timedelta(days=days)).isoformat()
+    since = (_now_local().date() - timedelta(days=days)).isoformat()
     row = db.execute(
         """SELECT COUNT(*) AS total,
                   SUM(CASE WHEN s.status = 'delivered' THEN 1 ELSE 0 END) AS done
@@ -6842,6 +6868,24 @@ def _driver_reliability(db, driver_id, days=7):
     if total == 0:
         return None
     return round(100 * done / total)
+
+# ── Agreed-upon work schedule (accountability) ──────────────
+WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+
+def _parse_days(scheduled_days):
+    """Return a clean ordered list of scheduled weekday abbreviations."""
+    if not scheduled_days:
+        return []
+    have = {s.strip().title() for s in str(scheduled_days).split(',') if s.strip()}
+    return [d for d in WEEKDAYS if d in have]
+
+def _is_scheduled_today(scheduled_days, when=None):
+    """True/False if today is an agreed work day; None if no schedule set."""
+    days = _parse_days(scheduled_days)
+    if not days:
+        return None
+    when = when or _now_local()
+    return WEEKDAYS[when.weekday()] in days
 
 # ── Finish-by-9 estimation ──────────────────────────────────
 # Goal: tell drivers/managers a realistic finish time BEFORE overload.
@@ -6857,7 +6901,7 @@ def _route_finish_estimate(db, route_id, total=None, pending=None, now=None):
 
     Returns dict: pending, minutes_remaining, finish_label, late, eta (short label).
     """
-    now = now or datetime.now()
+    now = now or _now_local()
     if total is None or pending is None:
         row = db.execute(
             """SELECT COUNT(*) AS total,
@@ -6966,7 +7010,7 @@ def manager_dashboard():
     if guard:
         return guard
     _, company_id, manager_name, company_name = _manager_session()
-    today = datetime.now().date().isoformat()
+    today = _now_local().date().isoformat()
     db = get_db()
     drivers = db.execute(
         """SELECT d.*, COALESCE(c.status, 'unknown') AS checkin_status,
@@ -7003,22 +7047,33 @@ def manager_dashboard():
                 'eta': est['eta'],
                 'late': est['late'],
             }
+        sched_days = d['scheduled_days'] if 'scheduled_days' in d.keys() else None
+        scheduled_today = _is_scheduled_today(sched_days)
+        checkin = d['checkin_status']
+        # Accountability: agreed to work today but hasn't checked in
+        no_show = bool(scheduled_today) and checkin != 'in'
         team.append({
             'driver': d,
-            'checkin': d['checkin_status'],
+            'checkin': checkin,
             'assignment': d['assignment'] if 'assignment' in d.keys() else None,
             'reliability': _driver_reliability(db, d['id']),
             'route': route_info,
+            'scheduled_days': _parse_days(sched_days),
+            'scheduled_today': scheduled_today,
+            'no_show': no_show,
         })
     checked_in = sum(1 for t in team if t['checkin'] == 'in')
     not_in = sum(1 for t in team if t['checkin'] == 'out')
     unknown = sum(1 for t in team if t['checkin'] not in ('in', 'out'))
+    scheduled_count = sum(1 for t in team if t['scheduled_today'])
+    no_show_count = sum(1 for t in team if t['no_show'])
     db.close()
     return render_template(
         'manager_dashboard.html',
         team=team, today=today,
         manager_name=manager_name, company_name=company_name,
         checked_in=checked_in, not_in=not_in, unknown=unknown,
+        scheduled_count=scheduled_count, no_show_count=no_show_count,
     )
 
 @app.route('/manager/checkin', methods=['POST'])
@@ -7031,14 +7086,14 @@ def manager_checkin():
     status = request.form.get('status', 'unknown').strip()
     if status not in ('in', 'out', 'unknown'):
         status = 'unknown'
-    today = datetime.now().date().isoformat()
+    today = _now_local().date().isoformat()
     if not driver_id.isdigit():
         return redirect(url_for('manager_dashboard'))
     db = get_db()
     if not _driver_in_company(db, int(driver_id), company_id):
         db.close()
         return redirect(url_for('manager_dashboard'))
-    now = datetime.now().isoformat()
+    now = _now_local().isoformat()
     existing = db.execute(
         "SELECT id FROM driver_checkins WHERE driver_id = ? AND check_date = ?",
         (int(driver_id), today)
@@ -7068,8 +7123,8 @@ def manager_assign():
     assignment = request.form.get('assignment', '').strip()
     if not driver_id.isdigit():
         return redirect(url_for('manager_dashboard'))
-    today = datetime.now().date().isoformat()
-    now = datetime.now().isoformat()
+    today = _now_local().date().isoformat()
+    now = _now_local().isoformat()
     db = get_db()
     if not _driver_in_company(db, int(driver_id), company_id):
         db.close()
@@ -7103,7 +7158,7 @@ def manager_rescue():
         flash('Pick a different driver to rescue to.', 'rescue')
         return redirect(url_for('manager_dashboard'))
     from_id, to_id = int(from_id), int(to_id)
-    today = datetime.now().strftime('%Y-%m-%d')
+    today = _now_local().strftime('%Y-%m-%d')
     db = get_db()
     if not (_driver_in_company(db, from_id, company_id) and _driver_in_company(db, to_id, company_id)):
         db.close()
@@ -7165,8 +7220,19 @@ def manager_team():
            FROM drivers d WHERE d.company_id = ? ORDER BY d.name""",
         (company_id,)
     ).fetchall()
+    # Existing drivers not yet on any team — manager can claim them so their
+    # check-ins and schedule show up here.
+    unlinked = db.execute(
+        """SELECT id, name, phone FROM drivers
+           WHERE company_id IS NULL AND COALESCE(name,'') != ''
+           ORDER BY name LIMIT 100"""
+    ).fetchall()
+    team_rows = []
+    for d in drivers:
+        team_rows.append({'d': d, 'days': _parse_days(d['scheduled_days'] if 'scheduled_days' in d.keys() else None)})
     db.close()
-    return render_template('manager_team.html', drivers=drivers, company_name=company_name)
+    return render_template('manager_team.html', drivers=drivers, team_rows=team_rows,
+                           unlinked=unlinked, weekdays=WEEKDAYS, company_name=company_name)
 
 @app.route('/manager/team/add', methods=['POST'])
 def manager_team_add():
@@ -7210,15 +7276,34 @@ def manager_team_update(driver_id):
     phone = format_phone(request.form.get('phone', '').strip())
     area = request.form.get('area', '').strip()
     rate = request.form.get('rate', '').strip()
+    days = ','.join(_parse_days(','.join(request.form.getlist('days'))))
     try: rate_v = float(rate) if rate else 0
     except Exception: rate_v = 0
     db.execute(
-        "UPDATE drivers SET phone=?, assigned_zips=?, pay_rate=?, default_rate=? WHERE id=?",
-        (phone or None, area or None, rate_v, rate_v, driver_id)
+        "UPDATE drivers SET phone=?, assigned_zips=?, pay_rate=?, default_rate=?, scheduled_days=? WHERE id=?",
+        (phone or None, area or None, rate_v, rate_v, days or None, driver_id)
     )
     db.commit()
     db.close()
     flash('Driver updated.', 'team')
+    return redirect(url_for('manager_team'))
+
+@app.route('/manager/team/claim', methods=['POST'])
+def manager_team_claim():
+    guard = _require_manager()
+    if guard:
+        return guard
+    _, company_id, _, _ = _manager_session()
+    driver_id = request.form.get('driver_id', '').strip()
+    if driver_id.isdigit():
+        db = get_db()
+        db.execute(
+            "UPDATE drivers SET company_id=? WHERE id=? AND company_id IS NULL",
+            (company_id, int(driver_id))
+        )
+        db.commit()
+        db.close()
+        flash('Driver added to your team.', 'team')
     return redirect(url_for('manager_team'))
 
 @app.route('/manager/team/<int:driver_id>/remove', methods=['POST'])
@@ -7309,7 +7394,7 @@ def manager_payroll():
         week_days=[start + timedelta(days=i) for i in range(7)],
         prev_week=(start - timedelta(days=7)).isoformat(),
         next_week=(start + timedelta(days=7)).isoformat(),
-        today_s=datetime.now().date().isoformat(),
+        today_s=_now_local().date().isoformat(),
         company_name=company_name,
     )
 
@@ -7350,7 +7435,7 @@ def manager_payroll_pull():
         rate = (drow['dr'] if drow else 0) or 0
         if existing:
             db.execute("UPDATE payroll_days SET stops = ?, updated_at = ? WHERE id = ?",
-                       (cnt, datetime.now().isoformat(), existing['id']))
+                       (cnt, _now_local().isoformat(), existing['id']))
             updated += 1
         else:
             db.execute(
@@ -7389,7 +7474,7 @@ def manager_payroll_save():
         except Exception: rate_v = 0
         db.execute(
             "UPDATE payroll_days SET stops = ?, rate_per_stop = ?, area = ?, updated_at = ? WHERE id = ?",
-            (stops_v, rate_v, area or None, datetime.now().isoformat(), int(lid))
+            (stops_v, rate_v, area or None, _now_local().isoformat(), int(lid))
         )
     db.commit()
     db.close()
@@ -7497,27 +7582,32 @@ def manager_payroll_clear():
     if guard:
         return guard
     _, company_id, _, _ = _manager_session()
+    scope = request.form.get('scope', 'week')
     start, end = _payroll_week_bounds(request.form.get('week'))
     start_s, end_s = start.isoformat(), end.isoformat()
     db = get_db()
     driver_ids = _company_driver_ids(db, company_id)
     if driver_ids:
         ph = ','.join('?' * len(driver_ids))
-        db.execute(
-            f"""DELETE FROM payroll_days
-                WHERE driver_id IN ({ph})
-                  AND work_date >= ? AND work_date <= ?""",
-            (*driver_ids, start_s, end_s)
-        )
-        db.execute(
-            f"""DELETE FROM payroll_adjustments
-                WHERE driver_id IN ({ph})
-                  AND work_date >= ? AND work_date <= ?""",
-            (*driver_ids, start_s, end_s)
-        )
+        if scope == 'all':
+            db.execute(f"DELETE FROM payroll_days WHERE driver_id IN ({ph})", tuple(driver_ids))
+            db.execute(f"DELETE FROM payroll_adjustments WHERE driver_id IN ({ph})", tuple(driver_ids))
+            msg = 'All payroll history cleared.'
+        else:
+            db.execute(
+                f"""DELETE FROM payroll_days
+                    WHERE driver_id IN ({ph}) AND work_date >= ? AND work_date <= ?""",
+                (*driver_ids, start_s, end_s)
+            )
+            db.execute(
+                f"""DELETE FROM payroll_adjustments
+                    WHERE driver_id IN ({ph}) AND work_date >= ? AND work_date <= ?""",
+                (*driver_ids, start_s, end_s)
+            )
+            msg = 'Payroll cleared for this week.'
         db.commit()
+        flash(msg, 'payroll')
     db.close()
-    flash('Payroll cleared for this week.', 'payroll')
     return redirect(url_for('manager_payroll', week=start_s))
 
 @app.route('/manager/payroll/export')
@@ -7556,7 +7646,7 @@ def manager_payroll_statement(driver_id):
     if not _driver_in_company(db := get_db(), driver_id, company_id):
         db.close()
         return render_template('payroll_statement.html', grp=None,
-                               week_start=datetime.now().date(), week_end=datetime.now().date())
+                               week_start=_now_local().date(), week_end=_now_local().date())
     start, end = _payroll_week_bounds(request.args.get('week'))
     groups, _, _ = _build_payroll(db, start, end, company_id)
     db.close()
@@ -7789,7 +7879,7 @@ def health():
             git_hash = subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD'], cwd=os.path.dirname(__file__) or '.', stderr=subprocess.DEVNULL).decode().strip()
         except Exception:
             git_hash = 'unknown'
-        return jsonify({'status': 'ok', 'time': datetime.now().isoformat(), 'version': git_hash,
+        return jsonify({'status': 'ok', 'time': _now_local().isoformat(), 'version': git_hash,
                         'model': _vision_provider_label(),
                         'vision_key': 'set' if _vision_available() else 'MISSING',
                         'vision_provider': 'gemini' if GEMINI_API_KEY else ('anthropic' if ANTHROPIC_KEY else 'none'),
@@ -7843,8 +7933,7 @@ def route_log():
         except: pass
 
     # This week totals (Mon–today)
-    from datetime import date as _date, timedelta
-    today      = _date.today()
+    today      = _today_local()
     week_start = (today - timedelta(days=today.weekday())).strftime('%Y-%m-%d')
     week_row   = db.execute("""
         SELECT
@@ -8210,13 +8299,13 @@ def admin_building_add_unit(building_id):
         if existing:
             db.execute(
                 "UPDATE delivery_instructions SET customer_notes=?, updated_at=? WHERE id=?",
-                (customer_notes, datetime.now().isoformat(), existing['id'])
+                (customer_notes, _now_local().isoformat(), existing['id'])
             )
         else:
             db.execute(
                 """INSERT INTO delivery_instructions (building_id, unit_number, customer_notes, updated_at)
                    VALUES (?,?,?,?)""",
-                (building_id, unit_number, customer_notes, datetime.now().isoformat())
+                (building_id, unit_number, customer_notes, _now_local().isoformat())
             )
         db.commit()
         db.close()
