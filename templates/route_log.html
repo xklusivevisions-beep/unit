@@ -59,8 +59,17 @@
   </details>
 
   <!-- ── Day-by-Day Log ── -->
-  <div style="font-size:0.72rem;color:#64748b;font-weight:700;letter-spacing:.08em;
-              text-transform:uppercase;margin-bottom:12px;">Daily Breakdown</div>
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+    <div style="font-size:0.72rem;color:#64748b;font-weight:700;letter-spacing:.08em;text-transform:uppercase;">Daily Breakdown</div>
+    {% if log_days %}
+    <form method="POST" action="/driver/route-log/clear"
+          onsubmit="return confirm('Reset your entire pay log? This permanently clears all your logged days. This cannot be undone.');">
+      <button type="submit" style="background:#1a0000;color:#ff4444;border:1px solid #ff333355;border-radius:8px;padding:6px 12px;font-size:0.72rem;font-weight:700;cursor:pointer;">
+        <i class="fas fa-trash-can me-1"></i>Reset Pay Log
+      </button>
+    </form>
+    {% endif %}
+  </div>
 
   {% if log_days %}
     {% for day in log_days %}
@@ -105,7 +114,7 @@
       {% endif %}
 
       <!-- Stats row -->
-      <div style="display:flex;gap:16px;">
+      <div style="display:flex;gap:16px;align-items:center;">
         <span style="font-size:0.72rem;color:#10b981;">✓ {{ day.delivered }} delivered</span>
         {% if day.failed > 0 %}
         <span style="font-size:0.72rem;color:#ef4444;">✗ {{ day.failed }} failed</span>
@@ -113,6 +122,13 @@
         {% if day.pending > 0 %}
         <span style="font-size:0.72rem;color:#f59e0b;">⏳ {{ day.pending }} pending</span>
         {% endif %}
+        <form method="POST" action="/driver/route-log/day/delete" style="margin-left:auto;"
+              onsubmit="return confirm('Remove {{ day.date }} from your pay log?');">
+          <input type="hidden" name="date" value="{{ day.date }}">
+          <button type="submit" style="background:none;border:none;color:#475569;font-size:0.72rem;cursor:pointer;padding:0;">
+            <i class="fas fa-xmark me-1"></i>Remove
+          </button>
+        </form>
       </div>
 
     </div>

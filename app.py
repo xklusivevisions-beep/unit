@@ -8026,6 +8026,44 @@ def route_log_manual_delete(entry_id):
     return redirect(url_for('route_log'))
 
 
+@app.route('/driver/route-log/day/delete', methods=['POST'])
+def route_log_day_delete():
+    """Delete one scan day (all routes + stops on that date) from the driver's log."""
+    if 'driver_id' not in session:
+        return redirect(url_for('driver_login'))
+    driver_id = session['driver_id']
+    date_val = request.form.get('date', '').strip()
+    if date_val:
+        db = get_db()
+        db.execute(
+            "DELETE FROM stops WHERE route_id IN (SELECT id FROM routes WHERE driver_id=? AND date=?)",
+            (driver_id, date_val)
+        )
+        db.execute("DELETE FROM routes WHERE driver_id=? AND date=?", (driver_id, date_val))
+        db.execute("DELETE FROM route_manual_log WHERE driver_id=? AND date=?", (driver_id, date_val))
+        db.commit()
+        db.close()
+    return redirect(url_for('route_log'))
+
+
+@app.route('/driver/route-log/clear', methods=['POST'])
+def route_log_clear():
+    """Reset the driver's entire pay log — clears their route + manual history."""
+    if 'driver_id' not in session:
+        return redirect(url_for('driver_login'))
+    driver_id = session['driver_id']
+    db = get_db()
+    db.execute(
+        "DELETE FROM stops WHERE route_id IN (SELECT id FROM routes WHERE driver_id=?)",
+        (driver_id,)
+    )
+    db.execute("DELETE FROM routes WHERE driver_id=?", (driver_id,))
+    db.execute("DELETE FROM route_manual_log WHERE driver_id=?", (driver_id,))
+    db.commit()
+    db.close()
+    return redirect(url_for('route_log'))
+
+
 # ─── QR BUILDING ACCESS ────────────────────────────────────────
 # Driver scans a QR posted at a building entrance → enters PIN → GPS is
 # checked against the building location (100m radius) → access codes and
