@@ -1832,25 +1832,66 @@ async function processBarcodeLive(rawValue) {
 }
 
 async function startLiveScanMode() {
-  if (!window.UNITNative || !window.UNITNative.isNative || !window.UNITNative.startLiveScan) return;
   const banner = document.getElementById('live-scan-banner');
-  const res = await UNITNative.startLiveScan(processBarcodeLive);
-  if (res && res.ok) {
-    _liveScanActive = true;
-    document.documentElement.classList.add('live-scan-on');
-    if (banner) banner.classList.add('active');
+  _liveScanActive = true;
+  document.documentElement.classList.add('live-scan-on');
+  if (banner) banner.classList.add('active');
+
+  await startCamera();
+  if (await startLiveBarcodeLoop()) {
     showToast('Live scan ready — point at barcode');
-  } else {
-    showToast('Live scan unavailable — use capture button', true);
+    return;
   }
+  _liveScanActive = false;
+  document.documentElement.classList.remove('live-scan-on');
+  if (banner) banner.classList.remove('active');
+  showToast('Live scan unavailable — use Capture button', true);
+}
+
+let _liveScanLoopId = null;
+let _barcodeDetector = null;
+
+async function startLiveBarcodeLoop() {
+  const video = document.getElementById('camera-feed');
+  if (!video) return false;
+
+  if ('BarcodeDetector' in window) {
+    try {
+      _barcodeDetector = new BarcodeDetector({
+        formats: ['code_128', 'code_39', 'itf', 'qr_code', 'pdf417', 'data_matrix']
+      });
+    } catch (e) {
+      _barcodeDetector = null;
+    }
+  }
+
+  if (!_barcodeDetector) return false;
+
+  const tick = async () => {
+    if (!_liveScanActive) return;
+    if (video.videoWidth && video.videoHeight && !_addInFlight) {
+      try {
+        const codes = await _barcodeDetector.detect(video);
+        for (const c of codes) {
+          const raw = c.rawValue || c.displayValue || '';
+          if (raw) await processBarcodeLive(raw);
+        }
+      } catch (e) { /* frame skip */ }
+    }
+    _liveScanLoopId = requestAnimationFrame(tick);
+  };
+  _liveScanLoopId = requestAnimationFrame(tick);
+  return true;
 }
 
 function stopLiveScanMode() {
   _liveScanActive = false;
+  if (_liveScanLoopId) cancelAnimationFrame(_liveScanLoopId);
+  _liveScanLoopId = null;
   document.documentElement.classList.remove('live-scan-on');
   const banner = document.getElementById('live-scan-banner');
   if (banner) banner.classList.remove('active');
-  if (window.UNITNative && UNITNative.stopLiveScan) UNITNative.stopLiveScan();
+  stopCamera();
 }
 
 window.addEventListener('pagehide', stopLiveScanMode);
@@ -3242,7 +3283,10 @@ if (typeof Tesseract !== 'undefined') {
     getTesseractWorker().catch(() => {});
     syncLabelMemoryFromServer();
     initRecipientBoxHandles();
-    startLiveScanMode();
+    // Live scan in native app + modern mobile Safari (BarcodeDetector)
+    if (window.UNITNative?.isNative || 'BarcodeDetector' in window) {
+      startLiveScanMode();
+    }
   });
 }
 

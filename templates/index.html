@@ -44,7 +44,7 @@
       <i class="fas fa-chevron-right text-secondary"></i>
     </a>
 
-    <a href="/admin/login" class="card p-4 mb-3 text-decoration-none d-flex flex-row align-items-center role-card">
+    <a href="/admin/login" id="role-owner-admin" class="card p-4 mb-3 text-decoration-none d-flex flex-row align-items-center role-card">
       <div class="me-3" style="width:48px;height:48px;background:#aa00ff15;border-radius:14px;display:flex;align-items:center;justify-content:center;">
         <i class="fas fa-wrench" style="color:#aa00ff;font-size:1.3rem;"></i>
       </div>
@@ -68,6 +68,8 @@
     transform: scale(0.98);
     color: #fff;
   }
+  /* TestFlight / native app — drivers + managers only */
+  .unit-native-app #role-owner-admin { display: none !important; }
 </style>
 {% endblock %}
 {% endblock %}
