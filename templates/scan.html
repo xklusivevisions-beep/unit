@@ -29,6 +29,24 @@
   #camera-placeholder svg { width: 48px; height: 48px; }
   #camera-placeholder span { font-size: 0.95rem; }
 
+  /* Live scan (Spoke-style) — native app only */
+  .live-scan-banner {
+    display: none;
+    background: linear-gradient(135deg, #065f46, #047857);
+    border: 1px solid #10b981;
+    border-radius: 14px;
+    padding: 14px 16px;
+    margin-bottom: 12px;
+    text-align: center;
+  }
+  .live-scan-banner.active { display: block; }
+  .live-scan-banner .live-title { font-weight: 800; font-size: 1rem; color: #6ee7b7; }
+  .live-scan-banner .live-sub { font-size: 0.82rem; color: #a7f3d0; margin-top: 4px; }
+  .unit-native-app .camera-zone.manual-fallback { margin-top: 8px; }
+  .unit-native-app.live-scan-on #camera-placeholder,
+  .unit-native-app.live-scan-on #capture-btn,
+  .unit-native-app.live-scan-on .file-btn { display: none !important; }
+
   /* Capture button */
   .capture-btn { width: 100%; padding: 16px; font-size: 1.05rem; font-weight: 700;
                  background: #f59e0b; color: #000; border: none; border-radius: 12px;
@@ -487,6 +505,12 @@
     <div class="sticker-prompt-lbl">✏️ Write this on the package</div>
     <div class="sticker-prompt-num" id="sticker-prompt-num">#1</div>
     <div class="sticker-prompt-hint">Use a marker or sticker — this number stays with the package through sorting</div>
+  </div>
+
+  <!-- Live scan banner (native app — Spoke-style continuous barcode) -->
+  <div class="live-scan-banner" id="live-scan-banner">
+    <div class="live-title">📷 Live Scan ON</div>
+    <div class="live-sub">Point at barcode — auto-adds · beep on scan</div>
   </div>
 
   <!-- Camera zone -->
@@ -1734,6 +1758,102 @@ function updateCount() {
   const rab = document.getElementById('review-addr-btn');
   if (rab) rab.style.display = (pkgCount >= 1 && currentPhase === 'scanning') ? 'block' : 'none';
 }
+
+// ── Live barcode scan (native app — Spoke-style) ──
+let _lastLiveTracking = '';
+let _lastLiveScanAt = 0;
+let _liveScanActive = false;
+
+function extractTrackingFromBarcode(raw) {
+  if (!raw) return '';
+  const s = String(raw).trim();
+  for (const re of _TRACKING_PATTERNS) {
+    const m = s.match(re);
+    if (m && m[1]) return m[1].replace(/\s/g, '').toUpperCase();
+  }
+  const cleaned = s.replace(/\s/g, '').toUpperCase();
+  if (cleaned.length >= 10) return cleaned;
+  return '';
+}
+
+async function processBarcodeLive(rawValue) {
+  if (_addInFlight || !_liveScanActive) return;
+  const tracking = extractTrackingFromBarcode(rawValue);
+  if (!tracking || tracking.length < 10) return;
+
+  const now = Date.now();
+  if (_lastLiveTracking === tracking && now - _lastLiveScanAt < 2500) return;
+  _lastLiveTracking = tracking;
+  _lastLiveScanAt = now;
+
+  _addInFlight = true;
+  try {
+    let parsed = { tracking, name: '', address: '', zip: '' };
+    const memHit = lookupLocalLabelMemory(tracking);
+    if (memHit && memHit.address) {
+      parsed = { ...parsed, name: memHit.name || '', address: memHit.address, zip: memHit.zip || '' };
+      if (await tryAutoAddPackage(parsed, null)) {
+        if (window.UNITNative) { await UNITNative.playBeep(); await UNITNative.hapticSuccess(); }
+        return;
+      }
+    }
+
+    const proc = await checkParsedLabel(parsed, 'barcode');
+    if (!proc.ok) {
+      if (window.UNITNative) await UNITNative.hapticError();
+      showToast(proc.error || 'Not on route — import route first', true);
+      return;
+    }
+    if (proc.mode === 'duplicate') {
+      if (window.UNITNative) { await UNITNative.playBeep(); await UNITNative.hapticSuccess(); }
+      showToast('Already scanned ✓');
+      setTimeout(refreshLiveSort, 300);
+      return;
+    }
+    if (proc.mode === 'lookup') {
+      if (window.UNITNative) { await UNITNative.playBeep(); await UNITNative.hapticSuccess(); }
+      handleProcessResponse(proc);
+      return;
+    }
+    if (proc.mode === 'confirm' && proc.data) {
+      const d = proc.data;
+      if (d.address && await tryAutoAddPackage({ ...parsed, ...d, address: _cleanAddress(d.address) }, null)) {
+        if (window.UNITNative) { await UNITNative.playBeep(); await UNITNative.hapticSuccess(); }
+        return;
+      }
+    }
+    if (window.UNITNative) await UNITNative.hapticError();
+    showToast('Unknown barcode — capture label photo', true);
+  } catch (e) {
+    if (window.UNITNative) await UNITNative.hapticError();
+  } finally {
+    _addInFlight = false;
+  }
+}
+
+async function startLiveScanMode() {
+  if (!window.UNITNative || !window.UNITNative.isNative || !window.UNITNative.startLiveScan) return;
+  const banner = document.getElementById('live-scan-banner');
+  const res = await UNITNative.startLiveScan(processBarcodeLive);
+  if (res && res.ok) {
+    _liveScanActive = true;
+    document.documentElement.classList.add('live-scan-on');
+    if (banner) banner.classList.add('active');
+    showToast('Live scan ready — point at barcode');
+  } else {
+    showToast('Live scan unavailable — use capture button', true);
+  }
+}
+
+function stopLiveScanMode() {
+  _liveScanActive = false;
+  document.documentElement.classList.remove('live-scan-on');
+  const banner = document.getElementById('live-scan-banner');
+  if (banner) banner.classList.remove('active');
+  if (window.UNITNative && UNITNative.stopLiveScan) UNITNative.stopLiveScan();
+}
+
+window.addEventListener('pagehide', stopLiveScanMode);
 
 // ── Camera ──
 async function startCamera() {
@@ -3122,6 +3242,7 @@ if (typeof Tesseract !== 'undefined') {
     getTesseractWorker().catch(() => {});
     syncLabelMemoryFromServer();
     initRecipientBoxHandles();
+    startLiveScanMode();
   });
 }
 

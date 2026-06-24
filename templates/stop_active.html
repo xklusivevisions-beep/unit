@@ -427,8 +427,14 @@
 const STOP_ID  = {{ stop.id }};
 const DEST_LAT = {{ stop.dest_lat or 'null' }};
 const DEST_LNG = {{ stop.dest_lng or 'null' }};
+const STOP_ADDRESS = {{ stop.address | tojson }};
 const GEOFENCE_FEET = 150;
 mapboxgl.accessToken = {{ mapbox_token | tojson }};
+
+function pushNavToCarPlay() {
+  if (!window.UNITNative || !UNITNative.isNative || !DEST_LAT || !DEST_LNG) return;
+  UNITNative.startCarPlayNavigation(DEST_LAT, DEST_LNG, STOP_ADDRESS);
+}
 
 const gpsDot  = document.getElementById('gps-dot');
 const gpsText = document.getElementById('gps-text');
@@ -648,8 +654,10 @@ function toggleNavMode() {
   applyNavModeUI();
   if (navMode && lastDriverLat !== null) {
     updateNavCamera(lastDriverLng, lastDriverLat, true);
+    pushNavToCarPlay();
   } else if (!navMode) {
     showRouteOverview();
+    if (window.UNITNative && UNITNative.stopCarPlayNavigation) UNITNative.stopCarPlayNavigation();
   }
 }
 window.toggleNavMode = toggleNavMode;
@@ -699,6 +707,7 @@ function fetchRoute(fromLng, fromLat) {
     document.getElementById('turn-eta').textContent = totalMins + ' min · ' + totalMiles + ' mi';
     updateTurnBanner(fromLat, fromLng);
     document.getElementById('turn-banner').style.display = 'flex';
+    if (navMode) pushNavToCarPlay();
   }).catch(err => {
     document.getElementById('turn-instruction').textContent = 'Route unavailable — tap NAV ↗';
     document.getElementById('turn-distance').textContent = '';
