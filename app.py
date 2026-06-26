@@ -2907,6 +2907,34 @@ def _mapbox_geocode(address):
         log.warning(f'Mapbox geocode failed for {address}: {e}')
     return None, None, None, 0
 
+def _mapbox_autocomplete(q, limit=5):
+    """Rooftop-grade address typeahead, biased to the Romulus/Detroit area."""
+    if not MAPBOX_TOKEN or not q:
+        return []
+    try:
+        url = 'https://api.mapbox.com/geocoding/v5/mapbox.places/' + requests.utils.quote(q) + '.json'
+        r = requests.get(url, params={
+            'country': 'US', 'limit': limit, 'types': 'address',
+            'autocomplete': 'true',
+            'proximity': '-83.397,42.222',  # Romulus, MI warehouse
+            'access_token': MAPBOX_TOKEN
+        }, timeout=6)
+        out = []
+        for f in (r.json() or {}).get('features', []):
+            name = (f.get('place_name') or '').replace(', United States', '').strip()
+            if not name:
+                continue
+            out.append({
+                'address': name,
+                'lat': f['center'][1],
+                'lng': f['center'][0],
+                'unit': '', 'name': '', 'source': 'mapbox'
+            })
+        return out
+    except Exception as e:
+        log.warning(f'mapbox autocomplete failed for {q}: {e}')
+        return []
+
 def _mapbox_confidence(accuracy, relevance):
     """Map Mapbox accuracy/relevance to our confidence tier."""
     if relevance and relevance < 0.5:
@@ -6176,13 +6204,22 @@ def address_suggest():
     if len(q) < 3:
         return jsonify([])
     db = get_db()
-    results = db.execute(
+    rows = db.execute(
         """SELECT address, unit, customer_name FROM stops
-           WHERE LOWER(address) LIKE LOWER(?) GROUP BY address, unit, customer_name ORDER BY MAX(id) DESC LIMIT 8""",
+           WHERE LOWER(address) LIKE LOWER(?) GROUP BY address, unit, customer_name ORDER BY MAX(id) DESC LIMIT 6""",
         (f'%{q}%',)
     ).fetchall()
     db.close()
-    return jsonify([{'address': r['address'], 'unit': r['unit'] or '', 'name': r['customer_name'] or ''} for r in results])
+    # Past deliveries first (learned/verified), then live rooftop suggestions.
+    out = [{'address': r['address'], 'unit': r['unit'] or '', 'name': r['customer_name'] or '',
+            'lat': None, 'lng': None, 'source': 'history'} for r in rows]
+    seen = {(_normalize_addr_key(o['address'])) for o in out}
+    for m in _mapbox_autocomplete(q, limit=6):
+        if _normalize_addr_key(m['address']) in seen:
+            continue
+        seen.add(_normalize_addr_key(m['address']))
+        out.append(m)
+    return jsonify(out[:10])
 
 @app.route('/api/name-suggest')
 def name_suggest():
