@@ -5755,7 +5755,8 @@ def stop_pin(stop_id):
     return jsonify({'ok': True})
 
 # Max distance (ft) from the stop pin before a delivery is flagged "off-location"
-POD_GEOFENCE_FT = 250
+POD_GEOFENCE_FT = 250      # off-location WARNING threshold (flag/log only)
+HARD_GEOFENCE_FT = 100     # cannot mark delivered beyond this when GPS is known
 
 def _delivery_distance_ft(stop, lat, lng):
     """Feet between the stop pin and where the driver tapped Delivered. None if unknown."""
@@ -5815,6 +5816,10 @@ def stop_delivered(stop_id):
     except Exception:
         d_lng = None
     dist_ft = _delivery_distance_ft(stop, d_lat, d_lng)
+    if dist_ft is not None and dist_ft > HARD_GEOFENCE_FT:
+        db.close()
+        flash(f'Too far to mark delivered ({int(dist_ft)} ft from the address). Move closer or drag the pin.', 'stop')
+        return redirect(url_for('stop_active', stop_id=stop_id))
     try:
         db.execute(
             "UPDATE stops SET status='delivered', delivered_at=?, delivered_lat=?, delivered_lng=?, delivered_distance_ft=? WHERE id=?",
@@ -5859,6 +5864,16 @@ def stop_deliver(stop_id):
     except Exception:
         d_lng = None
     dist_ft = _delivery_distance_ft(stop, d_lat, d_lng)
+
+    # Geofence lock — block deliveries marked far from the stop pin (misdelivery
+    # protection). Legitimate fix when the pin is wrong: drag the pin, which
+    # recomputes the distance. Only enforced when we actually have GPS.
+    if dist_ft is not None and dist_ft > HARD_GEOFENCE_FT:
+        db.close()
+        return jsonify({
+            'ok': False, 'too_far': True, 'distance_ft': dist_ft,
+            'error': f'You are {int(dist_ft)} ft from this address. Move closer, or drag the pin if it is wrong.'
+        })
 
     try:
         db.execute(

@@ -121,11 +121,19 @@
       <small class="text-secondary">Stop #{{ stop.stop_number }}</small>
       {% endif %}
     </div>
-    <!-- Open in Apple Maps -->
+    <!-- Voice + Open in Apple Maps -->
+    <button id="tts-btn" onclick="toggleTts()" style="background:none;border:1px solid #334155;color:#9ca3af;border-radius:10px;padding:5px 10px;font-size:0.74rem;font-weight:700;margin-right:8px;cursor:pointer;">
+      <i class="fas fa-volume-high me-1"></i>Voice on
+    </button>
     <a id="nav-btn" href="#" onclick="openNav(event)" style="color:#0088ff;font-size:0.8rem;font-weight:700;text-decoration:none;">
       <i class="fas fa-diamond-turn-right"></i> NAV
     </a>
   </div>
+  {% with msgs = get_flashed_messages(category_filter=['stop']) %}
+  {% for m in msgs %}
+  <div style="background:#2a0a0a;border:1px solid #ff3333;border-radius:12px;padding:10px 14px;margin-bottom:12px;color:#ff6666;font-size:0.85rem;font-weight:700;">{{ m }}</div>
+  {% endfor %}
+  {% endwith %}
   {% if geo_low_confidence %}
   <div style="background:#1a1000;border:1px solid #ffaa00;border-radius:12px;padding:10px 14px;margin-bottom:12px;">
     <div style="color:#ffaa00;font-size:0.8rem;font-weight:700;"><i class="fas fa-triangle-exclamation me-1"></i> Approximate location</div>
@@ -395,12 +403,8 @@
     <button class="btn btn-primary w-100 py-3 fs-6 mt-2" id="pod-deliver-btn" disabled>
       <i class="fas fa-check me-2"></i>Mark Delivered
     </button>
-    <div class="pod-skip">
-      <form method="POST" action="/driver/stop/{{ stop.id }}/delivered" id="pod-skip-form" style="display:inline;">
-        <input type="hidden" name="driver_lat" id="skip-driver-lat">
-        <input type="hidden" name="driver_lng" id="skip-driver-lng">
-        <a href="#" onclick="return podSkipSubmit();">Skip Photos</a>
-      </form>
+    <div id="deliver-gate-msg" style="text-align:center;font-size:0.8rem;margin-top:8px;color:#9ca3af;">
+      Take at least one proof photo to deliver
     </div>
   </div>
 
@@ -425,11 +429,21 @@
 <script src='https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.js'></script>
 <script>
 const STOP_ID  = {{ stop.id }};
-const DEST_LAT = {{ stop.dest_lat or 'null' }};
-const DEST_LNG = {{ stop.dest_lng or 'null' }};
+let DEST_LAT = {{ stop.dest_lat or 'null' }};
+let DEST_LNG = {{ stop.dest_lng or 'null' }};
 const STOP_ADDRESS = {{ stop.address | tojson }};
 const GEOFENCE_FEET = 150;
+const HARD_GEOFENCE_FT = 100;   // delivery lock distance
+const MULTI_UNIT = {{ 'true' if multi_unit else 'false' }};
+let   UNIT_SET   = {{ 'true' if stop.unit else 'false' }};
 mapboxgl.accessToken = {{ mapbox_token | tojson }};
+
+// Live distance from driver to the stop pin (feet); null until GPS + pin known
+let liveGeofenceFt = null;
+function currentGeofenceFt() {
+  if (DEST_LAT === null || DEST_LNG === null || lastDriverLat === null || lastDriverLng === null) return null;
+  return distanceFt(lastDriverLat, lastDriverLng, DEST_LAT, DEST_LNG);
+}
 
 function pushNavToCarPlay() {
   if (!window.UNITNative || !UNITNative.isNative || !DEST_LAT || !DEST_LNG) return;
@@ -500,6 +514,10 @@ mbMap.on('load', () => {
 
     destMarker.on('dragend', () => {
       const ll = destMarker.getLngLat();
+      // Update the live pin so the geofence lock measures from the corrected spot
+      DEST_LAT = ll.lat; DEST_LNG = ll.lng;
+      if (mbMap.getSource('geofence')) mbMap.getSource('geofence').setData(turf_circle(DEST_LNG, DEST_LAT, 46));
+      refreshDeliverGate();
       fetch('/driver/stop/' + STOP_ID + '/pin', {
         method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({lat:ll.lat, lng:ll.lng})
@@ -744,7 +762,35 @@ function updateTurnBanner(lat, lng) {
   document.getElementById('turn-icon').textContent = icon;
   document.getElementById('turn-instruction').textContent = instruction;
   document.getElementById('turn-distance').textContent = 'In ' + distStr;
+  // Speak each new turn once (Amazon Flex-style voice guidance)
+  if (instruction && instruction !== _lastSpokenTurn) {
+    _lastSpokenTurn = instruction;
+    speak(distM < 320 ? instruction : ('In ' + distStr + ', ' + instruction));
+  }
 }
+
+// ── Voice guidance (TTS) ──
+let _ttsMuted = (localStorage.getItem('unit_tts_muted') === '1');
+let _lastSpokenTurn = '';
+function speak(text) {
+  if (_ttsMuted || !text || !('speechSynthesis' in window)) return;
+  try {
+    const u = new SpeechSynthesisUtterance(text);
+    u.rate = 1.05; u.pitch = 1.0; u.volume = 1.0; u.lang = 'en-US';
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(u);
+  } catch (e) {}
+}
+function toggleTts() {
+  _ttsMuted = !_ttsMuted;
+  localStorage.setItem('unit_tts_muted', _ttsMuted ? '1' : '0');
+  if (_ttsMuted) { try { window.speechSynthesis.cancel(); } catch(e){} }
+  const b = document.getElementById('tts-btn');
+  if (b) b.innerHTML = _ttsMuted
+    ? '<i class="fas fa-volume-xmark me-1"></i>Voice off'
+    : '<i class="fas fa-volume-high me-1"></i>Voice on';
+}
+window.toggleTts = toggleTts;
 
 function turf_circle(lng, lat, radiusMeters) {
   const R = 6371000, steps = 64;
@@ -824,7 +870,7 @@ function sendLocation(lat, lng) {
         distBadge.style.color = '#00ff88';
         gpsText.textContent = 'You are at the right address';
         gpsText.style.color = '#00ff88';
-        if (!atStopShown) { atBanner.style.display='block'; atStopShown=true; }
+        if (!atStopShown) { atBanner.style.display='block'; atStopShown=true; speak("You've arrived at your stop."); }
       } else if (feet < 528) {
         distBadge.textContent = feet + ' ft away';
         gpsText.textContent = 'Almost there — ' + feet + ' ft';
@@ -842,6 +888,7 @@ function sendLocation(lat, lng) {
     }
     if (data.sms_triggered && !smsTriggered) { smsTriggered=true; smsAlert.style.display='block'; }
     if (routeSteps.length) updateTurnBanner(lat, lng);
+    refreshDeliverGate();
   }).catch(()=>{
     gpsText.textContent = 'GPS sync error — retrying...';
     gpsText.style.color = '#ff6666';
@@ -989,6 +1036,8 @@ function setStopUnit(pickedUnit) {
         </div>`;
     }
     if (typeof navigator.vibrate === 'function') navigator.vibrate(60);
+    UNIT_SET = true;
+    refreshDeliverGate();
   })
   .catch(() => alert('Network error — try again'));
 }
@@ -1011,9 +1060,35 @@ const podPreviewImg  = document.getElementById('pod-preview-img');
 const podDeliverBtn  = document.getElementById('pod-deliver-btn');
 const podStepLabel   = document.getElementById('pod-step-label');
 
+// Combined delivery gate: photo + unit + geofence (misdelivery protection)
+function refreshDeliverGate() {
+  if (!podDeliverBtn) return;
+  const msg = document.getElementById('deliver-gate-msg');
+  const hasPhoto = podPhotos.some(p => p);
+  const unitOk = !MULTI_UNIT || UNIT_SET;
+  const ft = currentGeofenceFt();
+  liveGeofenceFt = ft;
+  let geoOk = true, geoColor = '#10b981', geoNote = '';
+  if (ft !== null) {
+    if (ft > HARD_GEOFENCE_FT) { geoOk = false; geoColor = '#ff3333'; geoNote = `You're ${Math.round(ft)} ft away — move closer or drag the pin`; }
+    else if (ft > 50)         { geoColor = '#ffaa00'; geoNote = `${Math.round(ft)} ft — close enough, deliver carefully`; }
+    else                      { geoColor = '#10b981'; geoNote = `✓ At the address (${Math.round(ft)} ft)`; }
+  }
+  const ok = hasPhoto && unitOk && geoOk;
+  podDeliverBtn.disabled = !ok;
+  // Button color reflects geofence zone
+  podDeliverBtn.style.background = ok ? (ft !== null && ft > 50 ? '#ffaa00' : '#10b981') : '#333';
+  podDeliverBtn.style.color = ok ? '#001b10' : '#777';
+  if (msg) {
+    if (!hasPhoto) { msg.textContent = 'Take at least one proof photo to deliver'; msg.style.color = '#9ca3af'; }
+    else if (!unitOk) { msg.textContent = '⚠️ Enter the unit/apt number above before delivering'; msg.style.color = '#fdba74'; }
+    else if (!geoOk) { msg.textContent = '🔒 ' + geoNote; msg.style.color = '#ff6666'; }
+    else { msg.textContent = geoNote || 'Ready to deliver'; msg.style.color = geoColor; }
+  }
+}
+
 function podUpdateUI() {
   const allDone = podPhotos.every(p => p !== null);
-  podDeliverBtn.disabled = !allDone;
   document.querySelectorAll('.pod-progress-dot').forEach((dot, i) => {
     dot.classList.remove('active', 'done');
     if (podPhotos[i]) dot.classList.add('done');
@@ -1040,6 +1115,7 @@ function podUpdateUI() {
     podCaptureArea.style.display = 'block';
     podPreviewArea.style.display = 'none';
   }
+  refreshDeliverGate();
 }
 
 function podMakeThumbnail(file) {
@@ -1126,49 +1202,48 @@ function podOffLocationOk() {
   return true;
 }
 
-function podSkipSubmit() {
-  if (!confirm('Mark delivered without photos?')) return false;
-  if (!podOffLocationOk()) return false;
-  if (lastDriverLat !== null) {
-    document.getElementById('skip-driver-lat').value = lastDriverLat;
-    document.getElementById('skip-driver-lng').value = lastDriverLng;
-  }
-  document.getElementById('pod-skip-form').submit();
-  return false;
-}
-window.podSkipSubmit = podSkipSubmit;
-
 podDeliverBtn.addEventListener('click', async () => {
-  if (podPhotos.some(p => !p)) return;
-  if (!podOffLocationOk()) return;
+  if (!podPhotos.some(p => p)) return;                 // at least one proof photo
+  if (MULTI_UNIT && !UNIT_SET) { alert('Enter the unit/apt number first.'); return; }
+  const ft = currentGeofenceFt();
+  if (ft !== null && ft > HARD_GEOFENCE_FT) {
+    alert(`You're ${Math.round(ft)} ft from this address. Move closer, or drag the pin if it's wrong.`);
+    return;
+  }
   podDeliverBtn.disabled = true;
   podDeliverBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Saving...';
   const labels = ['P1-Label', 'P2-Door', 'P3-Numbers'];
-  podPhotos.forEach((p, i) => podDownloadToRoll(p.full, labels[i]));
+  podPhotos.forEach((p, i) => { if (p) podDownloadToRoll(p.full, labels[i]); });
   try {
     const resp = await fetch(`/driver/stop/${STOP_ID}/deliver`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
-        pod_photo_1: podPhotos[0].thumb,
-        pod_photo_2: podPhotos[1].thumb,
-        pod_photo_3: podPhotos[2].thumb,
+        pod_photo_1: podPhotos[0] ? podPhotos[0].thumb : null,
+        pod_photo_2: podPhotos[1] ? podPhotos[1].thumb : null,
+        pod_photo_3: podPhotos[2] ? podPhotos[2].thumb : null,
         driver_lat: lastDriverLat,
         driver_lng: lastDriverLng,
       }),
     });
     const data = await resp.json();
     if (data.ok) {
+      speak('Delivery complete. Next stop.');
       window.location.href = data.next_stop_id
         ? `/driver/stop/${data.next_stop_id}`
         : `/driver/route/${data.route_id}`;
+    } else if (data.too_far) {
+      podDeliverBtn.disabled = false;
+      podDeliverBtn.innerHTML = '<i class="fas fa-check me-2"></i>Mark Delivered';
+      alert('🔒 ' + (data.error || 'Too far from the address.'));
+      refreshDeliverGate();
     } else {
       throw new Error(data.error || 'Delivery failed');
     }
   } catch (e) {
     podDeliverBtn.disabled = false;
     podDeliverBtn.innerHTML = '<i class="fas fa-check me-2"></i>Mark Delivered';
-    alert('Could not save delivery. Photos are on your device — tap again or use Skip Photos.');
+    alert('Could not save delivery. Your photos are still on your device — tap Mark Delivered to retry.');
   }
 });
 
