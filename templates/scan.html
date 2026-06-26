@@ -29,63 +29,104 @@
   #camera-placeholder svg { width: 48px; height: 48px; }
   #camera-placeholder span { font-size: 0.95rem; }
 
-  /* Live scan (Spoke-style continuous camera + address detection) */
-  .live-scan-banner {
-    display: none;
-    background: linear-gradient(135deg, #065f46, #047857);
-    border: 1px solid #10b981;
-    border-radius: 14px;
-    padding: 12px 16px;
-    margin-bottom: 12px;
-    text-align: center;
-  }
-  .live-scan-banner.active { display: block; }
-  .live-scan-banner .live-title { font-weight: 800; font-size: 1rem; color: #6ee7b7; }
-  .live-scan-banner .live-sub { font-size: 0.82rem; color: #a7f3d0; margin-top: 4px; }
+  /* Live scan (Spoke-style fullscreen scanner) */
+  .live-scan-banner { display: none; }
+  .live-scan-banner.active { display: none; }
 
-  /* Camera fills more of the screen in live mode — scanner feel */
-  .live-scan-on .camera-zone video { max-height: 60vh !important; }
+  /* Fullscreen camera when live */
+  .live-scan-on .camera-zone {
+    position: fixed !important; inset: 0 !important; z-index: 9000 !important;
+    margin: 0 !important; border-radius: 0 !important; background: #000 !important;
+  }
+  .live-scan-on .camera-zone video {
+    width: 100% !important; height: 100% !important; max-height: none !important;
+    object-fit: cover !important;
+  }
   .live-scan-on #camera-placeholder { display: none !important; }
 
-  /* Scan reticle overlay */
+  /* Top bar (close + flashlight) — only in fullscreen */
+  .scan-topbar { display: none; }
+  .live-scan-on .scan-topbar {
+    display: flex; position: fixed; top: 0; left: 0; right: 0; z-index: 9300;
+    justify-content: space-between; align-items: center;
+    padding: calc(env(safe-area-inset-top) + 10px) 18px 10px;
+  }
+  .scan-topbar button {
+    background: rgba(20,20,20,0.6); border: none; color: #fff;
+    width: 42px; height: 42px; border-radius: 50%; font-size: 1.1rem; cursor: pointer;
+    backdrop-filter: blur(6px);
+  }
+  .scan-topbar .torch-on { background: #f5d90a; color: #111; }
+
+  /* Spotlight reticle that dims everything outside it */
   .scan-reticle {
     display: none;
-    position: absolute; left: 8%; right: 8%; top: 28%; bottom: 34%;
-    border: 2px solid rgba(16,185,129,0.9);
-    border-radius: 14px;
-    box-shadow: 0 0 0 9999px rgba(0,0,0,0.28);
-    pointer-events: none;
+    position: fixed; left: 7%; right: 7%; top: 30%; height: 26%;
+    border-radius: 16px;
+    box-shadow: 0 0 0 9999px rgba(0,0,0,0.55);
+    z-index: 9100; pointer-events: none;
+    border: 2px solid rgba(255,255,255,0.5);
+    transition: border-color 0.15s, box-shadow 0.15s, transform 0.15s;
   }
   .live-scan-on .scan-reticle { display: block; }
-  .scan-reticle::after {
-    content: 'Point at SHIP TO address';
-    position: absolute; top: -26px; left: 0; right: 0; text-align: center;
-    font-size: 0.72rem; color: #6ee7b7; font-weight: 700;
+  /* corner brackets */
+  .scan-reticle::before, .scan-reticle::after {
+    content: ''; position: absolute; width: 26px; height: 26px;
+    border: 3px solid #fff; }
+  .scan-reticle::before { top: -2px; left: -2px; border-right: none; border-bottom: none; border-radius: 16px 0 0 0; }
+  .scan-reticle::after  { bottom: -2px; right: -2px; border-left: none; border-top: none; border-radius: 0 0 16px 0; }
+  /* reading state */
+  .scan-reticle.reading { border-color: #60a5fa; }
+  /* locked state — snaps green */
+  .scan-reticle.locked {
+    border-color: #10b981; box-shadow: 0 0 0 9999px rgba(0,0,0,0.66), 0 0 20px rgba(16,185,129,0.6);
+    transform: scale(1.02);
   }
+  .reticle-hint {
+    display: none; position: fixed; left: 0; right: 0; top: calc(30% - 30px);
+    text-align: center; font-size: 0.78rem; color: #e5e7eb; font-weight: 700; z-index: 9150;
+    text-shadow: 0 1px 4px #000; pointer-events: none;
+  }
+  .live-scan-on .reticle-hint { display: block; }
 
-  /* Live detected-address card pinned over the camera */
+  /* Idle bottom hint (scanning, nothing locked) */
+  .scan-idle-hint {
+    display: none; position: fixed; left: 0; right: 0; bottom: calc(env(safe-area-inset-bottom) + 18px);
+    text-align: center; z-index: 9200;
+  }
+  .live-scan-on .scan-idle-hint { display: block; }
+  .scan-idle-hint .sh-text { color: #cbd5e1; font-size: 0.82rem; font-weight: 600; text-shadow: 0 1px 3px #000; }
+
+  /* Bottom sheet — Spoke-style detected address */
   .live-detect {
     display: none;
-    position: absolute; left: 10px; right: 10px; bottom: 10px;
-    background: rgba(6,20,14,0.96);
-    border: 1px solid #10b981;
-    border-radius: 14px;
-    padding: 12px 14px;
-    z-index: 5;
-    box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 9400;
+    background: #141414;
+    border-radius: 22px 22px 0 0;
+    padding: 14px 18px calc(env(safe-area-inset-bottom) + 18px);
+    box-shadow: 0 -10px 40px rgba(0,0,0,0.6);
   }
-  .live-detect.show { display: block; animation: ldpop 0.18s ease; }
-  @keyframes ldpop { from { transform: translateY(8px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
-  .live-detect .ld-label { font-size: 0.7rem; letter-spacing: 0.08em; color: #6ee7b7; font-weight: 700; margin-bottom: 4px; }
-  .live-detect .ld-addr { font-size: 0.98rem; font-weight: 700; color: #fff; line-height: 1.3; margin-bottom: 4px; word-break: break-word; }
-  .live-detect .ld-name { font-size: 0.82rem; color: #a7f3d0; margin-bottom: 10px; }
-  .live-detect .ld-actions { display: flex; gap: 8px; }
-  .live-detect .ld-add, .live-detect .ld-edit {
-    flex: 1; padding: 12px; border: none; border-radius: 10px;
-    font-size: 0.95rem; font-weight: 800; cursor: pointer;
+  .live-detect.show { display: block; animation: ldsheet 0.2s ease; }
+  @keyframes ldsheet { from { transform: translateY(40px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+  .live-detect .ld-grip { width: 38px; height: 4px; border-radius: 3px; background: #444; margin: 0 auto 12px; }
+  .live-detect .ld-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  .live-detect .ld-label { font-size: 0.68rem; letter-spacing: 0.08em; color: #6ee7b7; font-weight: 700; }
+  .live-detect .ld-addr { font-size: 1.15rem; font-weight: 800; color: #fff; line-height: 1.25; }
+  .live-detect .ld-name { font-size: 0.84rem; color: #9ca3af; margin-top: 2px; margin-bottom: 12px; }
+  .live-detect .ld-add {
+    width: 100%; padding: 15px; border: none; border-radius: 13px;
+    font-size: 1.02rem; font-weight: 800; cursor: pointer;
+    background: #6366f1; color: #fff; margin-bottom: 9px;
   }
-  .live-detect .ld-add { background: #10b981; color: #042014; }
-  .live-detect .ld-edit { background: #1f2937; color: #e5e7eb; }
+  .live-detect .ld-photo {
+    width: 100%; padding: 13px; border: none; border-radius: 13px;
+    font-size: 0.95rem; font-weight: 700; cursor: pointer;
+    background: #232323; color: #c7d2fe; margin-bottom: 4px;
+  }
+  .live-detect .ld-wrong {
+    width: 100%; padding: 11px; border: none; background: none;
+    color: #9ca3af; font-size: 0.9rem; font-weight: 600; cursor: pointer;
+  }
   .live-scan-toggle {
     display: none;
     width: 100%; margin-bottom: 10px; padding: 12px;
@@ -574,20 +615,31 @@
       <span>Tap to start live scan</span>
     </div>
     <video id="camera-feed" autoplay playsinline muted style="display:none"></video>
+
+    <!-- Fullscreen scanner chrome -->
+    <div class="scan-topbar" id="scan-topbar">
+      <button onclick="stopLiveScanMode()" title="Close">&times;</button>
+      <button id="torch-btn" onclick="toggleTorch()" title="Flashlight"><i class="fas fa-bolt"></i></button>
+    </div>
+    <div class="reticle-hint" id="reticle-hint">Point at the SHIP&nbsp;TO address</div>
     <div class="scan-reticle" id="scan-reticle"></div>
+    <div class="scan-idle-hint" id="scan-idle-hint">
+      <div class="sh-text">📷 Live scan — hold steady on each label</div>
+    </div>
     <canvas id="canvas"></canvas>
-    <!-- Live detected address — Spoke-style add/edit options -->
+
+    <!-- Detected address bottom sheet (Spoke-style) -->
     <div class="live-detect" id="live-detect">
-      <div class="ld-label">📍 DETECTED ADDRESS</div>
+      <div class="ld-grip"></div>
+      <div class="ld-head">
+        <span class="ld-label">📍 DETECTED ADDRESS</span>
+        <span id="ld-status" style="color:#10b981;font-size:0.72rem;font-weight:800;">Locked ✓</span>
+      </div>
       <div class="ld-addr" id="ld-addr"></div>
       <div class="ld-name" id="ld-name"></div>
-      <div class="ld-actions">
-        <button class="ld-add" onclick="liveDetectAdd()">✓ Add to stop</button>
-        <button class="ld-edit" onclick="liveDetectEdit()">✎ Edit</button>
-      </div>
-      <div style="text-align:center;margin-top:8px;">
-        <button onclick="liveDetectSkip()" style="background:none;border:none;color:#9ca3af;font-size:0.78rem;cursor:pointer;">Not this — keep scanning ↻</button>
-      </div>
+      <button class="ld-add" onclick="liveDetectAdd()">Add stop</button>
+      <button class="ld-photo" onclick="liveDetectAddPhoto()"><i class="fas fa-camera me-1"></i>Add stop and take photo</button>
+      <button class="ld-wrong" onclick="liveDetectEdit()">Wrong address? <i class="fas fa-chevron-down ms-1" style="font-size:0.7rem;"></i></button>
     </div>
   </div>
 
@@ -2016,6 +2068,8 @@ async function runLiveOcrTick() {
                      (_lastOcrText && _lastOcrText.length >= 14);
     if (!hasLabel || !_liveScanActive || _liveDetectParsed) return;
 
+    setReticleState('reading');   // blue — locking onto the label
+
     // Accurate read via server vision (Gemini) on the cropped reticle.
     const hi = await grabReticleBlob(0.92);
     if (!hi) return;
@@ -2047,7 +2101,15 @@ async function runLiveOcrTick() {
     /* keep scanning */
   } finally {
     _liveOcrBusy = false;
+    if (!_liveDetectParsed) setReticleState(null);   // nothing locked — reset frame
   }
+}
+
+function setReticleState(state) {
+  const ret = document.getElementById('scan-reticle');
+  if (!ret) return;
+  ret.classList.remove('reading', 'locked');
+  if (state) ret.classList.add(state);
 }
 
 function showLiveDetect(parsed) {
@@ -2057,9 +2119,12 @@ function showLiveDetect(parsed) {
   document.getElementById('ld-addr').textContent = parsed.address || '';
   const nameEl = document.getElementById('ld-name');
   const nm = (parsed.name || '').trim();
-  nameEl.textContent = nm ? ('👤 ' + nm) : '';
+  nameEl.textContent = nm || '';
   nameEl.style.display = nm ? 'block' : 'none';
   card.classList.add('show');
+  setReticleState('locked');                       // snap green — "locked in"
+  const idle = document.getElementById('scan-idle-hint'); if (idle) idle.style.display = 'none';
+  if (typeof navigator.vibrate === 'function') navigator.vibrate(40);
 }
 
 function hideLiveDetect() {
@@ -2067,6 +2132,9 @@ function hideLiveDetect() {
   if (card) card.classList.remove('show');
   _liveDetectParsed = null;
   _liveDetectAddrKey = '';
+  setReticleState(null);
+  const idle = document.getElementById('scan-idle-hint');
+  if (idle && _liveScanActive) idle.style.display = 'block';
 }
 
 // Driver says the detected address is wrong/irrelevant — clear it and resume.
@@ -2075,6 +2143,33 @@ function liveDetectSkip() {
   _lastOcrText = '';
   showToast('Keep scanning…');
 }
+
+// Flashlight (torch) toggle on the live camera track
+let _torchOn = false;
+async function toggleTorch() {
+  try {
+    const track = stream && stream.getVideoTracks ? stream.getVideoTracks()[0] : null;
+    if (!track) return;
+    const caps = track.getCapabilities ? track.getCapabilities() : {};
+    if (!caps.torch) { showToast('Flashlight not available on this camera', true); return; }
+    _torchOn = !_torchOn;
+    await track.applyConstraints({ advanced: [{ torch: _torchOn }] });
+    const b = document.getElementById('torch-btn');
+    if (b) b.classList.toggle('torch-on', _torchOn);
+  } catch (e) { showToast('Flashlight not available', true); }
+}
+window.toggleTorch = toggleTorch;
+
+// "Add stop and take photo" — capture the current label frame, then add
+async function liveDetectAddPhoto() {
+  if (!_liveDetectParsed) return;
+  try {
+    const shot = await grabCameraBlob(0.92);
+    if (shot) podDownloadToRoll(shot, 'LabelProof');
+  } catch (e) {}
+  liveDetectAdd();
+}
+window.liveDetectAddPhoto = liveDetectAddPhoto;
 
 async function liveDetectAdd() {
   if (!_liveDetectParsed || _addInFlight) return;
