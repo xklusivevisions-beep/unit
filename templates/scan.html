@@ -585,6 +585,9 @@
         <button class="ld-add" onclick="liveDetectAdd()">✓ Add to stop</button>
         <button class="ld-edit" onclick="liveDetectEdit()">✎ Edit</button>
       </div>
+      <div style="text-align:center;margin-top:8px;">
+        <button onclick="liveDetectSkip()" style="background:none;border:none;color:#9ca3af;font-size:0.78rem;cursor:pointer;">Not this — keep scanning ↻</button>
+      </div>
     </div>
   </div>
 
@@ -1974,28 +1977,72 @@ function grabCameraBlob(quality) {
   });
 }
 
+// Crop to the on-screen reticle — reads only what the driver is aiming at
+// (the SHIP TO block), the way Spoke frames the label. Far more accurate
+// than OCR'ing the whole frame (which picks up sender/store text).
+function grabReticleBlob(quality) {
+  return new Promise((resolve) => {
+    const video = document.getElementById('camera-feed');
+    if (!video || !video.videoWidth || !video.videoHeight) return resolve(null);
+    const vw = video.videoWidth, vh = video.videoHeight;
+    const x = vw * 0.06, y = vh * 0.24, w = vw * 0.88, h = vh * 0.44;
+    const canvas = document.getElementById('canvas');
+    canvas.width = Math.round(w);
+    canvas.height = Math.round(h);
+    canvas.getContext('2d').drawImage(video, x, y, w, h, 0, 0, canvas.width, canvas.height);
+    canvas.toBlob((b) => resolve(b), 'image/jpeg', quality || 0.92);
+  });
+}
+
 function startLiveOcrLoop() {
   if (_liveOcrTimer) clearInterval(_liveOcrTimer);
-  _liveOcrTimer = setInterval(runLiveOcrTick, 1300);
+  _liveOcrTimer = setInterval(runLiveOcrTick, 1500);
 }
 
 async function runLiveOcrTick() {
   if (!_liveScanActive || _liveOcrBusy || _addInFlight || _previewOpen) return;
-  // Don't fight a detection the driver is acting on
-  if (_liveDetectParsed) return;
+  if (_liveDetectParsed) return;   // a detection is on screen awaiting Add/Edit
   _liveOcrBusy = true;
   try {
-    const blob = await grabCameraBlob(0.9);
-    if (!blob) return;
-    const parsed = await ocrLabelLocally(blob);
-    if (!parsed) return;
-    const addr = _cleanAddress(parsed.address || '');
-    if (!addr || isSenderAddress(addr) || !isPlausibleAddress(addr) || _isDirtyAddress(addr)) return;
-    parsed.address = addr;
-    _lastLabelBlob = blob;       // reuse for Edit fix panel
-    _lastLocalParsed = parsed;
-    showLiveDetect(parsed);
-    if (window.UNITNative) UNITNative.hapticSuccess();
+    const crop = await grabReticleBlob(0.85);
+    if (!crop) return;
+
+    // Cheap on-device gate: only call the accurate AI when a label is actually
+    // in the frame (keeps API usage and battery down when pointed at nothing).
+    let gate = { tracking: '', name: '', address: '', zip: '' };
+    try { gate = await ocrLabelLocally(crop); } catch (e) {}
+    const hasLabel = (gate.address && gate.address.length >= 6) ||
+                     (gate.tracking && gate.tracking.length >= 8) ||
+                     (_lastOcrText && _lastOcrText.length >= 14);
+    if (!hasLabel || !_liveScanActive || _liveDetectParsed) return;
+
+    // Accurate read via server vision (Gemini) on the cropped reticle.
+    const hi = await grabReticleBlob(0.92);
+    if (!hi) return;
+    _lastLabelBlob = hi;
+    const fd = new FormData();
+    fd.append('photo', hi, 'live.jpg');
+    const data = await fetch('/driver/scan/process', { method: 'POST', body: fd }).then(r => r.json());
+    if (!_liveScanActive || _liveDetectParsed) return;
+
+    if (data.ok && data.mode === 'confirm' && data.data) {
+      const d = data.data;
+      const addr = _cleanAddress(d.address || '');
+      if (addr && !isSenderAddress(addr) && isPlausibleAddress(addr) && !_isDirtyAddress(addr)) {
+        _lastLocalParsed = { ...d, address: addr };
+        showLiveDetect({ ...d, address: addr });
+        if (window.UNITNative) UNITNative.hapticSuccess();
+      }
+    } else if (data.ok && data.mode === 'duplicate') {
+      showToast('Already scanned ✓');
+    } else if (data.ok && data.mode === 'lookup' && data.address) {
+      showLiveDetect({ name: data.name || '', address: data.address, tracking: data.tracking || '', zip: '' });
+    } else if (gate.address && isPlausibleAddress(_cleanAddress(gate.address)) && !isSenderAddress(gate.address)) {
+      // AI unavailable — fall back to the on-device read so the driver still gets an option
+      const addr = _cleanAddress(gate.address);
+      _lastLocalParsed = { ...gate, address: addr };
+      showLiveDetect({ ...gate, address: addr });
+    }
   } catch (e) {
     /* keep scanning */
   } finally {
@@ -2020,6 +2067,13 @@ function hideLiveDetect() {
   if (card) card.classList.remove('show');
   _liveDetectParsed = null;
   _liveDetectAddrKey = '';
+}
+
+// Driver says the detected address is wrong/irrelevant — clear it and resume.
+function liveDetectSkip() {
+  hideLiveDetect();
+  _lastOcrText = '';
+  showToast('Keep scanning…');
 }
 
 async function liveDetectAdd() {
