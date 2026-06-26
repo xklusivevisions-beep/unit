@@ -2766,6 +2766,16 @@ def init_db():
         "ALTER TABLE driver_checkins ADD COLUMN assignment TEXT",
         # Agreed-upon scheduled work days (comma list: Mon,Tue,Wed,Thu,Fri,Sat,Sun)
         "ALTER TABLE drivers ADD COLUMN scheduled_days TEXT",
+        # Delivery audit trail (misdelivery defense / dispute evidence)
+        """CREATE TABLE IF NOT EXISTS delivery_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            stop_id INTEGER,
+            driver_id INTEGER,
+            action TEXT,
+            detail TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_delivery_audit_stop ON delivery_audit (stop_id)",
         # ── POD location proof (anti wrong-stop) ──
         "ALTER TABLE stops ADD COLUMN delivered_lat REAL",
         "ALTER TABLE stops ADD COLUMN delivered_lng REAL",
@@ -5758,6 +5768,31 @@ def stop_pin(stop_id):
 POD_GEOFENCE_FT = 250      # off-location WARNING threshold (flag/log only)
 HARD_GEOFENCE_FT = 100     # cannot mark delivered beyond this when GPS is known
 
+DELIVERY_LOCK_MINUTES = 30  # after this, a delivery's proof is immutable
+
+def _audit_log(db, stop_id, action, detail=''):
+    """Record a delivery action for the audit trail (best-effort)."""
+    try:
+        db.execute(
+            "INSERT INTO delivery_audit (stop_id, driver_id, action, detail, created_at) VALUES (?,?,?,?,?)",
+            (stop_id, session.get('driver_id'), action, detail, _now_local().isoformat())
+        )
+        db.commit()
+    except Exception as e:
+        log.warning(f'[audit] log failed: {e}')
+        try: db._conn.rollback()
+        except Exception: pass
+
+def _delivery_locked(stop):
+    """True if the stop was delivered more than DELIVERY_LOCK_MINUTES ago."""
+    try:
+        if not stop or stop['status'] != 'delivered' or not stop['delivered_at']:
+            return False
+        when = datetime.fromisoformat(str(stop['delivered_at']))
+        return (_now_local() - when) > timedelta(minutes=DELIVERY_LOCK_MINUTES)
+    except Exception:
+        return False
+
 def _delivery_distance_ft(stop, lat, lng):
     """Feet between the stop pin and where the driver tapped Delivered. None if unknown."""
     try:
@@ -5833,6 +5868,7 @@ def stop_delivered(stop_id):
         db.commit()
     if dist_ft is not None and dist_ft > POD_GEOFENCE_FT:
         log.warning(f'[POD] Off-location delivery: stop {stop_id} marked {dist_ft:.0f}ft from pin by {session.get("driver_name","driver")}')
+    _audit_log(db, stop_id, 'delivered_nophoto', f'dist_ft={dist_ft}, gps=({d_lat},{d_lng})')
     route_id = _finalize_stop_delivery(db, stop, stop_id, now_iso)
     db.commit()
     next_id = _next_pending_stop_id(db, route_id) if route_id else None
@@ -5892,6 +5928,8 @@ def stop_deliver(stop_id):
     off_location = dist_ft is not None and dist_ft > POD_GEOFENCE_FT
     if off_location:
         log.warning(f'[POD] Off-location delivery: stop {stop_id} marked {dist_ft:.0f}ft from pin by {session.get("driver_name","driver")}')
+    _audit_log(db, stop_id, 'delivered_photo',
+               f'dist_ft={dist_ft}, off_location={off_location}, gps=({d_lat},{d_lng})')
 
     route_id = _finalize_stop_delivery(db, stop, stop_id, now_iso)
     db.commit()
@@ -5984,7 +6022,15 @@ def stop_undo(stop_id):
         return redirect(url_for('driver_login'))
     db = get_db()
     stop = db.execute("SELECT * FROM stops WHERE id=?", (stop_id,)).fetchone()
+    if stop and _delivery_locked(stop):
+        # Proof is immutable after the lock window — deny but record the attempt
+        _audit_log(db, stop_id, 'undo_denied', f'locked after {DELIVERY_LOCK_MINUTES}min; delivered_at={stop["delivered_at"]}')
+        route_id = stop['route_id']
+        db.close()
+        flash(f'This delivery was completed over {DELIVERY_LOCK_MINUTES} min ago and is locked for dispute protection.', 'stop')
+        return redirect(url_for('stop_active', stop_id=stop_id))
     if stop:
+        _audit_log(db, stop_id, 'undo', f'was {stop["status"]}, delivered_at={stop["delivered_at"]}')
         db.execute("UPDATE stops SET status='pending', delivered_at=NULL WHERE id=?", (stop_id,))
         db.commit()
     route_id = stop['route_id'] if stop else None
@@ -6868,21 +6914,25 @@ def _build_payroll(db, start, end, company_id):
     return groups, summary, drivers
 
 def _driver_reliability(db, driver_id, days=7):
-    """Simple reliability: delivery completion % over recent routes."""
+    """Reliability: delivery completion % minus an off-location (misdelivery) penalty."""
     since = (_now_local().date() - timedelta(days=days)).isoformat()
     row = db.execute(
         """SELECT COUNT(*) AS total,
-                  SUM(CASE WHEN s.status = 'delivered' THEN 1 ELSE 0 END) AS done
+                  SUM(CASE WHEN s.status = 'delivered' THEN 1 ELSE 0 END) AS done,
+                  SUM(CASE WHEN s.status = 'delivered' AND s.delivered_distance_ft IS NOT NULL
+                           AND s.delivered_distance_ft > ? THEN 1 ELSE 0 END) AS off_loc
            FROM stops s
            JOIN routes r ON s.route_id = r.id
            WHERE r.driver_id = ? AND r.date >= ?""",
-        (driver_id, since)
+        (POD_GEOFENCE_FT, driver_id, since)
     ).fetchone()
     total = (row['total'] or 0) if row else 0
     done = (row['done'] or 0) if row else 0
+    off_loc = (row['off_loc'] or 0) if row else 0
     if total == 0:
         return None
-    return round(100 * done / total)
+    score = 100 * done / total - 5 * off_loc   # -5 per off-location delivery
+    return max(0, min(100, round(score)))
 
 # ── Agreed-upon work schedule (accountability) ──────────────
 WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
