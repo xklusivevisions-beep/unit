@@ -68,6 +68,17 @@
     user-select: text;
     -webkit-user-select: text;
   }
+
+  /* TestFlight — hide HTML bottom nav; real iOS UITabBar replaces it */
+  .unit-native-app .nav-bottom {
+    display: none !important;
+  }
+  .unit-native-app .pb-nav {
+    padding-bottom: calc(72px + env(safe-area-inset-bottom)) !important;
+  }
+  .unit-native-app .container-fluid {
+    padding-bottom: 8px;
+  }
   .unit-app-feel .unit-pressed {
     transform: scale(0.97) !important;
     opacity: 0.88 !important;

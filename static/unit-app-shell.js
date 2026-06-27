@@ -134,6 +134,7 @@
     window.scrollTo(0, 0);
     markPageReady();
     document.dispatchEvent(new CustomEvent('unit:page-load'));
+    if (window.UNITNative && UNITNative.syncNativeTabs) UNITNative.syncNativeTabs();
   }
 
   function turboNavigate(url, push) {

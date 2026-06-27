@@ -19,6 +19,7 @@
 
   var Haptics = plugin('Haptics');
   var UnitNav = plugin('UnitNav');
+  var UnitTabs = plugin('UnitTabs');
   var StatusBar = plugin('StatusBar');
   var SplashScreen = plugin('SplashScreen');
 
@@ -79,8 +80,20 @@
     stopCarPlayNavigation: function () {
       if (!UnitNav) return Promise.resolve();
       return UnitNav.stopNavigation().catch(function () {});
+    },
+
+    syncNativeTabs: function () {
+      if (!UnitTabs) return Promise.resolve();
+      return UnitTabs.syncPath({ path: location.pathname }).catch(function () {});
     }
   };
 
+  function syncTabs() {
+    if (UnitTabs) UnitTabs.syncPath({ path: location.pathname }).catch(function () {});
+  }
+
   document.documentElement.classList.add('unit-native-app');
+  document.addEventListener('DOMContentLoaded', syncTabs);
+  document.addEventListener('unit:page-load', syncTabs);
+  window.addEventListener('popstate', syncTabs);
 })();
