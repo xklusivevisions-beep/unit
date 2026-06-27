@@ -1,5 +1,28 @@
 {% extends 'base.html' %}
 {% block title %}UNIT — Delivery Access Platform{% endblock %}
+{% block extra_css %}
+<style>
+  .role-card {
+    transition: border-color 0.2s, transform 0.12s, background 0.15s;
+    color: inherit;
+    border: 1px solid #1e1e1e !important;
+  }
+  @media (hover: hover) {
+    .role-card:hover {
+      border-color: #444 !important;
+      color: #fff;
+    }
+  }
+  .unit-app-feel .role-card:active,
+  .unit-app-feel .role-card.unit-pressed {
+    border-color: #333 !important;
+    background: #161616 !important;
+    transform: scale(0.98);
+    color: #fff;
+  }
+  .unit-native-app #role-owner-admin { display: none !important; }
+</style>
+{% endblock %}
 {% block content %}
 <div class="min-vh-100 d-flex flex-column align-items-center justify-content-center p-4">
 
@@ -56,20 +79,4 @@
     </a>
   </div>
 </div>
-
-{% block extra_css %}
-<style>
-  .role-card {
-    transition: border-color 0.2s, transform 0.1s;
-    color: inherit;
-  }
-  .role-card:hover, .role-card:active {
-    border-color: #444 !important;
-    transform: scale(0.98);
-    color: #fff;
-  }
-  /* TestFlight / native app — drivers + managers only */
-  .unit-native-app #role-owner-admin { display: none !important; }
-</style>
-{% endblock %}
 {% endblock %}

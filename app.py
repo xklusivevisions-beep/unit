@@ -701,12 +701,12 @@ def _route_centroid_from_items(items):
     return (sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts))
 
 
-def compress_for_api(img_bytes, max_bytes=4 * 1024 * 1024):
+def compress_for_api(img_bytes, max_bytes=4 * 1024 * 1024, max_dim=1568):
     """Resize + compress image to stay under Anthropic 5MB API limit."""
     try:
         img = Image.open(io.BytesIO(img_bytes)).convert('RGB')
-        if max(img.width, img.height) > 1568:
-            img.thumbnail((1568, 1568), Image.LANCZOS)
+        if max(img.width, img.height) > max_dim:
+            img.thumbnail((max_dim, max_dim), Image.LANCZOS)
         quality = 85
         while quality >= 40:
             buf = io.BytesIO()
@@ -807,7 +807,26 @@ Return ONLY the JSON array."""
     except Exception as e:
         log.error(f'Vision API error ({type(e).__name__}): {e}')
         raise
-        raise
+
+
+def extract_package_label_live(img_bytes):
+    """Fast live-scan path — shorter prompt, smaller image, fewer tokens."""
+    if not _vision_available():
+        raise ValueError(
+            'Vision AI not configured — add GEMINI_API_KEY (free at aistudio.google.com) in Render'
+        )
+    img_bytes = compress_for_api(img_bytes, max_bytes=1_200_000, max_dim=1024)
+    prompt = '''Cropped shipping label (SHIP TO / recipient block). Return ONLY JSON, no markdown:
+{"tracking":"","name":"","address":"","zip":""}
+- tracking: longest barcode (SpeedX SPXDTW..., FedEx 1Z..., etc.) — copy exactly
+- name: recipient on SHIP TO line
+- address: full delivery line — street + apt/unit + city + state + zip
+- zip: 5-digit from SHIP TO
+Ignore sender/return address, hub codes (ORD, DTW), weights, dates. Empty string if missing.'''
+    text = _vision_extract_text(prompt, img_bytes, max_tokens=256)
+    if not text:
+        raise ValueError('Vision model returned an empty response')
+    return _parse_json_response(text, expect='object')
 
 
 def extract_package_label(img_bytes):
@@ -3742,12 +3761,13 @@ def scan_process():
     if not file:
         return jsonify({'ok': False, 'error': 'No photo received'})
     img_bytes = file.read()
+    live = request.form.get('live') == '1'
     if not _vision_available():
         return jsonify({'ok': False, 'error': 'Vision AI not configured — add GEMINI_API_KEY (free) on server'})
     if not img_bytes:
         return jsonify({'ok': False, 'error': 'Empty photo received — try capturing again'})
     try:
-        result = extract_package_label(img_bytes)
+        result = extract_package_label_live(img_bytes) if live else extract_package_label(img_bytes)
     except Exception as e:
         log.error(f'scan_process label read failed: {e}')
         err = str(e)

@@ -19,6 +19,20 @@
 
   var Haptics = plugin('Haptics');
   var UnitNav = plugin('UnitNav');
+  var StatusBar = plugin('StatusBar');
+  var SplashScreen = plugin('SplashScreen');
+
+  if (StatusBar) {
+    StatusBar.setStyle({ style: 'DARK' }).catch(function () {});
+    StatusBar.setBackgroundColor({ color: '#0a0a0a' }).catch(function () {});
+    StatusBar.setOverlaysWebView({ overlay: true }).catch(function () {});
+  }
+
+  if (SplashScreen) {
+    document.addEventListener('DOMContentLoaded', function () {
+      setTimeout(function () { SplashScreen.hide().catch(function () {}); }, 300);
+    });
+  }
 
   function playBeep() {
     try {

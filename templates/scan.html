@@ -2014,8 +2014,11 @@ function startLiveBarcodeLoop() {
 // ── Spoke-style live ADDRESS detection ──
 let _liveOcrTimer = null;
 let _liveOcrBusy = false;
+let _liveOcrAbort = null;
 let _liveDetectParsed = null;
 let _liveDetectAddrKey = '';
+const _LIVE_OCR_GAP_MS = 350;   // pause between reads when nothing locked
+const _LIVE_RETICLE_MAX = 960;  // smaller upload = faster lock-in
 
 function grabCameraBlob(quality) {
   return new Promise((resolve) => {
@@ -2030,53 +2033,93 @@ function grabCameraBlob(quality) {
 }
 
 // Crop to the on-screen reticle — reads only what the driver is aiming at
-// (the SHIP TO block), the way Spoke frames the label. Far more accurate
-// than OCR'ing the whole frame (which picks up sender/store text).
-function grabReticleBlob(quality) {
+function grabReticleBlob(quality, maxDim) {
   return new Promise((resolve) => {
     const video = document.getElementById('camera-feed');
     if (!video || !video.videoWidth || !video.videoHeight) return resolve(null);
     const vw = video.videoWidth, vh = video.videoHeight;
     const x = vw * 0.06, y = vh * 0.24, w = vw * 0.88, h = vh * 0.44;
+    let cw = Math.round(w), ch = Math.round(h);
+    const cap = maxDim || _LIVE_RETICLE_MAX;
+    const scale = Math.min(1, cap / Math.max(cw, ch));
+    cw = Math.max(1, Math.round(cw * scale));
+    ch = Math.max(1, Math.round(ch * scale));
     const canvas = document.getElementById('canvas');
-    canvas.width = Math.round(w);
-    canvas.height = Math.round(h);
-    canvas.getContext('2d').drawImage(video, x, y, w, h, 0, 0, canvas.width, canvas.height);
-    canvas.toBlob((b) => resolve(b), 'image/jpeg', quality || 0.92);
+    canvas.width = cw;
+    canvas.height = ch;
+    canvas.getContext('2d').drawImage(video, x, y, w, h, 0, 0, cw, ch);
+    canvas.toBlob((b) => resolve(b), 'image/jpeg', quality || 0.8);
   });
 }
 
+// ~5ms check — skip AI when pointed at blank wall / floor (no Tesseract wait)
+function reticleLooksLikeLabel() {
+  const video = document.getElementById('camera-feed');
+  if (!video || !video.videoWidth || !video.videoHeight) return false;
+  const vw = video.videoWidth, vh = video.videoHeight;
+  const x = vw * 0.06, y = vh * 0.24, w = vw * 0.88, h = vh * 0.44;
+  const canvas = document.getElementById('canvas');
+  const sw = 72, sh = 40;
+  canvas.width = sw;
+  canvas.height = sh;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(video, x, y, w, h, 0, 0, sw, sh);
+  const d = ctx.getImageData(0, 0, sw, sh).data;
+  let dark = 0, light = 0;
+  for (let i = 0; i < d.length; i += 4) {
+    const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+    if (g < 75) dark++;
+    if (g > 185) light++;
+  }
+  return dark > 40 && light > 40;
+}
+
+function stopLiveOcrLoop() {
+  if (_liveOcrTimer) { clearTimeout(_liveOcrTimer); _liveOcrTimer = null; }
+  if (_liveOcrAbort) { _liveOcrAbort.abort(); _liveOcrAbort = null; }
+  _liveOcrBusy = false;
+}
+
+function scheduleLiveOcrTick(delayMs) {
+  if (!_liveScanActive || _liveDetectParsed) return;
+  if (_liveOcrTimer) clearTimeout(_liveOcrTimer);
+  _liveOcrTimer = setTimeout(() => {
+    _liveOcrTimer = null;
+    runLiveOcrTick();
+  }, delayMs);
+}
+
 function startLiveOcrLoop() {
-  if (_liveOcrTimer) clearInterval(_liveOcrTimer);
-  _liveOcrTimer = setInterval(runLiveOcrTick, 1500);
+  stopLiveOcrLoop();
+  scheduleLiveOcrTick(0);
 }
 
 async function runLiveOcrTick() {
-  if (!_liveScanActive || _liveOcrBusy || _addInFlight || _previewOpen) return;
-  if (_liveDetectParsed) return;   // a detection is on screen awaiting Add/Edit
+  if (!_liveScanActive || _liveOcrBusy || _addInFlight || _previewOpen) {
+    scheduleLiveOcrTick(_LIVE_OCR_GAP_MS);
+    return;
+  }
+  if (_liveDetectParsed) return;
+  if (!reticleLooksLikeLabel()) {
+    scheduleLiveOcrTick(_LIVE_OCR_GAP_MS);
+    return;
+  }
+
   _liveOcrBusy = true;
+  setReticleState('reading');
+  if (_liveOcrAbort) _liveOcrAbort.abort();
+  _liveOcrAbort = new AbortController();
+  const { signal } = _liveOcrAbort;
+
   try {
-    const crop = await grabReticleBlob(0.85);
-    if (!crop) return;
+    const crop = await grabReticleBlob(0.78, _LIVE_RETICLE_MAX);
+    if (!crop || !_liveScanActive || _liveDetectParsed) return;
 
-    // Cheap on-device gate: only call the accurate AI when a label is actually
-    // in the frame (keeps API usage and battery down when pointed at nothing).
-    let gate = { tracking: '', name: '', address: '', zip: '' };
-    try { gate = await ocrLabelLocally(crop); } catch (e) {}
-    const hasLabel = (gate.address && gate.address.length >= 6) ||
-                     (gate.tracking && gate.tracking.length >= 8) ||
-                     (_lastOcrText && _lastOcrText.length >= 14);
-    if (!hasLabel || !_liveScanActive || _liveDetectParsed) return;
-
-    setReticleState('reading');   // blue — locking onto the label
-
-    // Accurate read via server vision (Gemini) on the cropped reticle.
-    const hi = await grabReticleBlob(0.92);
-    if (!hi) return;
-    _lastLabelBlob = hi;
+    _lastLabelBlob = crop;
     const fd = new FormData();
-    fd.append('photo', hi, 'live.jpg');
-    const data = await fetch('/driver/scan/process', { method: 'POST', body: fd }).then(r => r.json());
+    fd.append('photo', crop, 'live.jpg');
+    fd.append('live', '1');
+    const data = await fetch('/driver/scan/process', { method: 'POST', body: fd, signal }).then(r => r.json());
     if (!_liveScanActive || _liveDetectParsed) return;
 
     if (data.ok && data.mode === 'confirm' && data.data) {
@@ -2086,22 +2129,24 @@ async function runLiveOcrTick() {
         _lastLocalParsed = { ...d, address: addr };
         showLiveDetect({ ...d, address: addr });
         if (window.UNITNative) UNITNative.hapticSuccess();
+        return;
       }
     } else if (data.ok && data.mode === 'duplicate') {
       showToast('Already scanned ✓');
     } else if (data.ok && data.mode === 'lookup' && data.address) {
       showLiveDetect({ name: data.name || '', address: data.address, tracking: data.tracking || '', zip: '' });
-    } else if (gate.address && isPlausibleAddress(_cleanAddress(gate.address)) && !isSenderAddress(gate.address)) {
-      // AI unavailable — fall back to the on-device read so the driver still gets an option
-      const addr = _cleanAddress(gate.address);
-      _lastLocalParsed = { ...gate, address: addr };
-      showLiveDetect({ ...gate, address: addr });
+      return;
     }
   } catch (e) {
+    if (e && e.name === 'AbortError') return;
     /* keep scanning */
   } finally {
     _liveOcrBusy = false;
-    if (!_liveDetectParsed) setReticleState(null);   // nothing locked — reset frame
+    _liveOcrAbort = null;
+    if (!_liveDetectParsed) {
+      setReticleState(null);
+      scheduleLiveOcrTick(_LIVE_OCR_GAP_MS);
+    }
   }
 }
 
@@ -2142,6 +2187,7 @@ function liveDetectSkip() {
   hideLiveDetect();
   _lastOcrText = '';
   showToast('Keep scanning…');
+  if (_liveScanActive) scheduleLiveOcrTick(0);
 }
 
 // Flashlight (torch) toggle on the live camera track
@@ -2208,6 +2254,7 @@ async function liveDetectAdd() {
     liveDetectEditWith(parsed);
   } finally {
     _addInFlight = false;
+    if (_liveScanActive) scheduleLiveOcrTick(0);
   }
 }
 
@@ -2227,8 +2274,7 @@ function pauseLiveScan() {
   _liveScanActive = false;
   if (_liveScanLoopId) cancelAnimationFrame(_liveScanLoopId);
   _liveScanLoopId = null;
-  if (_liveOcrTimer) clearInterval(_liveOcrTimer);
-  _liveOcrTimer = null;
+  stopLiveOcrLoop();
   hideLiveDetect();
   document.documentElement.classList.remove('live-scan-on');
   document.documentElement.classList.add('live-paused');
@@ -2241,8 +2287,7 @@ function stopLiveScanMode() {
   _liveScanActive = false;
   if (_liveScanLoopId) cancelAnimationFrame(_liveScanLoopId);
   _liveScanLoopId = null;
-  if (_liveOcrTimer) clearInterval(_liveOcrTimer);
-  _liveOcrTimer = null;
+  stopLiveOcrLoop();
   hideLiveDetect();
   document.documentElement.classList.remove('live-scan-on');
   document.documentElement.classList.remove('live-paused');
