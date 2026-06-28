@@ -6221,7 +6221,7 @@ def delivery_history():
 @app.route('/api/address-suggest')
 def address_suggest():
     q = request.args.get('q', '').strip()
-    if len(q) < 3:
+    if len(q) < 2:
         return jsonify([])
     db = get_db()
     rows = db.execute(

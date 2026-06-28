@@ -130,60 +130,78 @@ function attachSuggestions(input) {
   const row = input.closest('.stop-row');
   let timer;
 
+  // Helper: render suggestion list items
+  function _renderSugg(results) {
+    suggestions.innerHTML = '';
+    if (!results.length) { suggestions.style.display = 'none'; return; }
+    results.forEach(item => {
+      const li = document.createElement('li');
+      li.innerHTML = `<div style="font-size:0.92rem;color:#fff;font-weight:600;">${item.label}</div>${item.sublabel ? `<div style="font-size:0.72rem;color:${item.fromHistory ? '#00ff88' : '#888'};margin-top:2px;">${item.sublabel}</div>` : ''}`;
+      li.style.cssText = 'padding:14px 16px;cursor:pointer;border-bottom:1px solid #222;min-height:56px;display:flex;flex-direction:column;justify-content:center;';
+      li.addEventListener('click', () => {
+        input.value = item.label;
+        if (item.unit && row) {
+          const unitInput = row.querySelector('input[name="unit"]');
+          if (unitInput && !unitInput.value) unitInput.value = item.unit;
+        }
+        if (item.name && row) {
+          const nameInput = row.querySelector('input[name="name"]');
+          if (nameInput && !nameInput.value) nameInput.value = item.name;
+        }
+        suggestions.style.display = 'none';
+        if (typeof navigator.vibrate === 'function') navigator.vibrate(40);
+      });
+      suggestions.appendChild(li);
+    });
+    suggestions.style.display = 'block';
+  }
+
   input.addEventListener('input', function() {
     clearTimeout(timer);
     const q = this.value.trim();
-    if (q.length < 3) { suggestions.style.display = 'none'; return; }
-    timer = setTimeout(() => {
-      // First check internal history, then fall back to OpenStreetMap
-      fetch(`/api/address-suggest?q=${encodeURIComponent(q)}`)
-        .then(r => r.json())
-        .then(internal => {
-          return fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=json&addressdetails=1&limit=5&countrycodes=us`)
-            .then(r => r.json())
-            .then(osm => {
-              suggestions.innerHTML = '';
-              const results = [];
+    if (q.length < 2) { suggestions.style.display = 'none'; return; }
 
-              // Internal history first (green label)
-              internal.forEach(item => results.push({label: item.address, sublabel: item.name ? `\uD83D\uDCCE Previous delivery${item.unit ? ' · ' + item.unit : ''}` : '\uD83D\uDCCE From history', unit: item.unit, name: item.name, fromHistory: true}));
+    // Step 1: Show internal history INSTANTLY (no debounce)
+    fetch(`/api/address-suggest?q=${encodeURIComponent(q)}`)
+      .then(r => r.json())
+      .then(internal => {
+        if (!internal.length) return;
+        _renderSugg(internal.map(item => ({
+          label: item.address,
+          sublabel: '📦 ' + (item.name || 'Previous delivery') + (item.unit ? ' · ' + item.unit : ''),
+          unit: item.unit, name: item.name, fromHistory: true
+        })));
+      })
+      .catch(() => {});
 
-              // OSM results
-              osm.forEach(item => {
-                const addr = item.address;
-                const street = [addr.house_number, addr.road].filter(Boolean).join(' ');
-                const city = addr.city || addr.town || addr.village || '';
-                const state = addr.state || '';
-                const zip = addr.postcode || '';
-                const full = [street, city, state, zip].filter(Boolean).join(', ');
-                if (full) results.push({label: full, sublabel: null, fromHistory: false});
-              });
-
-              if (!results.length) { suggestions.style.display = 'none'; return; }
-
-              results.forEach(item => {
-                const li = document.createElement('li');
-                li.innerHTML = `<div style="font-size:0.9rem;color:#fff;">${item.label}</div>${item.sublabel ? `<div style="font-size:0.72rem;color:${item.fromHistory ? '#00ff88' : '#888'};">${item.sublabel}</div>` : ''}`;
-                li.style.cssText = 'padding:12px 16px;cursor:pointer;border-bottom:1px solid #222;min-height:48px;';
-                li.addEventListener('click', () => {
-                  input.value = item.label;
-                  if (item.unit && row) {
-                    const unitInput = row.querySelector('input[name="unit"]');
-                    if (unitInput && !unitInput.value) unitInput.value = item.unit;
-                  }
-                  if (item.name && row) {
-                    const nameInput = row.querySelector('input[name="name"]');
-                    if (nameInput && !nameInput.value) nameInput.value = item.name;
-                  }
-                  suggestions.style.display = 'none';
-                });
-                suggestions.appendChild(li);
-              });
-              suggestions.style.display = 'block';
-            });
-        })
-        .catch(() => { suggestions.style.display = 'none'; });
-    }, 350);
+    // Step 2: Supplement with OSM after short delay (only if 3+ chars)
+    if (q.length >= 3) {
+      timer = setTimeout(() => {
+        Promise.all([
+          fetch(`/api/address-suggest?q=${encodeURIComponent(q)}`).then(r => r.json()).catch(() => []),
+          fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=json&addressdetails=1&limit=4&countrycodes=us`).then(r => r.json()).catch(() => [])
+        ]).then(([internal, osm]) => {
+          const results = internal.map(item => ({
+            label: item.address,
+            sublabel: '📦 ' + (item.name || 'Previous delivery') + (item.unit ? ' · ' + item.unit : ''),
+            unit: item.unit, name: item.name, fromHistory: true
+          }));
+          const seen = new Set(internal.map(i => i.address.toLowerCase()));
+          osm.forEach(item => {
+            const addr = item.address;
+            const street = [addr.house_number, addr.road].filter(Boolean).join(' ');
+            const city = addr.city || addr.town || addr.village || '';
+            const state = addr.state || '';
+            const zip = addr.postcode || '';
+            const full = [street, city, state, zip].filter(Boolean).join(', ');
+            if (full && !seen.has(full.toLowerCase())) {
+              results.push({ label: full, sublabel: '📍 Map result', fromHistory: false });
+            }
+          });
+          _renderSugg(results);
+        });
+      }, 100);
+    }
   });
 
   document.addEventListener('click', e => {
@@ -224,7 +242,7 @@ function attachNameSuggestions(input) {
             li.innerHTML = `
               <div style="font-size:0.88rem;color:#fff;font-weight:600;">${item.name}</div>
               <div style="font-size:0.72rem;color:#00ff88;">${item.address}${item.unit ? ' · Unit ' + item.unit : ''}</div>`;
-            li.style.cssText = 'padding:10px 14px;cursor:pointer;border-bottom:1px solid #222;';
+            li.style.cssText = 'padding:14px 16px;cursor:pointer;border-bottom:1px solid #222;min-height:52px;display:flex;flex-direction:column;justify-content:center;';
             li.addEventListener('click', () => {
               input.value = item.name;
               if (row) {
@@ -236,6 +254,7 @@ function attachNameSuggestions(input) {
                 if (phoneInput && !phoneInput.value && item.phone) phoneInput.value = item.phone;
               }
               sugg.style.display = 'none';
+              if (typeof navigator.vibrate === 'function') navigator.vibrate(40);
             });
             sugg.appendChild(li);
           });
@@ -243,7 +262,7 @@ function attachNameSuggestions(input) {
           else sugg.style.display = 'none';
         })
         .catch(() => { sugg.style.display = 'none'; });
-    }, 300);
+    }, 80);
   });
 
   document.addEventListener('click', e => {

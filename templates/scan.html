@@ -703,9 +703,16 @@
       <label>Recipient Name</label>
       <input type="text" id="p-name" placeholder="Name">
     </div>
-    <div class="preview-field">
+    <div class="preview-field" style="position:relative;">
       <label>Delivery Address</label>
-      <input type="text" id="p-address" placeholder="Full address">
+      <input type="text" id="p-address" placeholder="Full address" autocomplete="off" inputmode="text">
+      <ul id="p-address-ac" style="
+        position:absolute;z-index:1200;width:100%;
+        background:#111827;border:1px solid #374151;
+        border-radius:10px;list-style:none;padding:0;margin:0;
+        display:none;max-height:240px;overflow-y:auto;
+        box-shadow:0 8px 24px rgba(0,0,0,0.6);
+      "></ul>
     </div>
     <div id="address-suggest-panel">
       <div class="suggest-hdr">💡 Suggested addresses — pieced together from what's visible on the label</div>
@@ -3290,8 +3297,42 @@ function applyAddressSuggestion(idx) {
   if (s.name && !isPlausibleName(document.getElementById('p-name').value.trim())) {
     document.getElementById('p-name').value = s.name;
   }
-  showToast('Applied suggested address ✓');
   hideAddressSuggestions();
+  // ── Instant lock: if we have enough to confirm, auto-add immediately ──
+  const tracking = document.getElementById('p-tracking').value.trim();
+  const name     = document.getElementById('p-name').value.trim();
+  const address  = document.getElementById('p-address').value.trim();
+  if (isPlausibleAddress(address)) {
+    if (typeof navigator.vibrate === 'function') navigator.vibrate(60);
+    // Auto-add — no extra tap required
+    const zip = (address.match(/\b(\d{5})\b/) || ['',''])[1];
+    if (!_addInFlight) {
+      _addInFlight = true;
+      const btn = document.getElementById('btn-add-package');
+      if (btn) { btn.disabled = true; btn.textContent = 'Adding…'; }
+      fetch('/driver/scan/add', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, address, tracking, zip })
+      })
+      .then(r => r.json())
+      .then(data => {
+        if (data.ok) {
+          _lastAddKey = (tracking || '') + '|' + address.toLowerCase().replace(/\s+/g, ' ');
+          _lastAddTime = Date.now();
+          _finishAddResponse(data, name, address, tracking, zip);
+          showAutoAddFlash(data, { name, address, tracking });
+        } else {
+          showToast(data.error || 'Error adding', true);
+          _resetAddButton();
+        }
+      })
+      .catch(() => { showToast('Error — tap Add to retry', true); _resetAddButton(); })
+      .finally(() => { _addInFlight = false; });
+    }
+  } else {
+    showToast('Address locked ✓ — confirm when ready');
+  }
 }
 
 function showAddressSuggestions(suggestions, detected) {
@@ -3354,6 +3395,8 @@ function showPreviewFields(d, source) {
   document.getElementById('p-tracking').value = d.tracking || '';
   document.getElementById('preview-card').style.display = 'block';
   _previewOpen = true;
+  // Start address autocomplete wiring once preview card is visible
+  _wirePreviewAddressAC();
   const hint = document.getElementById('preview-source-hint');
   const readOk = scanReadOk(d);
   if (readOk) {
@@ -3376,7 +3419,7 @@ function showPreviewFields(d, source) {
 }
 
 function deferAddressSuggestions() {
-  setTimeout(fetchAddressSuggestions, 80);
+  setTimeout(fetchAddressSuggestions, 0);
 }
 
 function _pkgAddrText(el) {
@@ -3679,6 +3722,90 @@ async function processBlob(blob) {
   document.getElementById('loading').style.display = 'none';
   showToast(navigator.onLine ? 'Could not read — try again or enter manually' : 'No connection — enter manually', true);
   showPreviewFields(parsed, 'local');
+}
+
+// ── Live address autocomplete on the preview address field ──
+let _previewAcTimer = null;
+let _previewAcWired = false;
+
+function _wirePreviewAddressAC() {
+  if (_previewAcWired) return;
+  _previewAcWired = true;
+  const input = document.getElementById('p-address');
+  const dropdown = document.getElementById('p-address-ac');
+  if (!input || !dropdown) return;
+
+  input.addEventListener('input', function() {
+    clearTimeout(_previewAcTimer);
+    const q = this.value.trim();
+    if (q.length < 2) { dropdown.style.display = 'none'; return; }
+    // Show internal history immediately (fast)
+    _previewAcTimer = setTimeout(() => _fetchPreviewAC(q), 80);
+  });
+
+  // Close dropdown on outside tap
+  document.addEventListener('click', e => {
+    if (!input.contains(e.target) && !dropdown.contains(e.target)) {
+      dropdown.style.display = 'none';
+    }
+  });
+}
+
+function _fetchPreviewAC(q) {
+  const dropdown = document.getElementById('p-address-ac');
+  if (!dropdown) return;
+  // 1) Internal history first — instant
+  fetch('/api/address-suggest?q=' + encodeURIComponent(q))
+    .then(r => r.json())
+    .then(items => {
+      if (!items.length) { dropdown.style.display = 'none'; return; }
+      dropdown.innerHTML = items.slice(0, 6).map(item => `
+        <li onclick="_applyPreviewAC('${item.address.replace(/'/g, "&apos;")}')"
+            style="padding:14px 16px;cursor:pointer;border-bottom:1px solid #1f2937;min-height:52px;display:flex;flex-direction:column;justify-content:center;">
+          <div style="font-size:0.9rem;color:#fff;font-weight:600;">${item.address}</div>
+          ${item.name ? `<div style="font-size:0.72rem;color:#34d399;margin-top:2px;">📦 ${item.name}${item.unit ? ' · ' + item.unit : ''}</div>` : ''}
+        </li>`).join('');
+      dropdown.style.display = 'block';
+    })
+    .catch(() => { dropdown.style.display = 'none'; });
+}
+
+function _applyPreviewAC(address) {
+  const input = document.getElementById('p-address');
+  const dropdown = document.getElementById('p-address-ac');
+  if (input) input.value = address;
+  if (dropdown) dropdown.style.display = 'none';
+  if (typeof navigator.vibrate === 'function') navigator.vibrate(40);
+  // If address looks good, auto-add
+  if (isPlausibleAddress(address)) {
+    const tracking = document.getElementById('p-tracking').value.trim();
+    const name     = document.getElementById('p-name').value.trim();
+    const zip      = (address.match(/\b(\d{5})\b/) || ['',''])[1];
+    if (!_addInFlight) {
+      _addInFlight = true;
+      const btn = document.getElementById('btn-add-package');
+      if (btn) { btn.disabled = true; btn.textContent = 'Adding…'; }
+      fetch('/driver/scan/add', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, address, tracking, zip })
+      })
+      .then(r => r.json())
+      .then(data => {
+        if (data.ok) {
+          _lastAddKey = (tracking || '') + '|' + address.toLowerCase().replace(/\s+/g, ' ');
+          _lastAddTime = Date.now();
+          _finishAddResponse(data, name, address, tracking, zip);
+          showAutoAddFlash(data, { name, address, tracking });
+        } else {
+          showToast(data.error || 'Error', true);
+          _resetAddButton();
+        }
+      })
+      .catch(() => { showToast('Error — tap Add to retry', true); _resetAddButton(); })
+      .finally(() => { _addInFlight = false; });
+    }
+  }
 }
 
 if (typeof Tesseract !== 'undefined') {
