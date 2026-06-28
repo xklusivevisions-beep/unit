@@ -566,7 +566,7 @@ mbMap.on('load', () => {
             clearInterval(waitForGPS);
             fetchRoute(lastDriverLng, lastDriverLat);
           }
-        }, 1000);
+        }, 300);
       } else {
         document.getElementById('turn-instruction').textContent = 'Could not locate address';
       }
@@ -619,17 +619,19 @@ function resolveHeading(lat, lng) {
 function updateNavCamera(lng, lat, animate) {
   if (!navMode || !mbMap.isStyleLoaded()) return;
   lastHeading = resolveHeading(lat, lng);
-  const opts = {
+  // Always ease — never jumpTo. Duration matches GPS update cadence (1s) for silky follow.
+  // On first draw, use 0ms so map snaps to position instantly.
+  const dur = routeFirstDrawn ? 900 : 0;
+  mbMap.easeTo({
     center: [lng, lat],
     zoom: 18.5,
     pitch: 62,
     bearing: lastHeading,
     padding: { top: 60, bottom: 140, left: 24, right: 24 },
-    duration: animate ? 280 : 0,
+    duration: dur,
+    easing: t => t < 0.5 ? 2*t*t : -1+(4-2*t)*t,  // ease-in-out for smooth glide
     essential: true,
-  };
-  if (animate) mbMap.easeTo(opts);
-  else mbMap.jumpTo(opts);
+  });
   if (driverMarker) {
     const el = driverMarker.getElement();
     if (el) el.style.transform = 'rotate(' + (lastHeading - 45) + 'deg)';
@@ -695,15 +697,60 @@ function fetchRoute(fromLng, fromLat) {
     routeCoords = geo.coordinates || [];
 
     // Draw or update route line
+    const routeGeoData = {type:'Feature', geometry:geo};
     if (mbMap.getSource('route')) {
-      mbMap.getSource('route').setData({type:'Feature', geometry:geo});
+      mbMap.getSource('route').setData(routeGeoData);
     } else {
-      mbMap.addSource('route', {type:'geojson', data:{type:'Feature',geometry:geo}});
-      mbMap.addLayer({
+      mbMap.addSource('route', {type:'geojson', data:routeGeoData});
+
+      // Safe beforeId: use 'road-label' if it exists in the style (above roads, below POI labels)
+      // Fall back to no beforeId (renders on top) if the style layer doesn't exist
+      const safeInsert = (layerDef) => {
+        const styleLayer = mbMap.getStyle()?.layers?.find(l => l.id === 'road-label');
+        try { mbMap.addLayer(layerDef, styleLayer ? 'road-label' : undefined); }
+        catch(e) { try { mbMap.addLayer(layerDef); } catch(e2) {} }
+      };
+
+      // White casing under the route (makes line pop on dark + satellite)
+      safeInsert({
+        id:'route-casing', type:'line', source:'route',
+        layout:{'line-join':'round','line-cap':'round'},
+        paint:{'line-color':'#ffffff','line-width':10,'line-opacity':0.35}
+      });
+      // Main blue route line
+      safeInsert({
         id:'route-line', type:'line', source:'route',
         layout:{'line-join':'round','line-cap':'round'},
-        paint:{'line-color':'#3b82f6','line-width':6,'line-opacity':0.95}
-      }, 'geofence-fill');
+        paint:{'line-color':'#3b82f6','line-width':7,'line-opacity':1.0}
+      });
+      // Directional chevron arrows along the route
+      if (!mbMap.hasImage('chevron-arrow')) {
+        const size = 12;
+        const data = new Uint8Array(size * size * 4);
+        // Simple right-pointing triangle in blue
+        for (let y = 0; y < size; y++) {
+          for (let x = 0; x < size; x++) {
+            const i = (y * size + x) * 4;
+            const mid = size / 2;
+            if (x >= y / 1.5 && x >= (size - 1 - y) / 1.5 && x < size * 0.85) {
+              data[i] = 255; data[i+1] = 255; data[i+2] = 255; data[i+3] = 200;
+            }
+          }
+        }
+        mbMap.addImage('chevron-arrow', {width:size, height:size, data});
+      }
+      safeInsert({
+        id:'route-arrows', type:'symbol', source:'route',
+        layout:{
+          'symbol-placement':'line',
+          'symbol-spacing':80,
+          'icon-image':'chevron-arrow',
+          'icon-size':1.2,
+          'icon-allow-overlap':true,
+          'icon-rotation-alignment':'map',
+        },
+        paint:{'icon-opacity':0.8}
+      });
       routeFirstDrawn = true;
     }
 
@@ -816,42 +863,40 @@ document.getElementById('edit-pin-btn').addEventListener('click', function() {
 
 // ── GPS + PROXIMITY ───────────────────────────────────────────
 function sendLocation(lat, lng) {
-  // Update driver marker on Mapbox map
+  // ── Step 1: Update map + camera IMMEDIATELY (before server call) ──
   if (!driverMarker) {
     const el = document.createElement('div');
     el.className = 'driver-arrow';
     driverMarker = new mapboxgl.Marker({element:el, rotationAlignment: 'map', pitchAlignment: 'map'})
       .setLngLat([lng, lat]).addTo(mbMap);
+  } else {
+    driverMarker.setLngLat([lng, lat]);
+  }
 
-    // Draw / refresh route from driver to destination
+  // Camera follows BEFORE server — zero latency
+  if (navMode) updateNavCamera(lng, lat, true);
+
+  // Update turn banner immediately from local GPS
+  if (routeSteps.length) updateTurnBanner(lat, lng);
+
+  // Refresh route: >30m moved AND 8s cooldown (was 55m + 15s)
+  if (DEST_LAT && DEST_LNG) {
     const now = Date.now();
-    if (DEST_LAT && DEST_LNG && (now - lastRouteFetch > 30000)) {
+    const moved = lastDriverLat !== null
+      ? Math.abs(lat - lastDriverLat) + Math.abs(lng - lastDriverLng) : 1;
+    const isFirst = lastRouteFetch === 0;
+    if (isFirst || (moved > 0.00027 && now - lastRouteFetch > 8000)) {
       lastRouteFetch = now;
       fetchRoute(lng, lat);
     }
-  } else {
-    driverMarker.setLngLat([lng, lat]);
-    // Update route line when driver moves significantly (>50m)
-    if (DEST_LAT && DEST_LNG && lastDriverLat !== null) {
-      const d = Math.abs(lat - lastDriverLat) + Math.abs(lng - lastDriverLng);
-      if (d > 0.0005 && Date.now() - lastRouteFetch > 15000) {
-        lastRouteFetch = Date.now();
-        fetchRoute(lng, lat);
-      }
-    }
   }
-  // 3D follow camera — jump on fast updates, ease when creeping
-  if (navMode) {
-    const moved = prevDriverLat !== null
-      ? Math.hypot(lat - prevDriverLat, lng - prevDriverLng) : 0;
-    updateNavCamera(lng, lat, moved < 0.00015);
-  }
-  prevDriverLat = lat;
-  prevDriverLng = lng;
+
+  prevDriverLat = lastDriverLat;
+  prevDriverLng = lastDriverLng;
   lastDriverLat = lat;
   lastDriverLng = lng;
 
-  // Send to server
+  // ── Step 2: Server sync (non-blocking — map already updated) ──
   fetch('/api/location', {
     method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({lat, lng, stop_id: STOP_ID})
@@ -887,7 +932,7 @@ function sendLocation(lat, lng) {
       gpsText.style.color = '#00ff88';
     }
     if (data.sms_triggered && !smsTriggered) { smsTriggered=true; smsAlert.style.display='block'; }
-    if (routeSteps.length) updateTurnBanner(lat, lng);
+    // turn banner already updated before server call — only update distance/geofence UI here
     refreshDeliverGate();
   }).catch(()=>{
     gpsText.textContent = 'GPS sync error — retrying...';
