@@ -7990,6 +7990,34 @@ def privacy():
 
 # ─── HEALTH ────────────────────────────────────────────────────
 
+# ── Offline fallback page (pre-cached by service worker) ────────────────────
+@app.route('/offline')
+def offline_page():
+    resp = make_response(render_template('offline.html'))
+    resp.headers['Cache-Control'] = 'public, max-age=86400'
+    return resp
+
+# ── Deploy version endpoint (app checks this to detect new deploys) ──────────
+@app.route('/api/version')
+def app_version():
+    import subprocess
+    try:
+        git_hash = subprocess.check_output(
+            ['git', 'rev-parse', '--short', 'HEAD'],
+            cwd=os.path.dirname(__file__) or '.', stderr=subprocess.DEVNULL
+        ).decode().strip()
+    except Exception:
+        git_hash = 'unknown'
+    return jsonify({'version': git_hash, 'cache_ver': 'unit-v8'})
+
+# ── Force no-store on all driver HTML pages (prevents stale SW cache) ────────
+@app.after_request
+def add_cache_headers(resp):
+    if resp.content_type and resp.content_type.startswith('text/html'):
+        resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+        resp.headers['Pragma'] = 'no-cache'
+    return resp
+
 @app.route('/health')
 def health():
     try:

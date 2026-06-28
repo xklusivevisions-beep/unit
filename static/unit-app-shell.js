@@ -35,9 +35,13 @@
   }
 
   function markPageReady() {
+    // Double-rAF ensures at least one paint frame has completed before
+    // removing the boot cover — kills the white-flash glitch on iOS WKWebView.
     requestAnimationFrame(function () {
-      document.documentElement.classList.add('unit-page-ready');
-      hideNavOverlay();
+      requestAnimationFrame(function () {
+        document.documentElement.classList.add('unit-page-ready');
+        hideNavOverlay();
+      });
     });
   }
 
@@ -187,10 +191,12 @@
     return Promise.resolve(false);
   }
 
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', markPageReady);
-  } else {
+  // Wait for full page load (not just DOMContentLoaded) so Bootstrap CSS
+  // has painted before we remove the boot cover.
+  if (document.readyState === 'complete') {
     markPageReady();
+  } else {
+    window.addEventListener('load', markPageReady);
   }
 
   document.addEventListener('click', function (e) {
@@ -265,6 +271,59 @@
     if (e.persisted) markPageReady();
     try { sessionStorage.removeItem('unit-nav'); } catch (err) {}
   });
+
+  // ── Offline detection: save page URL before going offline ──
+  window.addEventListener('offline', function () {
+    try { sessionStorage.setItem('unit-offline-from', location.pathname + location.search); } catch(e) {}
+  });
+
+  // ── Online: reload page to get fresh content after reconnect ──
+  window.addEventListener('online', function () {
+    if (!isMobile && !isNative && !isStandalone) return;
+    setTimeout(function () {
+      // Soft reload to refresh any stale cached content
+      fetch(location.href, { cache: 'no-store', credentials: 'same-origin' })
+        .then(function(r) { if (r.ok) location.reload(); })
+        .catch(function() {});
+    }, 1200);
+  });
+
+  // ── Deploy version check: detect new deploys and clear stale SW cache ──
+  var _lastKnownVersion = null;
+  function checkForUpdates() {
+    fetch('/api/version', { cache: 'no-store' })
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        var v = data.version;
+        if (!v) return;
+        if (_lastKnownVersion && _lastKnownVersion !== v) {
+          // New deploy detected — bust SW cache and reload
+          if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.ready.then(function(reg) {
+              if (reg.active) reg.active.postMessage({ type: 'CLEAR_CACHE' });
+            });
+          }
+          // Show update toast then reload
+          if (window.showToast) window.showToast('Update available — reloading…');
+          setTimeout(function() { location.reload(true); }, 900);
+        }
+        _lastKnownVersion = v;
+      })
+      .catch(function() {});
+  }
+  // Check on load + every 5 min
+  setTimeout(checkForUpdates, 3000);
+  setInterval(checkForUpdates, 5 * 60 * 1000);
+
+  // ── Save active route info for offline page ──
+  window.unitSaveRouteForOffline = function(name, stops, url) {
+    try {
+      localStorage.setItem('unit_last_route', JSON.stringify({
+        name: name, stops: stops, url: url,
+        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      }));
+    } catch(e) {}
+  };
 
   window.UNITAppShell = {
     showNavOverlay: showNavOverlay,

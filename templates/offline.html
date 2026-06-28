@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en" style="background:#0a0a0a;color-scheme:dark;">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,viewport-fit=cover">
+<meta name="theme-color" content="#0a0a0a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>UNIT — No Signal</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    background: #0a0a0a; color: #fff;
+    font-family: 'SF Pro Display', -apple-system, BlinkMacSystemFont, sans-serif;
+    min-height: 100vh; min-height: 100dvh;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
+  .wrap {
+    min-height: 100dvh;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    padding: 40px 28px; text-align: center;
+  }
+  .logo { font-size: 1.8rem; font-weight: 900; letter-spacing: 0.3em; color: #00ff88; margin-bottom: 4px; }
+  .logo span { color: #fff; }
+  .sub { font-size: 0.72rem; color: #444; letter-spacing: 0.12em; text-transform: uppercase; margin-bottom: 40px; }
+
+  .signal-icon {
+    width: 80px; height: 80px; border-radius: 50%;
+    background: #111; border: 2px solid #1e1e1e;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 2.2rem; margin: 0 auto 24px;
+    animation: pulse 2.5s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(255,140,0,0); }
+    50%       { box-shadow: 0 0 0 14px rgba(255,140,0,0.08); }
+  }
+
+  h1 { font-size: 1.35rem; font-weight: 800; margin-bottom: 10px; }
+  .msg { font-size: 0.9rem; color: #888; line-height: 1.55; max-width: 300px; margin-bottom: 32px; }
+
+  .retry-btn {
+    width: 100%; max-width: 320px;
+    background: #00ff88; color: #000;
+    border: none; border-radius: 14px;
+    padding: 16px; font-size: 1rem; font-weight: 700;
+    cursor: pointer; margin-bottom: 16px;
+  }
+  .retry-btn:active { background: #00dd77; transform: scale(0.98); }
+
+  .cached-route {
+    width: 100%; max-width: 320px;
+    background: #111; border: 1px solid #1e1e1e;
+    border-radius: 14px; padding: 16px;
+    text-align: left; margin-bottom: 12px;
+    cursor: pointer; text-decoration: none; color: inherit;
+    display: none;
+  }
+  .cached-route.visible { display: block; }
+  .cr-label { font-size: 0.7rem; color: #555; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px; }
+  .cr-name { font-size: 0.95rem; font-weight: 700; color: #fff; }
+  .cr-meta { font-size: 0.78rem; color: #666; margin-top: 4px; }
+
+  .tips {
+    margin-top: 32px; padding-top: 24px;
+    border-top: 1px solid #111; width: 100%; max-width: 320px;
+  }
+  .tip { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 14px; text-align: left; }
+  .tip-icon { font-size: 1rem; flex-shrink: 0; margin-top: 1px; }
+  .tip-text { font-size: 0.8rem; color: #666; line-height: 1.4; }
+
+  /* Connectivity indicator */
+  #conn-status {
+    position: fixed; top: calc(12px + env(safe-area-inset-top)); right: 16px;
+    font-size: 0.72rem; font-weight: 700; padding: 4px 10px;
+    border-radius: 20px; background: #1a1a1a; color: #555;
+  }
+  #conn-status.online  { background: #00ff8815; color: #00ff88; }
+  #conn-status.offline { background: #ff330015; color: #ff5555; }
+</style>
+</head>
+<body>
+<div id="conn-status">● Checking…</div>
+
+<div class="wrap">
+  <div class="logo">UNIT<span>.</span></div>
+  <div class="sub">Delivery Access Platform</div>
+
+  <div class="signal-icon">📡</div>
+  <h1>No Signal</h1>
+  <p class="msg">Your connection dropped. Tap Retry when you have signal — your route is saved and ready to reload.</p>
+
+  <button class="retry-btn" onclick="tryReconnect()">↻ Retry Connection</button>
+
+  <!-- Cached route shortcut (populated from localStorage if available) -->
+  <a id="cached-route-link" class="cached-route" href="/driver">
+    <div class="cr-label">Last active route</div>
+    <div class="cr-name" id="cr-name">—</div>
+    <div class="cr-meta" id="cr-meta">Tap to load from cache</div>
+  </a>
+
+  <div class="tips">
+    <div class="tip">
+      <span class="tip-icon">💡</span>
+      <span class="tip-text">Load your route before heading into low-signal areas — it saves automatically for offline use.</span>
+    </div>
+    <div class="tip">
+      <span class="tip-icon">📦</span>
+      <span class="tip-text">Scanned packages are saved locally. They'll sync to the server when signal returns.</span>
+    </div>
+    <div class="tip">
+      <span class="tip-icon">🗺️</span>
+      <span class="tip-text">Navigation keeps working offline — the map tiles and your route are cached on your phone.</span>
+    </div>
+  </div>
+</div>
+
+<script>
+// Show last active route from localStorage
+try {
+  const lastRoute = localStorage.getItem('unit_last_route');
+  if (lastRoute) {
+    const r = JSON.parse(lastRoute);
+    const el = document.getElementById('cached-route-link');
+    document.getElementById('cr-name').textContent = r.name || 'Active Route';
+    document.getElementById('cr-meta').textContent = (r.stops || 0) + ' stops · last seen ' + (r.time || 'recently');
+    if (r.url) el.href = r.url;
+    el.classList.add('visible');
+  }
+} catch(e) {}
+
+// Connection status dot
+function updateConnStatus() {
+  const el = document.getElementById('conn-status');
+  if (navigator.onLine) {
+    el.textContent = '● Online';
+    el.className = 'online';
+  } else {
+    el.textContent = '● Offline';
+    el.className = 'offline';
+  }
+}
+updateConnStatus();
+window.addEventListener('online',  updateConnStatus);
+window.addEventListener('offline', updateConnStatus);
+
+// Auto-retry when signal returns
+window.addEventListener('online', () => {
+  setTimeout(() => {
+    // Go back to where we were, or home
+    const back = sessionStorage.getItem('unit-offline-from') || '/driver';
+    window.location.href = back;
+  }, 800);
+});
+
+function tryReconnect() {
+  const btn = document.querySelector('.retry-btn');
+  btn.textContent = 'Checking…';
+  btn.disabled = true;
+  fetch('/health', { cache: 'no-store' })
+    .then(r => {
+      if (r.ok) {
+        window.location.href = sessionStorage.getItem('unit-offline-from') || '/driver';
+      } else {
+        throw new Error('not ok');
+      }
+    })
+    .catch(() => {
+      btn.textContent = '↻ Still Offline — Retry';
+      btn.disabled = false;
+      if (typeof navigator.vibrate === 'function') navigator.vibrate(200);
+    });
+}
+</script>
+</body>
+</html>
