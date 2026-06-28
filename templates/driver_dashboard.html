@@ -35,12 +35,27 @@
 {% block content %}
 <div class="container-fluid p-4 pb-nav">
 
+  <!-- Update available banner (shown by JS if version mismatch) -->
+  <div id="update-banner" style="display:none;background:#f59e0b;color:#000;border-radius:12px;
+       padding:12px 16px;margin-bottom:14px;display:none;
+       align-items:center;justify-content:space-between;gap:12px;">
+    <span style="font-size:0.85rem;font-weight:700;">&#x1F504; App update ready</span>
+    <button onclick="forceAppUpdate()" style="background:#000;color:#f59e0b;border:none;
+      border-radius:8px;padding:8px 14px;font-size:0.82rem;font-weight:700;cursor:pointer;">Update Now</button>
+  </div>
+
   <div class="d-flex justify-content-between align-items-center mb-4">
     <div>
       <div class="unit-logo" style="font-size:1.4rem;">UNIT<span>.</span></div>
       <small class="text-secondary">{{ driver }}</small>
     </div>
-    <a href="/account" class="btn btn-outline-light btn-sm"><i class="fas fa-user"></i></a>
+    <div style="display:flex;gap:8px;align-items:center;">
+      <button onclick="forceAppUpdate()" title="Refresh app" style="background:none;border:1px solid #1e1e1e;color:#555;
+        border-radius:8px;padding:6px 10px;font-size:0.85rem;cursor:pointer;" id="refresh-btn">
+        &#x21BB;
+      </button>
+      <a href="/account" class="btn btn-outline-light btn-sm"><i class="fas fa-user"></i></a>
+    </div>
   </div>
 
   <!-- ── Daily Check-In ── -->
@@ -845,6 +860,33 @@ function refreshEarnings() {
 {% if route %}
 setInterval(refreshEarnings, 30000);
 {% endif %}
+
+function forceAppUpdate() {
+  const btn = document.getElementById('refresh-btn');
+  if (btn) { btn.textContent = '\u23f3'; btn.disabled = true; }
+  const steps = [];
+  if ('serviceWorker' in navigator) {
+    steps.push(navigator.serviceWorker.getRegistrations()
+      .then(regs => Promise.all(regs.map(r => r.unregister()))));
+  }
+  if ('caches' in window) {
+    steps.push(caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k)))));
+  }
+  try { localStorage.removeItem('unit_build_v'); } catch(e) {}
+  Promise.all(steps).finally(() => {
+    window.location.href = '/driver?_r=' + Date.now();
+  });
+}
+
+fetch('/api/version', { cache: 'no-store' })
+  .then(r => r.json())
+  .then(data => {
+    const pageV = document.documentElement.getAttribute('data-v') || '';
+    if (data.version && pageV && data.version !== pageV) {
+      const banner = document.getElementById('update-banner');
+      if (banner) banner.style.display = 'flex';
+    }
+  }).catch(() => {});
 </script>
 {% endblock %}
 {% endblock %}
