@@ -8005,6 +8005,38 @@ def privacy():
 
 # ─── HEALTH ────────────────────────────────────────────────────
 
+# ── Force cache clear — linked from app when driver needs a reset ─────────────
+@app.route('/clear-cache')
+def clear_cache_page():
+    html = f"""<!DOCTYPE html>
+<html style='background:#0a0a0a;color:#fff;font-family:-apple-system,sans-serif;'>
+<head><meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>UNIT — Clearing Cache</title></head>
+<body style='display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;gap:16px;padding:24px;'>
+<div style='font-size:1.8rem;font-weight:900;letter-spacing:.3em;color:#00ff88;'>UNIT<span style='color:#fff;'>.</span></div>
+<div style='font-size:2rem;'>&#x1F9F9;</div>
+<div style='font-weight:700;'>Clearing cache…</div>
+<div style='font-size:.85rem;color:#666;'>Hang on — reloading fresh in a sec</div>
+<script>
+(function(){{
+  var done=false;
+  function go(){{ if(!done){{ done=true; window.location.replace('/driver'); }} }}
+  var p1=('serviceWorker' in navigator)
+    ?navigator.serviceWorker.getRegistrations().then(function(r){{return Promise.all(r.map(function(x){{return x.unregister();}}));}})
+    :Promise.resolve();
+  var p2=('caches' in window)
+    ?caches.keys().then(function(k){{return Promise.all(k.map(function(x){{return caches.delete(x);}}));}})
+    :Promise.resolve();
+  try{{localStorage.removeItem('unit_build_v');}}catch(e){{}}
+  Promise.all([p1,p2]).then(go).catch(go);
+  setTimeout(go,1500);
+}})();
+</script>
+</body></html>"""
+    resp = make_response(html)
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
+
 # ── Service worker — always served fresh, never cached ─────────────────────
 @app.route('/static/sw.js')
 def serve_sw():

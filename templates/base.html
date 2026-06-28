@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en" style="background:#0a0a0a;color-scheme:dark;">
+<html lang="en" style="background:#0a0a0a;color-scheme:dark;" data-v="{{ v }}">
 <head>
 <meta charset="UTF-8">
 <meta name="color-scheme" content="dark">
@@ -12,9 +12,38 @@
   }
   html.unit-page-ready #unit-boot-cover {
     opacity: 0; visibility: hidden;
-    transition: opacity 0.18s ease, visibility 0.18s ease;
+    transition: opacity 0.25s ease, visibility 0.25s ease;
   }
 </style>
+<!-- Cache-bust: runs before any other script, even if SW serves stale HTML -->
+<script>
+(function(){
+  var pageV = document.documentElement.getAttribute('data-v') || '';
+  var storedV = '';
+  try { storedV = localStorage.getItem('unit_build_v') || ''; } catch(e){}
+  function nukeAndReload() {
+    try { localStorage.setItem('unit_build_v', pageV); } catch(e){}
+    var done = false;
+    function go() { if (!done) { done = true; window.location.reload(true); } }
+    var p1 = ('serviceWorker' in navigator)
+      ? navigator.serviceWorker.getRegistrations().then(function(regs) {
+          return Promise.all(regs.map(function(r){ return r.unregister(); }));
+        }) : Promise.resolve();
+    var p2 = ('caches' in window)
+      ? caches.keys().then(function(keys) {
+          return Promise.all(keys.map(function(k){ return caches.delete(k); }));
+        }) : Promise.resolve();
+    Promise.all([p1, p2]).then(go).catch(go);
+    setTimeout(go, 800);
+  }
+  if (pageV && storedV && storedV !== pageV) {
+    // Stale page detected — nuke SW cache and hard reload
+    nukeAndReload();
+  } else {
+    try { if (pageV) localStorage.setItem('unit_build_v', pageV); } catch(e){}
+  }
+})();
+</script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover">
 <title>{% block title %}UNIT{% endblock %}</title>
 <link rel="manifest" href="/static/manifest.json">
