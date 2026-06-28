@@ -174,15 +174,112 @@
   #label-tap-panel .tap-hint { font-size: 0.75rem; color: #fbbf24; margin-bottom: 8px; line-height: 1.35; }
   #label-tap-wrap { position: relative; border-radius: 12px; overflow: hidden; border: 2px solid #374151; background: #111; }
   #label-tap-img { width: 100%; display: block; cursor: crosshair; touch-action: manipulation; max-height: 220px; object-fit: contain; }
+
+  /* Tap ripple feedback */
+  .tap-ripple { position: absolute; width: 36px; height: 36px; margin: -18px 0 0 -18px;
+                border-radius: 50%; background: rgba(245,158,11,0.5);
+                pointer-events: none; z-index: 10;
+                animation: rippleOut 0.4s ease-out forwards; }
+  @keyframes rippleOut {
+    0%   { transform: scale(0.3); opacity: 1; }
+    100% { transform: scale(2.4); opacity: 0; }
+  }
+
   #label-tap-marker { position: absolute; width: 18px; height: 18px; margin: -9px 0 0 -9px;
                       border: 2px solid #f59e0b; border-radius: 50%; background: rgba(245,158,11,0.35);
                       pointer-events: none; display: none; box-shadow: 0 0 0 4px rgba(245,158,11,0.15); }
-  #label-recipient-box { position: absolute; border: 3px solid #22c55e; border-radius: 6px;
-                         background: rgba(34,197,94,0.12); pointer-events: auto; display: none;
-                         box-shadow: 0 0 0 2px rgba(34,197,94,0.35); touch-action: none; z-index: 2; }
-  #label-recipient-box::before { content: 'SHIP TO — drag to move'; position: absolute; top: -18px; left: 0;
-                                 font-size: 0.58rem; font-weight: 800; color: #22c55e; letter-spacing: 0.02em;
-                                 white-space: nowrap; pointer-events: none; }
+
+  /* Selection box - 3 states: idle / reading / locked / error */
+  #label-recipient-box {
+    position: absolute; border-radius: 6px; pointer-events: auto; display: none;
+    touch-action: none; z-index: 2;
+    transition: left 0.32s cubic-bezier(0.34,1.56,0.64,1),
+                top  0.32s cubic-bezier(0.34,1.56,0.64,1),
+                width  0.32s cubic-bezier(0.34,1.56,0.64,1),
+                height 0.32s cubic-bezier(0.34,1.56,0.64,1),
+                border-color 0.18s ease, box-shadow 0.18s ease, background 0.18s ease;
+    border: 2px dashed #22c55e;
+    background: rgba(34,197,94,0.08);
+    box-shadow: 0 0 0 2px rgba(34,197,94,0.2);
+  }
+  /* reading: scan sweep line + amber pulse */
+  #label-recipient-box.reading {
+    border: 2px solid #f59e0b !important;
+    background: rgba(245,158,11,0.06) !important;
+    box-shadow: 0 0 0 3px rgba(245,158,11,0.25) !important;
+  }
+  #label-recipient-box.reading::after {
+    content: '';
+    position: absolute; left: 0; right: 0; height: 3px;
+    background: linear-gradient(90deg, transparent, #f59e0b, transparent);
+    animation: scanLine 0.9s linear infinite;
+    border-radius: 2px;
+  }
+  @keyframes scanLine {
+    0%   { top: 0; }
+    100% { top: 100%; }
+  }
+  /* locked: snapped tight, bright green, spring pop */
+  #label-recipient-box.locked {
+    border: 2px solid #22c55e !important;
+    background: rgba(34,197,94,0.18) !important;
+    box-shadow: 0 0 0 3px rgba(34,197,94,0.5), 0 0 18px rgba(34,197,94,0.3) !important;
+    animation: lockPop 0.38s cubic-bezier(0.34,1.56,0.64,1) forwards;
+  }
+  @keyframes lockPop {
+    0%   { transform: scale(0.88); opacity: 0.5; }
+    60%  { transform: scale(1.05); }
+    100% { transform: scale(1);    opacity: 1; }
+  }
+  /* error: red shake */
+  #label-recipient-box.error {
+    border: 2px solid #ef4444 !important;
+    background: rgba(239,68,68,0.1) !important;
+    box-shadow: 0 0 0 3px rgba(239,68,68,0.3) !important;
+    animation: shakeBox 0.38s ease;
+  }
+  @keyframes shakeBox {
+    0%,100% { transform: translateX(0); }
+    20%     { transform: translateX(-7px); }
+    40%     { transform: translateX(7px); }
+    60%     { transform: translateX(-4px); }
+    80%     { transform: translateX(4px); }
+  }
+  /* Label above box changes with state */
+  #label-recipient-box::before {
+    content: attr(data-label);
+    position: absolute; top: -20px; left: 0;
+    font-size: 0.58rem; font-weight: 800; letter-spacing: 0.04em;
+    white-space: nowrap; pointer-events: none;
+    color: #22c55e; transition: color 0.18s;
+  }
+  #label-recipient-box.reading::before { color: #f59e0b; content: attr(data-label); }
+  #label-recipient-box.locked::before  { color: #22c55e; content: attr(data-label); }
+  #label-recipient-box.error::before   { color: #ef4444; content: attr(data-label); }
+  /* Detected address overlay inside the locked box */
+  #rb-lock-text {
+    position: absolute; inset: 0;
+    display: none; align-items: center; justify-content: center;
+    padding: 3px 6px; font-size: 0.58rem; font-weight: 700; color: #fff;
+    text-shadow: 0 1px 4px rgba(0,0,0,0.9); text-align: center; line-height: 1.2;
+    background: rgba(0,0,0,0.4); border-radius: 4px; pointer-events: none;
+  }
+  #label-recipient-box.locked #rb-lock-text { display: flex; }
+  /* Check badge top-right when locked */
+  #rb-check {
+    position: absolute; top: -10px; right: -10px;
+    width: 20px; height: 20px;
+    background: #22c55e; border: 2px solid #fff; border-radius: 50%;
+    display: none; align-items: center; justify-content: center;
+    font-size: 0.6rem; color: #fff; font-weight: 900; z-index: 4;
+    animation: checkPop 0.32s cubic-bezier(0.34,1.56,0.64,1);
+  }
+  @keyframes checkPop {
+    0%   { transform: scale(0); }
+    100% { transform: scale(1); }
+  }
+  #label-recipient-box.locked #rb-check { display: flex; }
+
   #label-recipient-box .rb-drag-bar { position: absolute; inset: 0; cursor: move; touch-action: none; }
   #label-recipient-box .rb-resize-handle { position: absolute; right: -10px; bottom: -10px; width: 26px; height: 26px;
                          background: #22c55e; border: 2px solid #fff; border-radius: 50%; cursor: nwse-resize;
@@ -680,10 +777,15 @@
     <div id="label-tap-panel">
       <div class="tap-hint">Couldn't read the label — drag the green box over <b>SHIP TO</b>, resize with the corner, then release to re-read</div>
       <div id="label-tap-wrap">
-        <img id="label-tap-img" alt="Label" onclick="onLabelTap(event)" ontouchend="onLabelTapTouch(event)">
-        <div id="label-recipient-box">
+        <img id="label-tap-img" alt="Label"
+          onclick="onLabelTap(event)"
+          ontouchstart="onLabelTouchStart(event)"
+          ontouchend="onLabelTouchEnd(event)">
+        <div id="label-recipient-box" data-label="SHIP TO — tap to read">
           <div class="rb-drag-bar" id="rb-move-handle"></div>
-          <div class="rb-resize-handle" id="rb-resize-handle"></div>
+          <div class="rb-resize-handle" id="rb-resize-handle">⧁</div>
+          <div id="rb-lock-text"></div>
+          <div id="rb-check">✓</div>
         </div>
         <div id="label-tap-marker"></div>
       </div>
@@ -3158,34 +3260,135 @@ function _placeTapMarker(normX, normY) {
   marker.style.display = 'block';
 }
 
-function onLabelTapTouch(ev) {
-  ev.preventDefault();
-  const touch = ev.changedTouches && ev.changedTouches[0];
-  if (!touch) return;
-  onLabelTap({ clientX: touch.clientX, clientY: touch.clientY, currentTarget: ev.currentTarget });
+// ── Box state machine ──
+function setBoxState(state, labelText) {
+  const box = document.getElementById('label-recipient-box');
+  if (!box) return;
+  box.classList.remove('reading', 'locked', 'error');
+  if (state) {
+    box.classList.add(state);
+    if (labelText !== undefined) box.setAttribute('data-label', labelText);
+  } else {
+    box.setAttribute('data-label', 'SHIP TO — tap to read');
+  }
 }
 
+function showBoxLock(addressText) {
+  const lockText = document.getElementById('rb-lock-text');
+  if (lockText) lockText.textContent = addressText || '';
+  // Shrink box to tighter fit around detected text
+  if (_recipientBox) {
+    const shrink = { w: 10, h: 6 }; // percent to shrink on each side
+    _recipientBox.left   += shrink.w / 2;
+    _recipientBox.top    += shrink.h / 2;
+    _recipientBox.width  -= shrink.w;
+    _recipientBox.height -= shrink.h;
+    _clampRecipientBox();
+    renderRecipientBox();
+  }
+  setBoxState('locked', '✓ LOCKED');
+  if (typeof navigator.vibrate === 'function') navigator.vibrate([40, 30, 60]);
+}
+
+function showBoxError() {
+  setBoxState('error', 'Nothing found — try again');
+  if (typeof navigator.vibrate === 'function') navigator.vibrate(200);
+  // Revert to idle after shake finishes
+  setTimeout(() => setBoxState(null), 900);
+}
+
+// ── Tap ripple ──
+function _spawnRipple(normX, normY) {
+  const wrap = document.getElementById('label-tap-wrap');
+  if (!wrap) return;
+  const r = document.createElement('div');
+  r.className = 'tap-ripple';
+  r.style.left = (normX * 100) + '%';
+  r.style.top  = (normY * 100) + '%';
+  wrap.appendChild(r);
+  setTimeout(() => r.remove(), 450);
+}
+
+// ── Touch hold detection (tap = move box, hold 200ms = read) ──
+let _tapHoldTimer = null;
+let _tapHoldFired = false;
+let _tapStartNormX = 0, _tapStartNormY = 0;
+
+function onLabelTouchStart(ev) {
+  ev.preventDefault();
+  const touch = ev.changedTouches && ev.changedTouches[0];
+  if (!touch || !_lastLabelBlob || _tapReading || _rbDrag) return;
+  const img = ev.currentTarget;
+  const rect = img.getBoundingClientRect();
+  _tapStartNormX = Math.max(0, Math.min(1, (touch.clientX - rect.left) / rect.width));
+  _tapStartNormY = Math.max(0, Math.min(1, (touch.clientY - rect.top) / rect.height));
+  _tapHoldFired = false;
+  // Instant: show ripple + move box
+  _spawnRipple(_tapStartNormX, _tapStartNormY);
+  _moveTapBox(_tapStartNormX, _tapStartNormY);
+  // After 200ms hold: trigger OCR read
+  _tapHoldTimer = setTimeout(() => {
+    _tapHoldFired = true;
+    _triggerTapRead(_tapStartNormX, _tapStartNormY, img);
+  }, 200);
+}
+
+function onLabelTouchEnd(ev) {
+  clearTimeout(_tapHoldTimer);
+  // If released quickly (tap, not hold): still trigger read
+  if (!_tapHoldFired && !_tapReading && _lastLabelBlob) {
+    const touch = ev.changedTouches && ev.changedTouches[0];
+    if (touch) {
+      const img = document.getElementById('label-tap-img');
+      _triggerTapRead(_tapStartNormX, _tapStartNormY, img);
+    }
+  }
+}
+
+function _moveTapBox(normX, normY) {
+  _placeTapMarker(normX, normY);
+  if (!_recipientBox) _recipientBox = { left: 4, top: 30, width: 58, height: 32 };
+  // Reset to default size (in case it was previously shrunk to locked state)
+  _recipientBox.width  = 58;
+  _recipientBox.height = 32;
+  _recipientBox.left = Math.max(0, Math.min(98 - _recipientBox.width,  (normX * 100) - _recipientBox.width  / 2));
+  _recipientBox.top  = Math.max(0, Math.min(98 - _recipientBox.height, (normY * 100) - _recipientBox.height / 2));
+  _clampRecipientBox();
+  renderRecipientBox();
+  setBoxState(null);
+}
+
+async function _triggerTapRead(normX, normY, img) {
+  if (_tapReading || !_lastLabelBlob) return;
+  setBoxState('reading', 'Reading…');
+  _tapReading = true;
+  try {
+    const parsed = await ocrLabelRect(_lastLabelBlob, _recipientBox);
+    const ok = _applyTapParse(parsed, normY);
+    if (ok) {
+      const addr = document.getElementById('p-address')?.value?.trim() || '';
+      showBoxLock(addr ? addr.split(',')[0] : '✓ Got it');
+    } else {
+      showBoxError();
+    }
+  } catch (e) {
+    showBoxError();
+  }
+  _tapReading = false;
+}
+
+// Legacy click handler (desktop fallback)
 async function onLabelTap(ev) {
   if (!_lastLabelBlob || _tapReading || _rbDrag) return;
   const img = ev.currentTarget;
   const rect = img.getBoundingClientRect();
   const normX = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
   const normY = Math.max(0, Math.min(1, (ev.clientY - rect.top) / rect.height));
-  _placeTapMarker(normX, normY);
-  if (!_recipientBox) _recipientBox = { left: 4, top: 30, width: 58, height: 32 };
-  _recipientBox.left = Math.max(0, Math.min(98 - _recipientBox.width, (normX * 100) - _recipientBox.width / 2));
-  _recipientBox.top = Math.max(0, Math.min(98 - _recipientBox.height, (normY * 100) - _recipientBox.height / 2));
-  renderRecipientBox();
-  _tapReading = true;
-  showToast('Reading tapped area…');
-  try {
-    const parsed = await ocrLabelRect(_lastLabelBlob, _recipientBox);
-    _applyTapParse(parsed, normY);
-  } catch (e) {
-    showToast('Tap read failed — try again', true);
-  }
-  _tapReading = false;
+  _moveTapBox(normX, normY);
+  await _triggerTapRead(normX, normY, img);
 }
+
+function onLabelTapTouch(ev) { /* handled by onLabelTouchStart/End */ }
 
 function _resetAddButton() {
   _addInFlight = false;
