@@ -462,6 +462,7 @@
 {% block scripts %}
 <script src='https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.js'></script>
 <script>
+if (window.UNITLocation) UNITLocation.requestAlways();
 function openMaps(address) {
   const encoded = encodeURIComponent(address);
   const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);

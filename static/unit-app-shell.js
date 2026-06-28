@@ -1,6 +1,5 @@
 /**
- * UNIT app shell — dark transitions, no white flash between pages.
- * Uses in-app fetch navigation (Turbo-style) so the WebView never unloads.
+ * UNIT app shell — dark transitions, in-app navigation tuned for native TestFlight.
  */
 (function () {
   'use strict';
@@ -20,16 +19,13 @@
   var overlayTimer = null;
   var navBusy = false;
 
-  var GLOBAL_SCRIPT_RE = /unit-native|unit-app-shell|bootstrap|unit-autocomplete/i;
-  var NO_TURBO_RE = /\/driver\/scan(\?|$)/;
+  var GLOBAL_SCRIPT_RE = /unit-native|unit-app-shell|unit-autocomplete|unit-location/i;
 
   function showNavOverlay() {
     if (!overlay) return;
     clearTimeout(overlayTimer);
     overlay.classList.add('active');
-    overlayTimer = setTimeout(function () {
-      overlay.classList.add('slow');
-    }, 350);
+    overlayTimer = setTimeout(function () { overlay.classList.add('slow'); }, 350);
   }
 
   function hideNavOverlay() {
@@ -68,9 +64,19 @@
     }
   }
 
+  /** Map/camera/heavy pages need a real reload — turbo breaks Mapbox & camera. */
   function shouldTurbo(url) {
-    if (NO_TURBO_RE.test(url.pathname)) return false;
+    var p = url.pathname;
+    if (isNative) {
+      return p === '/driver/route-log' || p === '/account';
+    }
+    if (p === '/driver/scan' || /^\/driver\/stop\/\d+/.test(p)) return false;
+    if (p === '/driver' || /^\/driver\/route\/\d+/.test(p)) return false;
     return true;
+  }
+
+  function samePage(url) {
+    return url.pathname === location.pathname && url.search === location.search;
   }
 
   function syncHeadStyles(doc) {
@@ -93,24 +99,16 @@
   }
 
   function runPageScripts(doc) {
-    document.querySelectorAll('script[data-page-script]').forEach(function (s) {
-      s.remove();
-    });
-
+    document.querySelectorAll('script[data-page-script]').forEach(function (s) { s.remove(); });
     doc.querySelectorAll('body script').forEach(function (oldScript) {
       var src = oldScript.getAttribute('src') || '';
       if (src && GLOBAL_SCRIPT_RE.test(src)) return;
       var text = oldScript.textContent || '';
       if (text.indexOf('serviceWorker') !== -1) return;
-
       var s = document.createElement('script');
       s.setAttribute('data-page-script', '1');
-      if (src) {
-        s.src = src;
-        s.async = false;
-      } else {
-        s.textContent = text;
-      }
+      if (src) { s.src = src; s.async = false; }
+      else { s.textContent = text; }
       document.body.appendChild(s);
     });
   }
@@ -135,9 +133,20 @@
     markPageReady();
     document.dispatchEvent(new CustomEvent('unit:page-load'));
     if (window.UNITNative && UNITNative.syncNativeTabs) UNITNative.syncNativeTabs();
+    if (window.UNITLocation && UNITLocation.start) UNITLocation.start();
   }
 
   function turboNavigate(url, push) {
+    if (samePage(url)) {
+      window.scrollTo(0, 0);
+      hideNavOverlay();
+      if (window.UNITNative && UNITNative.syncNativeTabs) UNITNative.syncNativeTabs();
+      return Promise.resolve(true);
+    }
+    if (!shouldTurbo(url)) {
+      hardNavigate(url);
+      return Promise.resolve(false);
+    }
     if (navBusy) return Promise.resolve(false);
     navBusy = true;
     showNavOverlay();
@@ -153,8 +162,7 @@
       swapPage(html, url, push);
       return true;
     }).catch(function () {
-      hideNavOverlay();
-      location.href = url.href;
+      hardNavigate(url);
       return false;
     }).finally(function () {
       navBusy = false;
@@ -162,48 +170,46 @@
   }
 
   function hardNavigate(url) {
+    if (samePage(url)) {
+      window.scrollTo(0, 0);
+      hideNavOverlay();
+      return;
+    }
     try { sessionStorage.setItem('unit-nav', '1'); } catch (e) {}
     showNavOverlay();
     location.href = url.href;
   }
 
-  // Page enter — boot cover hides once DOM is painted
+  function navigateTo(path) {
+    var url = new URL(path, location.origin);
+    if (shouldTurbo(url)) return turboNavigate(url, true);
+    hardNavigate(url);
+    return Promise.resolve(false);
+  }
+
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', markPageReady);
   } else {
     markPageReady();
   }
 
-  // In-app navigation — fetch + swap (no full WebView reload = no white flash)
   document.addEventListener('click', function (e) {
     var a = e.target.closest('a[href]');
     var url = isInternalNavLink(a);
     if (!url) return;
-
     hapticLight();
-
     if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-
-    if (shouldTurbo(url)) {
-      e.preventDefault();
-      turboNavigate(url, true);
-      return;
-    }
-
     e.preventDefault();
-    hardNavigate(url);
+    if (shouldTurbo(url)) turboNavigate(url, true);
+    else hardNavigate(url);
   }, true);
 
   window.addEventListener('popstate', function () {
     var url = new URL(location.href);
-    if (NO_TURBO_RE.test(url.pathname)) {
-      location.reload();
-      return;
-    }
-    turboNavigate(url, false);
+    if (shouldTurbo(url)) turboNavigate(url, false);
+    else location.reload();
   });
 
-  // Smooth POST — overlay stays up until redirect page is swapped or loaded
   document.addEventListener('submit', function (e) {
     var form = e.target.closest('form');
     if (!form || form.method.toLowerCase() !== 'post') return;
@@ -225,9 +231,7 @@
     }).then(function (resp) {
       var next = new URL(resp.url, location.href);
       if (shouldTurbo(next) && resp.ok) {
-        return resp.text().then(function (html) {
-          swapPage(html, next, true);
-        });
+        return resp.text().then(function (html) { swapPage(html, next, true); });
       }
       location.href = resp.url;
     }).catch(function () {
@@ -236,7 +240,6 @@
     });
   }, true);
 
-  // Press feedback
   document.addEventListener('touchstart', function (e) {
     var el = e.target.closest('a, button, .btn, .role-card, .nav-bottom a, .zone-chip, .list-tab, [data-press]');
     if (!el || el.disabled) return;
@@ -244,23 +247,15 @@
   }, { passive: true });
 
   document.addEventListener('touchend', function () {
-    document.querySelectorAll('.unit-pressed').forEach(function (el) {
-      el.classList.remove('unit-pressed');
-    });
+    document.querySelectorAll('.unit-pressed').forEach(function (el) { el.classList.remove('unit-pressed'); });
   }, { passive: true });
 
   document.addEventListener('touchcancel', function () {
-    document.querySelectorAll('.unit-pressed').forEach(function (el) {
-      el.classList.remove('unit-pressed');
-    });
+    document.querySelectorAll('.unit-pressed').forEach(function (el) { el.classList.remove('unit-pressed'); });
   }, { passive: true });
 
-  // Block pull-to-refresh at top
   var touchStartY = 0;
-  document.addEventListener('touchstart', function (e) {
-    touchStartY = e.touches[0].clientY;
-  }, { passive: true });
-
+  document.addEventListener('touchstart', function (e) { touchStartY = e.touches[0].clientY; }, { passive: true });
   document.addEventListener('touchmove', function (e) {
     if (window.scrollY > 0) return;
     if (e.touches[0].clientY - touchStartY > 12) e.preventDefault();
@@ -274,7 +269,9 @@
   window.UNITAppShell = {
     showNavOverlay: showNavOverlay,
     hideNavOverlay: hideNavOverlay,
-    turboNavigate: turboNavigate
+    turboNavigate: turboNavigate,
+    navigateTo: navigateTo,
+    shouldTurbo: shouldTurbo
   };
 
   if (!window.showToast) {

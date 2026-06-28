@@ -929,6 +929,13 @@ mbMap.on('dragstart', () => {
 });
 
 if (navigator.geolocation) {
+  if (window.UNITLocation) {
+    UNITLocation.setStop(STOP_ID);
+    UNITLocation.requestAlways();
+    document.addEventListener('unit:location', function (e) {
+      if (e.detail) handlePosition({ coords: { latitude: e.detail.lat, longitude: e.detail.lng, heading: null } });
+    });
+  }
   navigator.geolocation.watchPosition(
     handlePosition,
     err => { gpsText.textContent = 'GPS unavailable: ' + err.message; gpsText.style.color='#ff6666'; },
