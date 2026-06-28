@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, redirect, url_for, session, jsonify, flash, get_flashed_messages
+from flask import Flask, render_template, request, redirect, url_for, session, jsonify, flash, get_flashed_messages, make_response
 from datetime import datetime, timedelta
 from geopy.distance import geodesic
 from geopy.geocoders import Nominatim
@@ -963,6 +963,21 @@ log = logging.getLogger(__name__)
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'unit-secret-2025')
+
+# ── Build version — injected into every template as {{ v }} for cache-busting ──
+try:
+    import subprocess as _sp
+    _BUILD_VER = _sp.check_output(
+        ['git', 'rev-parse', '--short', 'HEAD'],
+        cwd=os.path.dirname(os.path.abspath(__file__)),
+        stderr=_sp.DEVNULL
+    ).decode().strip()
+except Exception:
+    _BUILD_VER = '1'
+
+@app.context_processor
+def inject_version():
+    return {'v': _BUILD_VER}
 
 @app.template_filter('name_short')
 def name_short_filter(name):
@@ -7989,6 +8004,15 @@ def privacy():
     return render_template('privacy.html')
 
 # ─── HEALTH ────────────────────────────────────────────────────
+
+# ── Service worker — always served fresh, never cached ─────────────────────
+@app.route('/static/sw.js')
+def serve_sw():
+    resp = make_response(app.send_static_file('sw.js'))
+    resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    resp.headers['Pragma'] = 'no-cache'
+    resp.headers['Service-Worker-Allowed'] = '/'
+    return resp
 
 # ── Offline fallback page (pre-cached by service worker) ────────────────────
 @app.route('/offline')
