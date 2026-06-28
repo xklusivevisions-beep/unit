@@ -21,13 +21,14 @@
     margin-right: -1rem;
   }
   .driver-arrow {
-    width: 22px;
-    height: 22px;
+    width: 28px;
+    height: 28px;
     background: #0088ff;
     border: 3px solid #fff;
+    /* teardrop shape pointing up — rotation applied via JS to face heading */
     border-radius: 50% 50% 50% 0;
-    transform: rotate(-45deg);
-    box-shadow: 0 0 14px #0088ffaa;
+    box-shadow: 0 0 0 4px rgba(0,136,255,0.25), 0 0 14px #0088ffaa;
+    transition: transform 0.12s ease-out;
   }
   /* Dark map tiles */
 
@@ -231,6 +232,32 @@
              cursor:pointer;backdrop-filter:blur(6px);">
       <i class="fas fa-location-arrow me-1"></i>Following
     </button>
+
+    <!-- Compass enable button -->
+    <button id="compass-btn" onclick="enableCompass()"
+      title="Enable compass rotation"
+      style="position:absolute;bottom:14px;right:14px;z-index:10;
+             width:40px;height:40px;
+             background:#0f172aee;border:1px solid #374151;color:#9ca3af;
+             border-radius:50%;font-size:1rem;font-weight:700;
+             cursor:pointer;backdrop-filter:blur(6px);
+             display:flex;align-items:center;justify-content:center;
+             transition:border-color .2s,color .2s;">
+      🧭
+    </button>
+
+    <!-- Compass rose overlay (shows current heading) -->
+    <div id="compass-rose" style="
+      position:absolute;top:14px;right:14px;z-index:10;
+      width:38px;height:38px;display:none;
+      background:#0f172aee;border-radius:50%;
+      border:1px solid #374151;backdrop-filter:blur(6px);
+      align-items:center;justify-content:center;">
+      <div id="compass-needle" style="
+        font-size:1.1rem;line-height:1;
+        transform-origin:center;
+        transition:transform 0.15s ease-out;">&#x1F9ED;</div>
+    </div>
   </div>
 
   <!-- Proximity Bar -->
@@ -464,10 +491,17 @@ let lastRouteFetch = 0;
 let lastDriverLat = null, lastDriverLng = null;
 let prevDriverLat = null, prevDriverLng = null;
 let navMode = true;       // true = follow driver like GPS; false = overview
-let lastHeading = 0;      // device compass / movement heading
+let lastHeading = 0;      // last applied map bearing
 let routeFirstDrawn = false;
 let routeCoords = [];
-let compassHeading = null;
+
+// ── Heading sources (kept separate for smart blending) ──
+let compassHeading = null;   // raw device compass (always-on when permitted)
+let gpsHeading     = null;   // GPS-provided heading (reliable only when moving)
+let gpsSpeed       = null;   // m/s from GPS
+let _smoothedBearing = null; // exponentially smoothed bearing for compass loop
+let _compassEnabled  = false;
+let _compassLoopId   = null;
 
 // ── MAPBOX MAP SETUP ──────────────────────────────────────────
 const mbMap = new mapboxgl.Map({
@@ -603,24 +637,36 @@ function bearingFromRoute(lng, lat) {
   return computeBearing(from[1], from[0], to[1], to[0]);
 }
 
-function resolveHeading(lat, lng) {
-  if (compassHeading !== null && !isNaN(compassHeading)) return compassHeading;
-  if (prevDriverLat !== null && prevDriverLng !== null) {
-    const moved = Math.hypot(lat - prevDriverLat, lng - prevDriverLng);
-    if (moved > 0.00003) {
-      return computeBearing(prevDriverLat, prevDriverLng, lat, lng);
-    }
-  }
-  const routeBearing = bearingFromRoute(lng, lat);
-  if (routeBearing !== null) return routeBearing;
-  return lastHeading;
+// ── Shortest-path angle interpolation (prevents 350° wrong-way spin) ──
+function lerpAngle(from, to, t) {
+  let diff = ((to - from + 540) % 360) - 180;
+  return (from + diff * t + 360) % 360;
 }
 
-function updateNavCamera(lng, lat, animate) {
+// ── Smart heading: GPS at speed, compass when slow/turning ──
+function resolveHeading(lat, lng) {
+  const moving = gpsSpeed !== null && gpsSpeed > 1.5; // > ~3 mph
+  // At speed: GPS heading is most accurate (actual direction of travel)
+  if (moving && gpsHeading !== null && !isNaN(gpsHeading)) return gpsHeading;
+  // Slow/stopped/turning: device compass shows which way car faces
+  if (compassHeading !== null && !isNaN(compassHeading)) return compassHeading;
+  // Fallback: bearing computed from GPS position delta
+  if (prevDriverLat !== null && prevDriverLng !== null) {
+    const moved = Math.hypot(lat - prevDriverLat, lng - prevDriverLng);
+    if (moved > 0.00002) return computeBearing(prevDriverLat, prevDriverLng, lat, lng);
+  }
+  // Last resort: route geometry bearing
+  return bearingFromRoute(lng, lat) ?? lastHeading;
+}
+
+function updateNavCamera(lng, lat) {
   if (!navMode || !mbMap.isStyleLoaded()) return;
-  lastHeading = resolveHeading(lat, lng);
-  // Always ease — never jumpTo. Duration matches GPS update cadence (1s) for silky follow.
-  // On first draw, use 0ms so map snaps to position instantly.
+  const h = resolveHeading(lat, lng);
+  // Smooth heading: lerp 35% toward target per GPS tick (prevents snapping on sensor noise)
+  lastHeading = _smoothedBearing !== null
+    ? lerpAngle(_smoothedBearing, h, 0.35)
+    : h;
+  _smoothedBearing = lastHeading;
   const dur = routeFirstDrawn ? 900 : 0;
   mbMap.easeTo({
     center: [lng, lat],
@@ -629,13 +675,20 @@ function updateNavCamera(lng, lat, animate) {
     bearing: lastHeading,
     padding: { top: 60, bottom: 140, left: 24, right: 24 },
     duration: dur,
-    easing: t => t < 0.5 ? 2*t*t : -1+(4-2*t)*t,  // ease-in-out for smooth glide
+    easing: t => t < 0.5 ? 2*t*t : -1+(4-2*t)*t,
     essential: true,
   });
+  _applyMarkerHeading(lastHeading);
+}
+
+function _applyMarkerHeading(h) {
   if (driverMarker) {
     const el = driverMarker.getElement();
-    if (el) el.style.transform = 'rotate(' + (lastHeading - 45) + 'deg)';
+    if (el) el.style.transform = `rotate(${h - 45}deg) scale(1.1)`;
   }
+  // Keep compass rose in sync
+  const needle = document.getElementById('compass-needle');
+  if (needle) needle.style.transform = `rotate(${-h}deg)`;
 }
 
 function showRouteOverview() {
@@ -874,7 +927,7 @@ function sendLocation(lat, lng) {
   }
 
   // Camera follows BEFORE server — zero latency
-  if (navMode) updateNavCamera(lng, lat, true);
+  if (navMode) updateNavCamera(lng, lat);
 
   // Update turn banner immediately from local GPS
   if (routeSteps.length) updateTurnBanner(lat, lng);
@@ -941,29 +994,119 @@ function sendLocation(lat, lng) {
 }
 
 function handlePosition(pos) {
+  // Store GPS heading + speed separately — used in resolveHeading() priority logic
   if (pos.coords.heading !== null && !isNaN(pos.coords.heading) && pos.coords.heading >= 0) {
-    compassHeading = pos.coords.heading;
+    gpsHeading = pos.coords.heading;
+  }
+  if (pos.coords.speed !== null && !isNaN(pos.coords.speed)) {
+    gpsSpeed = pos.coords.speed; // m/s
   }
   sendLocation(pos.coords.latitude, pos.coords.longitude);
 }
 
-// Device compass (iOS/Android) for heading when stationary or moving slowly
-function startCompass() {
-  const handler = (e) => {
-    const h = e.webkitCompassHeading ?? (360 - (e.alpha || 0));
-    if (!isNaN(h) && h >= 0) compassHeading = h;
-  };
-  if (window.DeviceOrientationEvent) {
-    if (typeof DeviceOrientationEvent.requestPermission === 'function') {
-      DeviceOrientationEvent.requestPermission()
-        .then(state => { if (state === 'granted') window.addEventListener('deviceorientation', handler, true); })
-        .catch(() => {});
-    } else {
-      window.addEventListener('deviceorientation', handler, true);
+// ── Device compass — continuous real-time bearing updates ──
+
+function _compassHandler(e) {
+  // iOS: webkitCompassHeading is true north-relative and most accurate
+  // Android: alpha is magnetic, needs offset correction
+  let h = null;
+  if (e.webkitCompassHeading !== undefined && e.webkitCompassHeading !== null) {
+    h = e.webkitCompassHeading;   // iOS — already true north
+  } else if (e.alpha !== null && e.absolute !== false) {
+    h = (360 - e.alpha) % 360;    // Android absolute orientation
+  } else if (e.alpha !== null) {
+    h = (360 - e.alpha) % 360;    // Android fallback
+  }
+  if (h === null || isNaN(h)) return;
+  compassHeading = h;
+}
+
+function _startCompassListener() {
+  window.addEventListener('deviceorientation', _compassHandler, true);
+  _compassEnabled = true;
+  _updateCompassBtn();
+  // Start continuous compass-driven rotation loop
+  _startCompassLoop();
+}
+
+// Compass loop: runs at ~15Hz, rotates map from compass when slow/turning
+// Completely independent of GPS — this is what makes driveways + slow turns work
+function _startCompassLoop() {
+  if (_compassLoopId) return;
+  let _lastApplied = null;
+  const THRESHOLD = 1.2; // degrees change before re-applying
+
+  _compassLoopId = setInterval(() => {
+    if (!navMode || !mbMap.isStyleLoaded() || lastDriverLat === null) return;
+    if (compassHeading === null) return;
+
+    // At highway speed (>4 m/s): GPS heading is authoritative, compass loop yields
+    if (gpsSpeed !== null && gpsSpeed > 4) return;
+
+    const raw = compassHeading;
+    if (_smoothedBearing === null) _smoothedBearing = raw;
+
+    // Smooth: 20% toward target per tick (at 15Hz this feels instant but not jittery)
+    _smoothedBearing = lerpAngle(_smoothedBearing, raw, 0.20);
+
+    if (_lastApplied === null || Math.abs((((_smoothedBearing - _lastApplied) + 540) % 360) - 180) > THRESHOLD) {
+      _lastApplied = _smoothedBearing;
+      lastHeading = _smoothedBearing;
+
+      if (mbMap.isStyleLoaded()) {
+        mbMap.easeTo({
+          bearing: _smoothedBearing,
+          duration: 80,
+          essential: true,
+        });
+      }
+      _applyMarkerHeading(_smoothedBearing);
     }
+  }, 66); // ~15Hz
+}
+
+function _updateCompassBtn() {
+  const btn = document.getElementById('compass-btn');
+  const rose = document.getElementById('compass-rose');
+  if (!btn) return;
+  if (_compassEnabled) {
+    btn.style.display = 'none';
+    if (rose) rose.style.display = 'flex';
+  } else {
+    btn.style.display = 'flex';
+    if (rose) rose.style.display = 'none';
   }
 }
-startCompass();
+
+// Called from the compass button — must be a direct user gesture for iOS permission
+function enableCompass() {
+  if (window.DeviceOrientationEvent && typeof DeviceOrientationEvent.requestPermission === 'function') {
+    // iOS 13+ requires explicit permission from user gesture
+    DeviceOrientationEvent.requestPermission()
+      .then(state => {
+        if (state === 'granted') {
+          _startCompassListener();
+        } else {
+          const btn = document.getElementById('compass-btn');
+          if (btn) { btn.title = 'Compass permission denied'; btn.style.opacity = '0.4'; }
+        }
+      })
+      .catch(() => _startCompassListener()); // try anyway
+  } else {
+    // Android / non-iOS: no permission needed
+    _startCompassListener();
+  }
+}
+window.enableCompass = enableCompass;
+
+// Auto-start on Android (no permission gate), show button on iOS
+(function autoStartCompass() {
+  if (window.DeviceOrientationEvent && typeof DeviceOrientationEvent.requestPermission !== 'function') {
+    // Android or older iOS — start immediately
+    _startCompassListener();
+  }
+  // iOS 13+: show the button, user must tap
+})();
 
 // Manual drag exits follow mode
 mbMap.on('dragstart', () => {
