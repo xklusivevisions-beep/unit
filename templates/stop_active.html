@@ -543,7 +543,7 @@ mbMap.on('load', () => {
       navigator.geolocation.getCurrentPosition(pos => {
         const {latitude: lat, longitude: lng} = pos.coords;
         if (lastRouteFetch === 0) fetchRoute(lng, lat);
-      }, () => {}, {enableHighAccuracy: true, timeout: 8000});
+      }, () => {}, {enableHighAccuracy: true, timeout: 5000, maximumAge: 8000});
     }
   } else {
     // No server-side coords — geocode address via Mapbox then draw route
@@ -664,7 +664,7 @@ function applyNavModeUI() {
     if (wrap) wrap.classList.remove('nav-follow');
     mbMap.setPadding({ top: 0, bottom: 0, left: 0, right: 0 });
   }
-  setTimeout(() => mbMap.resize(), 350);
+  setTimeout(() => mbMap.resize(), 50);
 }
 
 function toggleNavMode() {
@@ -939,7 +939,7 @@ if (navigator.geolocation) {
   navigator.geolocation.watchPosition(
     handlePosition,
     err => { gpsText.textContent = 'GPS unavailable: ' + err.message; gpsText.style.color='#ff6666'; },
-    {enableHighAccuracy:true, timeout:15000, maximumAge:0}
+    {enableHighAccuracy:true, timeout:10000, maximumAge:5000}
   );
 } else {
   gpsText.textContent = 'GPS not available on this device';

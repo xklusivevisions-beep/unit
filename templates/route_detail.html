@@ -412,6 +412,8 @@ function addStop() {
   const name    = document.getElementById('new-name').value.trim();
   const phone   = document.getElementById('new-phone').value.trim();
   if (!address) { alert('Address is required'); return; }
+  const btn = document.querySelector('[onclick="addStop()"]');
+  if (btn) { btn.disabled = true; btn.textContent = 'Adding…'; }
   fetch('/driver/route/{{ route.id }}/add-stop', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -420,10 +422,43 @@ function addStop() {
   .then(r => r.json())
   .then(data => {
     if (data.ok) {
-      location.reload();
+      // Instant DOM inject — no page reload
+      const stopNum = data.stop_order || (document.querySelectorAll('.stop-card').length + 1);
+      const stopId  = data.stop_id || 0;
+      const card = document.createElement('div');
+      card.className = 'card p-3 mb-3 stop-card';
+      card.id = 'stop-card-' + stopId;
+      card.innerHTML = `
+        <div class="d-flex justify-content-between align-items-start">
+          <div style="flex:1;min-width:0;">
+            <div class="d-flex align-items-center gap-2 mb-1">
+              <span class="badge" style="background:#3b82f6;font-size:0.7rem;">#${stopNum}</span>
+              <span class="fw-bold" style="font-size:0.9rem;color:#fff;">${name || address.split(',')[0]}</span>
+            </div>
+            <div style="font-size:0.8rem;color:#9ca3af;">${address}</div>
+            ${phone ? `<div style="font-size:0.78rem;color:#60a5fa;margin-top:4px;">📱 ${phone}</div>` : ''}
+          </div>
+          <a href="/driver/stop/${stopId}" class="btn btn-sm" style="background:#10b981;color:#fff;font-weight:700;">Go →</a>
+        </div>`;
+      const container = document.getElementById('stops-list') || document.querySelector('.stops-container');
+      if (container) container.appendChild(card);
+      // Clear form
+      ['new-address','new-name','new-phone'].forEach(id => { const el = document.getElementById(id); if(el) el.value=''; });
+      // Flash success
+      card.style.border = '2px solid #10b981';
+      setTimeout(() => { card.style.border = ''; }, 1500);
+      if (typeof navigator.vibrate === 'function') navigator.vibrate(60);
+      // Collapse the add-stop panel if open
+      const addPanel = document.getElementById('add-stop-panel');
+      if (addPanel) addPanel.style.display = 'none';
     } else {
       alert('Error adding stop: ' + (data.error || 'unknown'));
     }
+    if (btn) { btn.disabled = false; btn.textContent = 'Add Stop'; }
+  })
+  .catch(() => {
+    alert('Network error — try again');
+    if (btn) { btn.disabled = false; btn.textContent = 'Add Stop'; }
   });
 }
 
@@ -443,9 +478,15 @@ function savePhone(stopId, routeId) {
   .then(r => r.json())
   .then(data => {
     if (data.ok) {
+      // In-place update — no reload
       document.getElementById(`phone-edit-${stopId}`).style.display = 'none';
-      status.innerHTML = `<span style="color:#00ff88;font-size:0.75rem;"><i class="fas fa-check"></i> Saved</span>`;
-      setTimeout(() => location.reload(), 800);
+      status.innerHTML = `<span style="color:#00ff88;font-size:0.75rem;"><i class="fas fa-check"></i> ${phone || 'Saved'}</span>`;
+      // Update any visible phone link in the card
+      const card = document.getElementById('stop-card-' + stopId);
+      if (card) {
+        let phoneEl = card.querySelector('.phone-display');
+        if (phoneEl) phoneEl.textContent = phone;
+      }
     }
   });
 }
@@ -470,7 +511,9 @@ function optimizeRoute() {
       if (d.ok) {
         status.textContent = '✓ Route optimized — ' + d.reordered + ' stops reordered';
         status.style.color = '#00ff88';
-        setTimeout(() => location.reload(), 1200);
+        btn.innerHTML = '<i class="fas fa-check me-2"></i>Optimized';
+        // Reload after short pause so user sees the success state, then get fresh order
+        setTimeout(() => location.reload(), 300);
       } else {
         status.textContent = 'Could not optimize: ' + (d.error || 'unknown error');
         status.style.color = '#ff6666';
@@ -490,7 +533,7 @@ function optimizeRoute() {
     navigator.geolocation.getCurrentPosition(
       pos => doOptimize(pos.coords.latitude, pos.coords.longitude),
       ()  => doOptimize(null, null),
-      {enableHighAccuracy: true, timeout: 8000, maximumAge: 0}
+      {enableHighAccuracy: true, timeout: 8000, maximumAge: 8000}
     );
   } else {
     doOptimize(null, null);

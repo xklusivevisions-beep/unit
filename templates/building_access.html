@@ -211,7 +211,7 @@ function verify() {
       showError('Location required — enable GPS and allow access.');
       btn.disabled = false; btn.textContent = '🔓 Verify & Unlock';
     },
-    { enableHighAccuracy: true, timeout: 12000, maximumAge: 0 }
+    { enableHighAccuracy: true, timeout: 12000, maximumAge: 8000 }
   );
 }
 

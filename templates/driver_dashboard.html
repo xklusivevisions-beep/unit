@@ -711,7 +711,7 @@ function startGpsPing() {
       }).catch(() => {});
     }, () => {
       document.getElementById('gps-live-text').textContent = 'Weak GPS — move outside';
-    }, {enableHighAccuracy: true, timeout: 10000, maximumAge: 0});
+    }, {enableHighAccuracy: true, timeout: 10000, maximumAge: 8000});
   }
   ping();
   liveGpsInterval = setInterval(ping, 5000);
@@ -811,7 +811,7 @@ function resetRoute(routeId) {
         btn.style.background = '#00ff8822';
         btn.style.color = '#00ff88';
         btn.style.borderColor = '#00ff8844';
-        setTimeout(() => location.reload(), 800);
+        setTimeout(() => location.reload(), 200);
       } else {
         alert('Reset failed: ' + (data.error || 'unknown error'));
         btn.disabled = false;

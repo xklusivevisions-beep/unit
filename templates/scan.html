@@ -1030,7 +1030,7 @@ function handleImportFiles(input) {
         .then(built => {
           if (built.ok && built.redirect) {
             res.innerHTML = `✅ Route built! Redirecting…`;
-            setTimeout(() => { window.location.href = built.redirect; }, 800);
+            setTimeout(() => { window.location.href = built.redirect; }, 150);
           } else {
             // Build failed but import worked — let user build manually
             document.getElementById('import-panel').style.display = 'none';
@@ -1169,7 +1169,7 @@ function saveAddressReviewEdit(itemId) {
     const editForm = document.getElementById('ar-edit-' + itemId);
     if (editForm) editForm.style.display = 'none';
     showToast(data.geocoded ? 'Address fixed ✓' : 'Saved — still may need tweak', !data.geocoded);
-    setTimeout(refreshLiveSort, 400);
+    setTimeout(refreshLiveSort, 50);
   })
   .catch(() => showToast('Network error — try again', true))
   .finally(() => {
@@ -1197,7 +1197,7 @@ function applyRouteAddressFix(itemId, sugIdx) {
     showToast('Address updated ✓');
     const ar = document.getElementById('ar-item-' + itemId);
     if (ar) ar.style.borderColor = '#10b981';
-    setTimeout(refreshLiveSort, 400);
+    setTimeout(refreshLiveSort, 50);
   });
 }
 
@@ -1298,7 +1298,7 @@ function runOptimize() {
       zonesLocked = true;
       showLoadingPlan(data);
       triggerLockFlash(data.n_zones);
-      setTimeout(refreshLiveSort, 500);
+      setTimeout(refreshLiveSort, 50);
     })
     .catch(() => {
       btn.disabled = false;
@@ -1433,7 +1433,7 @@ function selectVehicle(vehicleType, el) {
   el.classList.add('selected');
   closeVehicleModal();
   showToast('Vehicle updated ✓');
-  if (pkgCount > 0) setTimeout(refreshLiveSort, 300);
+  if (pkgCount > 0) setTimeout(refreshLiveSort, 50);
 
   // Save to server in background
   fetch('/driver/vehicle-setup', {
@@ -1536,7 +1536,7 @@ function undoAutoAdd() {
           '<div class="empty-state" id="empty-msg">No packages yet. Scan your first label above.</div>';
         document.getElementById('live-map-section').style.display = 'none';
       } else {
-        setTimeout(refreshLiveSort, 400);
+        setTimeout(refreshLiveSort, 50);
       }
       showToast('Undone ✓');
     })
@@ -1850,7 +1850,7 @@ function refreshLiveSort() {
 }
 
 // Auto-refresh map if packages already exist
-if (pkgCount > 0) setTimeout(refreshLiveSort, 500);
+if (pkgCount > 0) setTimeout(refreshLiveSort, 50);
 
 // ── Name formatter: 'Ebony Helton' → 'Ebony H.' ──
 function nameShort(name) {
@@ -1931,7 +1931,7 @@ async function processBarcodeLive(rawValue) {
     if (proc.mode === 'duplicate') {
       if (window.UNITNative) { await UNITNative.playBeep(); await UNITNative.hapticSuccess(); }
       showToast('Already scanned ✓');
-      setTimeout(refreshLiveSort, 300);
+      setTimeout(refreshLiveSort, 50);
       return;
     }
     if (proc.mode === 'lookup') {
@@ -2785,7 +2785,7 @@ async function tryAutoAddPackage(parsed, prepBlob) {
       if (proc.ok && proc.mode === 'duplicate') {
         document.getElementById('loading').style.display = 'none';
         showToast('Already scanned ✓');
-        setTimeout(refreshLiveSort, 300);
+        setTimeout(refreshLiveSort, 50);
         return true;
       }
       if (proc.ok && proc.mode === 'lookup') {
@@ -3223,7 +3223,7 @@ function _finishAddResponse(data, name, address, tracking, zip) {
     const obtn = document.getElementById('optimize-btn');
     if (obtn && currentPhase === 'scanning') obtn.classList.add('visible');
   }
-  setTimeout(refreshLiveSort, 600);
+  setTimeout(refreshLiveSort, 50);
 }
 
 function setLoadingText(msg) {
@@ -3268,7 +3268,7 @@ function saveUnitFromWarn() {
     if (!data.ok) { showToast(data.error || 'Error', true); return; }
     showToast(`Unit ${data.unit} saved ✓`);
     dismissUnitWarn();
-    setTimeout(refreshLiveSort, 300);
+    setTimeout(refreshLiveSort, 50);
   })
   .catch(() => showToast('Could not save unit', true));
 }
@@ -3478,7 +3478,7 @@ function saveInlineAddressEdit(itemId) {
       }
     }
     showToast(data.geocoded ? 'Address fixed ✓' : 'Saved ✓', !data.geocoded);
-    setTimeout(refreshLiveSort, 400);
+    setTimeout(refreshLiveSort, 50);
   })
   .catch(() => showToast('Network error — try again', true))
   .finally(() => {
@@ -3553,7 +3553,7 @@ function handleProcessResponse(data, localFallback) {
     _previewOpen = false;
     showToast('Already scanned ✓ — ' + (data.tracking || 'this package'));
     dismissLookup();
-    setTimeout(refreshLiveSort, 300);
+    setTimeout(refreshLiveSort, 50);
     return;
   }
   if (data.mode === 'lookup') {
@@ -3561,7 +3561,7 @@ function handleProcessResponse(data, localFallback) {
     if (data.zones_locked) {
       showZoneBanner({ icon: data.zone_emoji || '📦', label: `${data.zone_letter || '?'} — ${data.vehicle_zone_label || ''}`,
         desc: (data.vehicle_zone_desc || '') + (data.address ? `  •  ${data.address}` : ''), color: data.zone_color || '#3b82f6' });
-      setTimeout(refreshLiveSort, 300);
+      setTimeout(refreshLiveSort, 50);
     } else showLookupCard(data);
     return;
   }
@@ -3576,7 +3576,7 @@ function handleProcessResponse(data, localFallback) {
       lastAddedItemId = currentPhase === 'optimized' ? (added.new_item_id || null) : null;
       showToast('Package added ✓' + (added.geocoded ? ' 📍' : ''));
       if (added.scan_order && currentPhase !== 'optimized') showStickerPrompt(added.scan_order);
-      setTimeout(refreshLiveSort, 400);
+      setTimeout(refreshLiveSort, 50);
     });
     return;
   }
@@ -3964,7 +3964,7 @@ function removeItem(id, btn) {
             '<div class="empty-state" id="empty-msg">No packages yet. Scan your first label above.</div>';
           document.getElementById('live-map-section').style.display = 'none';
         } else {
-          setTimeout(refreshLiveSort, 400);
+          setTimeout(refreshLiveSort, 50);
         }
         showToast('Removed');
       }
@@ -3987,7 +3987,7 @@ function buildRoute() {
     .then(data => {
       if (!data.ok) { showToast(data.error || 'Build failed', true); btn.disabled = false; return; }
       showToast(`Route built! ${data.geocoded}/${data.total} geocoded`);
-      setTimeout(() => { window.location.href = data.redirect; }, 1000);
+      setTimeout(() => { window.location.href = data.redirect; }, 150);
     })
     .catch(() => { showToast('Error building route', true); btn.disabled = false; });
 }
