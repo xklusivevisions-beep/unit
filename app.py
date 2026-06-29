@@ -3605,13 +3605,6 @@ def _build_mobile_dashboard(driver_id):
         (driver_id, today)
     ).fetchone()
 
-    stops = []
-    if route:
-        stops = db.execute(
-            "SELECT id, stop_number, address, status, customer_name, unit, dest_lat, dest_lng FROM stops WHERE route_id=? ORDER BY stop_number",
-            (route['id'],)
-        ).fetchall()
-
     today_delivered = db.execute(
         """SELECT COUNT(*) FROM stops s JOIN routes r ON s.route_id = r.id
            WHERE r.driver_id=? AND r.date=? AND s.status='delivered'""",
@@ -3649,6 +3642,29 @@ def _build_mobile_dashboard(driver_id):
         assignment_today = crow['assignment'] if 'assignment' in crow.keys() else None
 
     sched_days = _ss_val(driver_row, 'scheduled_days', None)
+
+    vehicle_type = _ss_val(driver_row, 'vehicle_type', 'suv_midsize') or 'suv_midsize'
+    zone_summary = []
+    zone_centroids = []
+    current_zone = None
+    next_stop_id = None
+    finish_estimate = None
+    stops_out = []
+
+    if route:
+        stops_raw = db.execute(
+            "SELECT * FROM stops WHERE route_id=? ORDER BY stop_number",
+            (route['id'],),
+        ).fetchall()
+        stops_enriched, zone_summary, zone_centroids, current_zone, next_stop = build_route_zone_context(
+            stops_raw, route, vehicle_type, db
+        )
+        stops_out = stops_enriched
+        finish_estimate = _route_finish_estimate(db, route['id'])
+        next_stop_id = _next_pending_stop_id(db, route['id'])
+        if not next_stop_id and next_stop:
+            next_stop_id = next_stop.get('id')
+
     db.close()
 
     return {
@@ -3658,7 +3674,13 @@ def _build_mobile_dashboard(driver_id):
             'pay_rate': pay_rate,
         },
         'route': _json_row(route),
-        'stops': [_json_row(s) for s in stops],
+        'stops': stops_out,
+        'zone_summary': zone_summary,
+        'zone_centroids': zone_centroids,
+        'current_zone': current_zone,
+        'next_stop_id': next_stop_id,
+        'finish_estimate': finish_estimate,
+        'vehicle_type': vehicle_type,
         'earnings': {
             'today': round(today_delivered * pay_rate, 2),
             'week': round(week_stop_count * pay_rate, 2),
@@ -3856,6 +3878,7 @@ def _build_mobile_stop_detail(stop_id, driver_id):
     total = db.execute(
         "SELECT COUNT(*) FROM stops WHERE route_id=?", (stop['route_id'],)
     ).fetchone()[0]
+    zone_letter = _ss_val(stop, 'zone_letter')
     db.close()
     return {
         'stop': _json_row(stop),
@@ -3865,6 +3888,9 @@ def _build_mobile_stop_detail(stop_id, driver_id):
         'route_id': stop['route_id'],
         'next_stop_id': next_id,
         'stops_total': total,
+        'zone_letter': zone_letter,
+        'notes': _ss_val(stop, 'notes') or '',
+        'drop_spot': _ss_val(stop, 'drop_spot') or '',
     }
 
 
@@ -3968,6 +3994,145 @@ def mobile_v1_stop_deliver(stop_id):
         'ok': True, 'next_stop_id': next_id, 'route_id': route_id,
         'distance_ft': dist_ft, 'off_location': off_location,
     })
+
+
+@app.route('/api/mobile/v1/stops/<int:stop_id>/failed', methods=['POST'])
+def mobile_v1_stop_failed(stop_id):
+    if 'driver_id' not in session:
+        return jsonify({'ok': False, 'error': 'not logged in'}), 401
+    detail = _build_mobile_stop_detail(stop_id, session['driver_id'])
+    if not detail:
+        return jsonify({'ok': False, 'error': 'stop not found'}), 404
+    db = get_db()
+    stop = db.execute("SELECT * FROM stops WHERE id=?", (stop_id,)).fetchone()
+    db.execute("UPDATE stops SET status='failed' WHERE id=?", (stop_id,))
+    db.commit()
+    route_id = stop['route_id'] if stop else None
+    next_id = _next_pending_stop_id(db, route_id) if route_id else None
+    db.close()
+    return jsonify({'ok': True, 'next_stop_id': next_id, 'route_id': route_id})
+
+
+@app.route('/api/mobile/v1/building/<building_code>')
+def mobile_v1_building_preview(building_code):
+    if 'driver_id' not in session:
+        return jsonify({'ok': False, 'error': 'not logged in'}), 401
+    db = get_db()
+    b = db.execute("SELECT * FROM buildings WHERE building_code=?", (building_code,)).fetchone()
+    db.close()
+    if not b:
+        return jsonify({'ok': False, 'error': 'Building not found'}), 404
+    return jsonify({'ok': True, 'building': _building_public(b), 'geofence_m': BUILDING_GEOFENCE_METERS})
+
+
+@app.route('/api/mobile/v1/building/verify', methods=['POST'])
+def mobile_v1_building_verify():
+    """Session-authenticated building access (no PIN re-entry)."""
+    if 'driver_id' not in session:
+        return jsonify({'ok': False, 'error': 'not logged in'}), 401
+    data = request.get_json(silent=True) or {}
+    building_code = (data.get('building_code') or '').strip()
+    try:
+        driver_lat = float(data.get('lat'))
+        driver_lng = float(data.get('lng'))
+    except (TypeError, ValueError):
+        return jsonify({'ok': False, 'error': 'Location required'}), 400
+    db = get_db()
+    b = db.execute("SELECT * FROM buildings WHERE building_code=?", (building_code,)).fetchone()
+    if not b:
+        db.close()
+        return jsonify({'ok': False, 'error': 'Building not found'}), 404
+    blat, blng = _ss_val(b, 'lat'), _ss_val(b, 'lng')
+    if blat is None or blng is None:
+        db.close()
+        return jsonify({'ok': False, 'error': 'Building has no GPS pin'}), 409
+    distance_m = _meters_between(driver_lat, driver_lng, blat, blng)
+    if distance_m > BUILDING_GEOFENCE_METERS:
+        db.close()
+        return jsonify({
+            'ok': False, 'error': 'too_far',
+            'distance_m': round(distance_m),
+            'message': f'You are {round(distance_m)}m away — move within {BUILDING_GEOFENCE_METERS}m',
+        }), 403
+    units = db.execute(
+        """SELECT unit_number, customer_notes FROM delivery_instructions
+           WHERE building_id=? ORDER BY unit_number ASC""",
+        (b['id'],),
+    ).fetchall()
+    db.close()
+    return jsonify({
+        'ok': True,
+        'building': {
+            'name': _ss_val(b, 'name') or _ss_val(b, 'address') or 'Building',
+            'address': _ss_val(b, 'address') or '',
+            'general_access_code': _ss_val(b, 'general_access_code') or _ss_val(b, 'access_code') or '',
+            'package_room_notes': _ss_val(b, 'package_room_notes') or '',
+            'lockbox_notes': _ss_val(b, 'lockbox_notes') or '',
+        },
+        'distance_m': round(distance_m),
+        'units': [{'unit': u['unit_number'], 'notes': u['customer_notes'] or ''} for u in units],
+    })
+
+
+def _mobile_require_driver():
+    if 'driver_id' not in session:
+        return jsonify({'ok': False, 'error': 'not logged in'}), 401
+    return None
+
+
+def _mobile_apply_vehicle_type(data):
+    """Persist vehicle_type from JSON body when valid."""
+    vehicle_type = (data.get('vehicle_type') or '').strip()
+    if vehicle_type and vehicle_type in VEHICLE_ZONES:
+        db = get_db()
+        db.execute("UPDATE drivers SET vehicle_type=? WHERE id=?", (vehicle_type, session['driver_id']))
+        db.commit()
+        db.close()
+        session['vehicle_type'] = vehicle_type
+
+
+@app.route('/api/mobile/v1/scan/live-sort', methods=['GET'])
+def mobile_v1_scan_live_sort():
+    denied = _mobile_require_driver()
+    if denied:
+        return denied
+    return scan_live_sort()
+
+
+@app.route('/api/mobile/v1/scan/optimize', methods=['POST'])
+def mobile_v1_scan_optimize():
+    denied = _mobile_require_driver()
+    if denied:
+        return denied
+    data = request.get_json(silent=True) or {}
+    _mobile_apply_vehicle_type(data)
+    return scan_optimize()
+
+
+@app.route('/api/mobile/v1/scan/build-route', methods=['POST'])
+def mobile_v1_scan_build_route():
+    denied = _mobile_require_driver()
+    if denied:
+        return denied
+    data = request.get_json(silent=True) or {}
+    _mobile_apply_vehicle_type(data)
+    return scan_build_route()
+
+
+@app.route('/api/mobile/v1/scan/clear', methods=['POST'])
+def mobile_v1_scan_clear():
+    denied = _mobile_require_driver()
+    if denied:
+        return denied
+    return scan_clear()
+
+
+@app.route('/api/mobile/v1/scan/import-route', methods=['POST'])
+def mobile_v1_scan_import_route():
+    denied = _mobile_require_driver()
+    if denied:
+        return denied
+    return scan_import_route()
 
 
 # ─── LIVE EARNINGS API ─────────────────────────────────
@@ -5064,11 +5229,12 @@ def scan_import_route():
     )
     db.commit()
 
-    if not _vision_available():
+    all_csv = all((f.filename or '').lower().endswith('.csv') for f in files if f.filename)
+    if not all_csv and not _vision_available():
         db.close()
         return jsonify({'ok': False, 'error': 'Vision AI not configured — add GEMINI_API_KEY (free) on server'})
 
-    # Extract stops from all uploaded screenshots and PDFs
+    # Extract stops from all uploaded screenshots, PDFs, and CSVs
     all_stops = []
     api_error = None
     for f in files:
@@ -5099,6 +5265,30 @@ def scan_import_route():
                                     'PDF is image-only and cannot be rendered on this server. '
                                     'Please upload the original Speed X screenshots directly instead.'
                                 )
+            elif fname.endswith('.csv'):
+                content = f.read().decode('utf-8', errors='ignore')
+                reader = csv.DictReader(io.StringIO(content))
+                for row in reader:
+                    raw_addr = (row.get('Address') or '').strip()
+                    city = (row.get('City') or '').strip()
+                    state = (row.get('State') or '').strip()
+                    zipcode = (row.get('ZIP') or '').strip()
+                    if not raw_addr:
+                        continue
+                    unit = ''
+                    if '#' in raw_addr:
+                        parts = raw_addr.split('#')
+                        raw_addr = parts[0].strip()
+                        unit = parts[1].strip()
+                    full_addr = f"{raw_addr}, {city}, {state} {zipcode}".strip(', ')
+                    tracking = (row.get('Tracking Number') or '').strip()
+                    all_stops.append({
+                        'address': full_addr,
+                        'name': (row.get('Recipient') or '').strip(),
+                        'tracking': tracking,
+                        'zip': zipcode,
+                        'unit': unit,
+                    })
             else:
                 img_bytes = f.read()
                 if not img_bytes:
