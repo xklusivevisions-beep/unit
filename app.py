@@ -1546,8 +1546,9 @@ def _serpentine_zone_order(zone_lists, start=None, end=None):
     """Chain geographic zones into a sweep (S-curve): finish one area, move to
     the adjacent one, never bounce back. Greedy nearest-centroid ordering.
 
-    - With a start point: sweep outward from the start.
-    - With only an end point: chain backwards from the end, then reverse.
+    - With an end point: delivery starts furthest from end (opposite side of
+      the territory), then sweeps toward end — even if start GPS is provided.
+    - With only a start point: sweep outward from the start.
     - With neither: sweep from the northernmost zone downward.
     """
     if len(zone_lists) <= 1:
@@ -1561,11 +1562,11 @@ def _serpentine_zone_order(zone_lists, start=None, end=None):
     order = []
     reverse_at_end = False
 
-    if start and start.get('lat') is not None:
-        cur = {'lat': float(start['lat']), 'lng': float(start['lng'])}
-    elif end and end.get('lat') is not None:
+    if end and end.get('lat') is not None:
         cur = {'lat': float(end['lat']), 'lng': float(end['lng'])}
         reverse_at_end = True
+    elif start and start.get('lat') is not None:
+        cur = {'lat': float(start['lat']), 'lng': float(start['lng'])}
     else:
         first = max(remaining, key=lambda i: cents[i]['lat'])
         remaining.remove(first)
@@ -1581,6 +1582,13 @@ def _serpentine_zone_order(zone_lists, start=None, end=None):
     if reverse_at_end:
         order.reverse()
     return [zone_lists[i] for i in order]
+
+
+def _furthest_stop_from(stops, anchor):
+    """Stop in list furthest from anchor lat/lng."""
+    if not stops or not anchor or anchor.get('lat') is None:
+        return None
+    return max(stops, key=lambda s: _dsq(s, anchor))
 
 
 def osrm_optimize_full_route(pkgs, start=None, end=None):
@@ -1709,17 +1717,23 @@ def build_optimized_route(geocoded, start=None, end=None):
     # ── Per-zone OSRM ordering, chained zone-to-zone (the S-sweep) ──
     ordered_stops = []
     total_dist, total_dur = 0, 0
+    end_anchor = end and end.get('lat') is not None
     prev_pt = start
     for zi, zone_stops in enumerate(zone_lists):
         next_hint = zone_cents[zi + 1] if zi + 1 < len(zone_lists) else end
+        zone_start = prev_pt
+        if zi == 0 and end_anchor:
+            furthest = _furthest_stop_from(zone_stops, end)
+            if furthest:
+                zone_start = {'lat': furthest['lat'], 'lng': furthest['lng']}
         try:
             if len(zone_stops) > OSRM_MAX_WAYPOINTS:
-                ordered, dist, dur = osrm_optimize_full_route(zone_stops, start=prev_pt, end=next_hint)
+                ordered, dist, dur = osrm_optimize_full_route(zone_stops, start=zone_start, end=next_hint)
             else:
-                ordered, dist, dur = _osrm_trip(zone_stops, start=prev_pt, end=next_hint)
+                ordered, dist, dur = _osrm_trip(zone_stops, start=zone_start, end=next_hint)
         except Exception as e:
             log.warning(f'[zone_sweep] zone {zi} OSRM failed ({e}), using NN')
-            ordered, dist, dur = _nn_sort(zone_stops, start=prev_pt), 0, 0
+            ordered, dist, dur = _nn_sort(zone_stops, start=zone_start), 0, 0
         ordered = _group_same_street_runs(ordered)
         for s in ordered:
             s['_zone_seq'] = zi
