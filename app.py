@@ -4268,6 +4268,46 @@ def mobile_v1_route_clear(route_id):
     return jsonify({'ok': True})
 
 
+@app.route('/api/mobile/v1/stops/<int:stop_id>/pin', methods=['POST'])
+def mobile_v1_stop_pin(stop_id):
+    if 'driver_id' not in session:
+        return jsonify({'ok': False, 'error': 'not logged in'}), 401
+    detail = _build_mobile_stop_detail(stop_id, session['driver_id'])
+    if not detail:
+        return jsonify({'ok': False, 'error': 'stop not found'}), 404
+    data = request.get_json(silent=True) or {}
+    try:
+        lat = float(data.get('lat'))
+        lng = float(data.get('lng'))
+    except (TypeError, ValueError):
+        return jsonify({'ok': False, 'error': 'missing coords'}), 400
+    db = get_db()
+    stop = db.execute("SELECT address FROM stops WHERE id=?", (stop_id,)).fetchone()
+    db.execute(
+        "UPDATE stops SET dest_lat=?, dest_lng=?, geo_confidence='verified', approach_sms_sent=0 WHERE id=?",
+        (lat, lng, stop_id),
+    )
+    if stop:
+        db.execute(
+            '''
+            INSERT INTO pin_corrections (address, lat, lng, corrected_by, corrected_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(address) DO UPDATE SET
+                lat=excluded.lat, lng=excluded.lng,
+                corrected_by=excluded.corrected_by,
+                corrected_at=excluded.corrected_at
+            ''',
+            (stop['address'], lat, lng, session.get('driver_name', 'driver'), _now_local().isoformat()),
+        )
+        try:
+            upsert_address_intel(stop['address'], lat, lng, confidence='verified')
+        except Exception as _e:
+            log.warning(f'[address_intel] pin sync failed: {_e}')
+    db.commit()
+    db.close()
+    return jsonify({'ok': True, 'lat': lat, 'lng': lng})
+
+
 # ─── LIVE EARNINGS API ─────────────────────────────────
 @app.route('/api/driver/earnings')
 def api_driver_earnings():
