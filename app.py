@@ -2836,6 +2836,7 @@ def init_db():
         log.warning(f'[address_intel] Failed to seed geocache: {e}')
 
     _seed_companies_and_managers(db)
+    _sync_driver_pin_from_env(db)
     db.close()
 
 def _seed_companies_and_managers(db):
@@ -2887,6 +2888,38 @@ def _seed_companies_and_managers(db):
         db.commit()
     except Exception as e:
         log.warning(f'[manager] Seed failed: {e}')
+
+
+def _sync_driver_pin_from_env(db):
+    """DRIVER_PIN env is source of truth on Render — sync into DB on boot."""
+    driver_pin = (os.environ.get('DRIVER_PIN') or os.environ.get('UNIT_DRIVER_PIN') or '8421').strip()
+    driver_name = (os.environ.get('DRIVER_NAME') or 'Director X').strip()
+    if not driver_pin:
+        return
+    try:
+        count = db.execute("SELECT COUNT(*) FROM drivers").fetchone()[0]
+        if count == 0:
+            db.execute(
+                "INSERT INTO drivers (name, phone, company, pin) VALUES (?,?,?,?)",
+                (driver_name, '3135550000', 'SpeedX', driver_pin),
+            )
+            db.commit()
+            log.info(f'[driver] Created default driver "{driver_name}" with PIN from env')
+            return
+        primary = db.execute(
+            "SELECT id, pin FROM drivers WHERE name=? ORDER BY id ASC LIMIT 1",
+            (driver_name,),
+        ).fetchone()
+        if not primary:
+            primary = db.execute(
+                "SELECT id, pin FROM drivers ORDER BY id ASC LIMIT 1"
+            ).fetchone()
+        if primary and str(primary['pin'] or '').strip() != driver_pin:
+            db.execute("UPDATE drivers SET pin=? WHERE id=?", (driver_pin, primary['id']))
+            db.commit()
+            log.info(f'[driver] Synced DRIVER_PIN env to driver id={primary["id"]}')
+    except Exception as e:
+        log.warning(f'[driver] PIN sync failed: {e}')
         try: db._conn.rollback()
         except: pass
 
@@ -3554,9 +3587,19 @@ def mobile_v1_login():
     driver = db.execute("SELECT * FROM drivers WHERE pin=?", (pin,)).fetchone()
     if not driver:
         db.close()
-        return jsonify({'ok': False, 'error': 'Invalid PIN'}), 401
+        return jsonify({'ok': False, 'error': 'Invalid PIN — ask your manager or check DRIVER_PIN on Render'}), 401
     session['driver_id'] = driver['id']
     session['driver_name'] = driver['name']
+    # Skip walkthrough gate for native app
+    try:
+        onboarded = db.execute(
+            "SELECT 1 FROM driver_onboarding WHERE driver_id=?", (driver['id'],)
+        ).fetchone()
+        if not onboarded:
+            db.execute("INSERT INTO driver_onboarding (driver_id) VALUES (?)", (driver['id'],))
+            db.commit()
+    except Exception:
+        pass
     db.close()
     return jsonify({
         'ok': True,
@@ -3640,6 +3683,151 @@ def mobile_v1_route_log():
             'earnings': round(delivered * pay_rate, 2),
         })
     return jsonify({'ok': True, 'pay_rate': pay_rate, 'days': entries})
+
+
+def _build_mobile_stop_detail(stop_id, driver_id):
+    db = get_db()
+    stop = db.execute("SELECT * FROM stops WHERE id=?", (stop_id,)).fetchone()
+    if not stop:
+        db.close()
+        return None
+    route = db.execute("SELECT * FROM routes WHERE id=?", (stop['route_id'],)).fetchone()
+    if not route or route['driver_id'] != driver_id:
+        db.close()
+        return None
+    if not stop['dest_lat']:
+        lat, lng, conf = geocode_address_full(stop['address'])
+        if lat and lng:
+            db.execute(
+                "UPDATE stops SET dest_lat=?, dest_lng=?, geo_confidence=? WHERE id=?",
+                (lat, lng, conf, stop_id),
+            )
+            db.commit()
+            stop = db.execute("SELECT * FROM stops WHERE id=?", (stop_id,)).fetchone()
+    known_units = []
+    multi_unit = False
+    if not _ss_val(stop, 'unit'):
+        try:
+            known_units = get_known_units(stop['address'])
+            multi_unit = bool(known_units) or is_known_multi_unit(stop['address'])
+        except Exception:
+            pass
+    next_id = _next_pending_stop_id(db, stop['route_id'])
+    total = db.execute(
+        "SELECT COUNT(*) FROM stops WHERE route_id=?", (stop['route_id'],)
+    ).fetchone()[0]
+    db.close()
+    return {
+        'stop': _json_row(stop),
+        'multi_unit': multi_unit,
+        'known_units': known_units,
+        'hard_geofence_ft': HARD_GEOFENCE_FT,
+        'route_id': stop['route_id'],
+        'next_stop_id': next_id,
+        'stops_total': total,
+    }
+
+
+@app.route('/api/mobile/v1/stops/<int:stop_id>')
+def mobile_v1_stop_detail(stop_id):
+    if 'driver_id' not in session:
+        return jsonify({'ok': False, 'error': 'not logged in'}), 401
+    detail = _build_mobile_stop_detail(stop_id, session['driver_id'])
+    if not detail:
+        return jsonify({'ok': False, 'error': 'stop not found'}), 404
+    db = get_db()
+    db.execute("UPDATE stops SET status='en_route' WHERE id=? AND status='pending'", (stop_id,))
+    db.commit()
+    db.close()
+    return jsonify({'ok': True, **detail})
+
+
+@app.route('/api/mobile/v1/stops/<int:stop_id>/unit', methods=['POST'])
+def mobile_v1_stop_unit(stop_id):
+    if 'driver_id' not in session:
+        return jsonify({'ok': False, 'error': 'not logged in'}), 401
+    detail = _build_mobile_stop_detail(stop_id, session['driver_id'])
+    if not detail:
+        return jsonify({'ok': False, 'error': 'stop not found'}), 404
+    data = request.get_json(silent=True) or {}
+    unit = (data.get('unit') or '').strip().upper()
+    if not unit:
+        return jsonify({'ok': False, 'error': 'Unit number is required'}), 400
+    db = get_db()
+    stop = db.execute("SELECT address FROM stops WHERE id=?", (stop_id,)).fetchone()
+    db.execute("UPDATE stops SET unit=? WHERE id=?", (unit, stop_id))
+    db.commit()
+    db.close()
+    if stop:
+        remember_unit_number(stop['address'], unit)
+    return jsonify({'ok': True, 'unit': unit})
+
+
+@app.route('/api/mobile/v1/stops/<int:stop_id>/deliver', methods=['POST'])
+def mobile_v1_stop_deliver(stop_id):
+    if 'driver_id' not in session:
+        return jsonify({'ok': False, 'error': 'not logged in'}), 401
+    detail = _build_mobile_stop_detail(stop_id, session['driver_id'])
+    if not detail:
+        return jsonify({'ok': False, 'error': 'stop not found'}), 404
+    stop_row = detail['stop']
+    if stop_row.get('status') == 'delivered':
+        return jsonify({'ok': False, 'error': 'Already delivered'}), 400
+    data = request.get_json(silent=True) or {}
+    photos = [data.get('pod_photo_1'), data.get('pod_photo_2'), data.get('pod_photo_3')]
+    if not any(photos):
+        return jsonify({'ok': False, 'error': 'Proof photo required'}), 400
+    unit = (data.get('unit') or stop_row.get('unit') or '').strip().upper()
+    if detail['multi_unit'] and not unit:
+        return jsonify({'ok': False, 'error': 'Unit number required for this building'}), 400
+    db = get_db()
+    stop = db.execute("SELECT * FROM stops WHERE id=?", (stop_id,)).fetchone()
+    if unit and not _ss_val(stop, 'unit'):
+        db.execute("UPDATE stops SET unit=? WHERE id=?", (unit, stop_id))
+        remember_unit_number(stop['address'], unit)
+    try:
+        d_lat = float(data.get('driver_lat')) if data.get('driver_lat') is not None else None
+    except Exception:
+        d_lat = None
+    try:
+        d_lng = float(data.get('driver_lng')) if data.get('driver_lng') is not None else None
+    except Exception:
+        d_lng = None
+    dist_ft = _delivery_distance_ft(stop, d_lat, d_lng)
+    if dist_ft is not None and dist_ft > HARD_GEOFENCE_FT:
+        db.close()
+        return jsonify({
+            'ok': False, 'too_far': True, 'distance_ft': dist_ft,
+            'error': f'You are {int(dist_ft)} ft away. Move closer before delivering.',
+        }), 403
+    now_iso = _now_local().isoformat()
+    try:
+        db.execute(
+            """UPDATE stops SET status='delivered', delivered_at=?, pod_photo_1=?, pod_photo_2=?,
+               pod_photo_3=?, pod_captured_at=?, delivered_lat=?, delivered_lng=?, delivered_distance_ft=? WHERE id=?""",
+            (now_iso, photos[0], photos[1], photos[2], now_iso, d_lat, d_lng, dist_ft, stop_id),
+        )
+        db.commit()
+    except Exception as e:
+        log.error(f'mobile deliver failed stop {stop_id}: {e}')
+        try:
+            db._conn.rollback()
+        except Exception:
+            pass
+        db.execute("UPDATE stops SET status='delivered', delivered_at=? WHERE id=?", (now_iso, stop_id))
+        db.commit()
+    off_location = dist_ft is not None and dist_ft > POD_GEOFENCE_FT
+    if off_location:
+        log.warning(f'[POD] Mobile off-location: stop {stop_id} {dist_ft:.0f}ft')
+    _audit_log(db, stop_id, 'delivered_photo', f'mobile dist_ft={dist_ft}')
+    route_id = _finalize_stop_delivery(db, stop, stop_id, now_iso)
+    db.commit()
+    next_id = _next_pending_stop_id(db, route_id) if route_id else None
+    db.close()
+    return jsonify({
+        'ok': True, 'next_stop_id': next_id, 'route_id': route_id,
+        'distance_ft': dist_ft, 'off_location': off_location,
+    })
 
 
 # ─── LIVE EARNINGS API ─────────────────────────────────
