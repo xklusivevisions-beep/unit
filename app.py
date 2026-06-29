@@ -8558,15 +8558,17 @@ def offline_page():
 # ── Deploy version endpoint (app checks this to detect new deploys) ──────────
 @app.route('/api/version')
 def app_version():
-    import subprocess
-    try:
-        git_hash = subprocess.check_output(
-            ['git', 'rev-parse', '--short', 'HEAD'],
-            cwd=os.path.dirname(__file__) or '.', stderr=subprocess.DEVNULL
-        ).decode().strip()
-    except Exception:
-        git_hash = 'unknown'
-    return jsonify({'version': git_hash, 'cache_ver': 'unit-v8'})
+    git_hash = (os.environ.get('RENDER_GIT_COMMIT') or '')[:7]
+    if not git_hash:
+        import subprocess
+        try:
+            git_hash = subprocess.check_output(
+                ['git', 'rev-parse', '--short', 'HEAD'],
+                cwd=os.path.dirname(__file__) or '.', stderr=subprocess.DEVNULL
+            ).decode().strip()
+        except Exception:
+            git_hash = 'unknown'
+    return jsonify({'version': git_hash, 'cache_ver': 'unit-v9', 'mobile_api': True})
 
 # ── Force no-store on all driver HTML pages (prevents stale SW cache) ────────
 @app.after_request
