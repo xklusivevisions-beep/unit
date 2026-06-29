@@ -2931,17 +2931,76 @@ def _valid_driver_pin(pin):
     return pin.isdigit() and 4 <= len(pin) <= 8
 
 
+def _normalize_phone_digits(phone):
+    return re.sub(r'\D', '', phone or '')
+
+
 def _find_driver_by_phone(db, phone):
-    digits = re.sub(r'\D', '', phone or '')
+    digits = _normalize_phone_digits(phone)
     if len(digits) < 10:
         return None
     last10 = digits[-10:]
-    rows = db.execute("SELECT * FROM drivers").fetchall()
-    for row in rows:
-        row_digits = re.sub(r'\D', '', str(row['phone'] or ''))
-        if row_digits.endswith(last10):
+    row = db.execute(
+        "SELECT * FROM drivers WHERE phone LIKE ? ORDER BY id ASC LIMIT 1",
+        (f'%{last10}',),
+    ).fetchone()
+    if row:
+        return row
+    for row in db.execute("SELECT * FROM drivers WHERE phone IS NOT NULL").fetchall():
+        if _normalize_phone_digits(str(row['phone'] or '')).endswith(last10):
             return row
     return None
+
+
+def _mobile_pin_create_impl(data):
+    """Shared create/reset PIN logic for native app."""
+    pin = (data.get('pin') or '').strip()
+    confirm = (data.get('confirm_pin') or pin).strip()
+    phone = (data.get('phone') or '').strip()
+    name = (data.get('name') or '').strip()
+
+    if not _valid_driver_pin(pin):
+        return jsonify({'ok': False, 'error': 'PIN must be 4–8 digits'}), 400
+    if pin != confirm:
+        return jsonify({'ok': False, 'error': 'PINs do not match'}), 400
+    digits = _normalize_phone_digits(phone)
+    if len(digits) < 10:
+        return jsonify({'ok': False, 'error': 'Enter your mobile number'}), 400
+    phone_store = digits[-10:]
+
+    db = get_db()
+    driver = _find_driver_by_phone(db, phone)
+    if driver:
+        taken = db.execute(
+            "SELECT id FROM drivers WHERE pin=? AND id!=?", (pin, driver['id'])
+        ).fetchone()
+        if taken:
+            db.close()
+            return jsonify({'ok': False, 'error': 'That PIN is already in use — pick another'}), 409
+        db.execute("UPDATE drivers SET pin=? WHERE id=?", (pin, driver['id']))
+        if name:
+            db.execute("UPDATE drivers SET name=? WHERE id=?", (name, driver['id']))
+        if phone_store:
+            db.execute("UPDATE drivers SET phone=? WHERE id=?", (phone_store, driver['id']))
+        db.commit()
+        driver = db.execute("SELECT * FROM drivers WHERE id=?", (driver['id'],)).fetchone()
+    else:
+        if not name:
+            db.close()
+            return jsonify({'ok': False, 'error': 'Enter your name'}), 400
+        if db.execute("SELECT id FROM drivers WHERE pin=?", (pin,)).fetchone():
+            db.close()
+            return jsonify({'ok': False, 'error': 'That PIN is already in use — pick another'}), 409
+        db.execute(
+            "INSERT INTO drivers (name, phone, company, pin) VALUES (?,?,?,?)",
+            (name, phone_store, 'SpeedX', pin),
+        )
+        db.commit()
+        driver = db.execute("SELECT * FROM drivers WHERE pin=? ORDER BY id DESC LIMIT 1", (pin,)).fetchone()
+
+    info = _mobile_login_driver(db, driver)
+    db.close()
+    return jsonify({'ok': True, 'driver': info})
 
 
 def _mobile_login_driver(db, driver):
@@ -3650,52 +3709,10 @@ def mobile_v1_login():
 
 
 @app.route('/api/mobile/v1/pin/create', methods=['POST'])
+@app.route('/driver/pin-setup', methods=['POST'])
 def mobile_v1_pin_create():
     """Driver chooses their own PIN — matches roster by phone or creates a new driver."""
-    data = request.get_json(silent=True) or {}
-    pin = (data.get('pin') or '').strip()
-    confirm = (data.get('confirm_pin') or pin).strip()
-    phone = (data.get('phone') or '').strip()
-    name = (data.get('name') or '').strip()
-
-    if not _valid_driver_pin(pin):
-        return jsonify({'ok': False, 'error': 'PIN must be 4–8 digits'}), 400
-    if pin != confirm:
-        return jsonify({'ok': False, 'error': 'PINs do not match'}), 400
-    if len(re.sub(r'\D', '', phone)) < 10:
-        return jsonify({'ok': False, 'error': 'Enter your mobile number'}), 400
-
-    db = get_db()
-    driver = _find_driver_by_phone(db, phone)
-    if driver:
-        taken = db.execute(
-            "SELECT id FROM drivers WHERE pin=? AND id!=?", (pin, driver['id'])
-        ).fetchone()
-        if taken:
-            db.close()
-            return jsonify({'ok': False, 'error': 'That PIN is already in use — pick another'}), 409
-        db.execute("UPDATE drivers SET pin=? WHERE id=?", (pin, driver['id']))
-        if name:
-            db.execute("UPDATE drivers SET name=? WHERE id=?", (name, driver['id']))
-        db.commit()
-        driver = db.execute("SELECT * FROM drivers WHERE id=?", (driver['id'],)).fetchone()
-    else:
-        if not name:
-            db.close()
-            return jsonify({'ok': False, 'error': 'Enter your name'}), 400
-        if db.execute("SELECT id FROM drivers WHERE pin=?", (pin,)).fetchone():
-            db.close()
-            return jsonify({'ok': False, 'error': 'That PIN is already in use — pick another'}), 409
-        db.execute(
-            "INSERT INTO drivers (name, phone, company, pin) VALUES (?,?,?,?)",
-            (name, phone, 'SpeedX', pin),
-        )
-        db.commit()
-        driver = db.execute("SELECT * FROM drivers WHERE pin=?", (pin,)).fetchone()
-
-    info = _mobile_login_driver(db, driver)
-    db.close()
-    return jsonify({'ok': True, 'driver': info})
+    return _mobile_pin_create_impl(request.get_json(silent=True) or {})
 
 
 @app.route('/api/mobile/v1/pin/change', methods=['POST'])
@@ -8590,6 +8607,7 @@ def health():
         except Exception:
             git_hash = 'unknown'
         return jsonify({'status': 'ok', 'time': _now_local().isoformat(), 'version': git_hash,
+                        'mobile_api': True,
                         'model': _vision_provider_label(),
                         'vision_key': 'set' if _vision_available() else 'MISSING',
                         'vision_provider': 'gemini' if GEMINI_API_KEY else ('anthropic' if ANTHROPIC_KEY else 'none'),
