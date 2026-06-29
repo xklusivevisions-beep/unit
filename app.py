@@ -3451,6 +3451,197 @@ def driver_checkin():
     db.close()
     return redirect(url_for('driver_dashboard'))
 
+
+# ─── MOBILE API (SwiftUI native app — no WebView) ───────────────
+
+def _json_row(row):
+    if row is None:
+        return None
+    if hasattr(row, 'keys'):
+        return {k: row[k] for k in row.keys()}
+    return dict(row)
+
+
+def _build_mobile_dashboard(driver_id):
+    """Dashboard payload for the native iOS app."""
+    db = get_db()
+    today = _now_local().strftime('%Y-%m-%d')
+    driver_row = db.execute("SELECT * FROM drivers WHERE id=?", (driver_id,)).fetchone()
+    pay_rate = float(driver_row['pay_rate']) if driver_row and driver_row['pay_rate'] else 1.50
+
+    route = db.execute(
+        "SELECT * FROM routes WHERE driver_id=? AND date=? ORDER BY id DESC LIMIT 1",
+        (driver_id, today)
+    ).fetchone()
+
+    stops = []
+    if route:
+        stops = db.execute(
+            "SELECT id, stop_number, address, status, customer_name, unit, dest_lat, dest_lng FROM stops WHERE route_id=? ORDER BY stop_number",
+            (route['id'],)
+        ).fetchall()
+
+    today_delivered = db.execute(
+        """SELECT COUNT(*) FROM stops s JOIN routes r ON s.route_id = r.id
+           WHERE r.driver_id=? AND r.date=? AND s.status='delivered'""",
+        (driver_id, today)
+    ).fetchone()[0]
+    today_total = db.execute(
+        """SELECT COUNT(*) FROM stops s JOIN routes r ON s.route_id = r.id
+           WHERE r.driver_id=? AND r.date=?""",
+        (driver_id, today)
+    ).fetchone()[0]
+
+    today_date = _today_local()
+    week_start = (today_date - timedelta(days=today_date.weekday())).strftime('%Y-%m-%d')
+    month_start = today_date.replace(day=1).strftime('%Y-%m-%d')
+
+    week_stop_count = db.execute(
+        """SELECT COUNT(*) FROM stops s JOIN routes r ON s.route_id = r.id
+           WHERE r.driver_id=? AND r.date >= ? AND s.status='delivered'""",
+        (driver_id, week_start)
+    ).fetchone()[0]
+    month_stop_count = db.execute(
+        """SELECT COUNT(*) FROM stops s JOIN routes r ON s.route_id = r.id
+           WHERE r.driver_id=? AND r.date >= ? AND s.status='delivered'""",
+        (driver_id, month_start)
+    ).fetchone()[0]
+
+    checkin_status = 'unknown'
+    assignment_today = None
+    crow = db.execute(
+        "SELECT status, assignment FROM driver_checkins WHERE driver_id=? AND check_date=?",
+        (driver_id, today)
+    ).fetchone()
+    if crow:
+        checkin_status = crow['status']
+        assignment_today = crow['assignment'] if 'assignment' in crow.keys() else None
+
+    sched_days = _ss_val(driver_row, 'scheduled_days', None)
+    db.close()
+
+    return {
+        'driver': {
+            'id': driver_id,
+            'name': driver_row['name'] if driver_row else '',
+            'pay_rate': pay_rate,
+        },
+        'route': _json_row(route),
+        'stops': [_json_row(s) for s in stops],
+        'earnings': {
+            'today': round(today_delivered * pay_rate, 2),
+            'week': round(week_stop_count * pay_rate, 2),
+            'month': round(month_stop_count * pay_rate, 2),
+            'today_delivered': today_delivered,
+            'today_total': today_total,
+        },
+        'checkin_status': checkin_status,
+        'assignment_today': assignment_today,
+        'schedule': {
+            'days': _parse_days(sched_days),
+            'scheduled_today': _is_scheduled_today(sched_days),
+        },
+    }
+
+
+@app.route('/api/mobile/v1/login', methods=['POST'])
+def mobile_v1_login():
+    data = request.get_json(silent=True) or {}
+    pin = (data.get('pin') or '').strip()
+    if not pin:
+        return jsonify({'ok': False, 'error': 'PIN required'}), 400
+    db = get_db()
+    driver = db.execute("SELECT * FROM drivers WHERE pin=?", (pin,)).fetchone()
+    if not driver:
+        db.close()
+        return jsonify({'ok': False, 'error': 'Invalid PIN'}), 401
+    session['driver_id'] = driver['id']
+    session['driver_name'] = driver['name']
+    db.close()
+    return jsonify({
+        'ok': True,
+        'driver': {
+            'id': driver['id'],
+            'name': driver['name'],
+            'pay_rate': float(driver['pay_rate']) if driver['pay_rate'] else 1.50,
+        },
+    })
+
+
+@app.route('/api/mobile/v1/logout', methods=['POST'])
+def mobile_v1_logout():
+    session.pop('driver_id', None)
+    session.pop('driver_name', None)
+    return jsonify({'ok': True})
+
+
+@app.route('/api/mobile/v1/dashboard')
+def mobile_v1_dashboard():
+    if 'driver_id' not in session:
+        return jsonify({'ok': False, 'error': 'not logged in'}), 401
+    return jsonify({'ok': True, **_build_mobile_dashboard(session['driver_id'])})
+
+
+@app.route('/api/mobile/v1/checkin', methods=['POST'])
+def mobile_v1_checkin():
+    if 'driver_id' not in session:
+        return jsonify({'ok': False, 'error': 'not logged in'}), 401
+    data = request.get_json(silent=True) or {}
+    status = (data.get('status') or 'in').strip()
+    if status not in ('in', 'out'):
+        status = 'in'
+    today = _now_local().strftime('%Y-%m-%d')
+    now = _now_local().isoformat()
+    db = get_db()
+    existing = db.execute(
+        "SELECT id FROM driver_checkins WHERE driver_id=? AND check_date=?",
+        (session['driver_id'], today)
+    ).fetchone()
+    if existing:
+        db.execute("UPDATE driver_checkins SET status=?, updated_at=? WHERE id=?",
+                   (status, now, existing['id']))
+    else:
+        db.execute(
+            "INSERT INTO driver_checkins (driver_id, check_date, status, updated_at) VALUES (?,?,?,?)",
+            (session['driver_id'], today, status, now)
+        )
+    db.commit()
+    db.close()
+    return jsonify({'ok': True, 'status': status})
+
+
+@app.route('/api/mobile/v1/route-log')
+def mobile_v1_route_log():
+    if 'driver_id' not in session:
+        return jsonify({'ok': False, 'error': 'not logged in'}), 401
+    db = get_db()
+    driver_id = session['driver_id']
+    driver = db.execute("SELECT * FROM drivers WHERE id=?", (driver_id,)).fetchone()
+    pay_rate = float(driver['pay_rate']) if driver and driver['pay_rate'] else 1.50
+    days = db.execute("""
+        SELECT r.date,
+               COUNT(s.id) AS total,
+               SUM(CASE WHEN s.status='delivered' THEN 1 ELSE 0 END) AS delivered
+        FROM routes r
+        LEFT JOIN stops s ON s.route_id = r.id
+        WHERE r.driver_id = ?
+        GROUP BY r.date
+        ORDER BY r.date DESC
+        LIMIT 30
+    """, (driver_id,)).fetchall()
+    db.close()
+    entries = []
+    for d in days:
+        delivered = d['delivered'] or 0
+        entries.append({
+            'date': d['date'],
+            'delivered': delivered,
+            'total': d['total'] or 0,
+            'earnings': round(delivered * pay_rate, 2),
+        })
+    return jsonify({'ok': True, 'pay_rate': pay_rate, 'days': entries})
+
+
 # ─── LIVE EARNINGS API ─────────────────────────────────
 @app.route('/api/driver/earnings')
 def api_driver_earnings():
