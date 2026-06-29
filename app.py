@@ -4135,6 +4135,139 @@ def mobile_v1_scan_import_route():
     return scan_import_route()
 
 
+@app.route('/api/mobile/v1/stops/<int:stop_id>/undo', methods=['POST'])
+def mobile_v1_stop_undo(stop_id):
+    if 'driver_id' not in session:
+        return jsonify({'ok': False, 'error': 'not logged in'}), 401
+    detail = _build_mobile_stop_detail(stop_id, session['driver_id'])
+    if not detail:
+        return jsonify({'ok': False, 'error': 'stop not found'}), 404
+    db = get_db()
+    stop = db.execute("SELECT * FROM stops WHERE id=?", (stop_id,)).fetchone()
+    if stop and _delivery_locked(stop):
+        _audit_log(db, stop_id, 'undo_denied', f'locked after {DELIVERY_LOCK_MINUTES}min')
+        db.close()
+        return jsonify({
+            'ok': False,
+            'error': f'Delivery locked after {DELIVERY_LOCK_MINUTES} minutes',
+        }), 403
+    if stop:
+        _audit_log(db, stop_id, 'undo', f'was {stop["status"]}')
+        db.execute("UPDATE stops SET status='pending', delivered_at=NULL WHERE id=?", (stop_id,))
+        db.commit()
+    route_id = stop['route_id'] if stop else None
+    db.close()
+    return jsonify({'ok': True, 'route_id': route_id})
+
+
+@app.route('/api/mobile/v1/stops/<int:stop_id>/message', methods=['POST'])
+def mobile_v1_stop_message(stop_id):
+    if 'driver_id' not in session:
+        return jsonify({'ok': False, 'error': 'not logged in'}), 401
+    detail = _build_mobile_stop_detail(stop_id, session['driver_id'])
+    if not detail:
+        return jsonify({'ok': False, 'error': 'stop not found'}), 404
+    data = request.get_json(silent=True) or {}
+    msg = (data.get('message') or '').strip()
+    if not msg:
+        return jsonify({'ok': False, 'error': 'No message'}), 400
+    db = get_db()
+    stop = db.execute("SELECT * FROM stops WHERE id=?", (stop_id,)).fetchone()
+    if not stop or not stop['phone']:
+        db.close()
+        return jsonify({'ok': False, 'error': 'No phone number for this stop'}), 400
+    ok, err = send_sms(format_phone(stop['phone']), msg)
+    db.close()
+    if not ok:
+        return jsonify({'ok': False, 'error': err or 'Send failed'}), 502
+    return jsonify({'ok': True})
+
+
+@app.route('/api/mobile/v1/routes/<int:route_id>/blast', methods=['POST'])
+def mobile_v1_route_blast(route_id):
+    if 'driver_id' not in session:
+        return jsonify({'ok': False, 'error': 'not logged in'}), 401
+    db = get_db()
+    route = db.execute(
+        "SELECT * FROM routes WHERE id=? AND driver_id=?",
+        (route_id, session['driver_id']),
+    ).fetchone()
+    if not route:
+        db.close()
+        return jsonify({'ok': False, 'error': 'route not found'}), 404
+    stops = db.execute(
+        "SELECT * FROM stops WHERE route_id=? AND phone != '' AND phone IS NOT NULL ORDER BY stop_number",
+        (route_id,),
+    ).fetchall()
+    sent = failed = 0
+    for stop in stops:
+        if stop['sms_blast_sent']:
+            continue
+        track_url = f"{get_base_url()}/track/{stop['token']}"
+        name_part = f"Hi {stop['customer_name'].split()[0]}! " if stop['customer_name'] else "Hi! "
+        msg = (f"{name_part}Your SpeedX delivery is out today. "
+               f"Your driver will notify you when they're heading to your stop.\n"
+               f"Track here: {track_url}")
+        mms_img = f"{get_base_url()}/static/speedx_mms.jpg" if (TWILIO_SID and not TEXTBELT_KEY) else None
+        ok, _ = send_sms(format_phone(stop['phone']), msg, media_url=mms_img)
+        if ok:
+            db.execute("UPDATE stops SET sms_blast_sent=1 WHERE id=?", (stop['id'],))
+            sent += 1
+        else:
+            failed += 1
+    db.execute(
+        "UPDATE routes SET blast_sent=1, blast_sent_at=? WHERE id=?",
+        (_now_local().isoformat(), route_id),
+    )
+    db.commit()
+    db.close()
+    return jsonify({'ok': True, 'sent': sent, 'failed': failed})
+
+
+@app.route('/api/mobile/v1/routes/<int:route_id>/reset', methods=['POST'])
+def mobile_v1_route_reset(route_id):
+    if 'driver_id' not in session:
+        return jsonify({'ok': False, 'error': 'not logged in'}), 401
+    db = get_db()
+    route = db.execute(
+        "SELECT * FROM routes WHERE id=? AND driver_id=?",
+        (route_id, session['driver_id']),
+    ).fetchone()
+    if not route:
+        db.close()
+        return jsonify({'ok': False, 'error': 'route not found'}), 404
+    db.execute(
+        """UPDATE stops
+           SET status='pending',
+               driver_lat=NULL, driver_lng=NULL,
+               approach_sms_sent=0,
+               sms_blast_sent=0
+           WHERE route_id=?""",
+        (route_id,),
+    )
+    db.commit()
+    count = db.execute("SELECT COUNT(*) FROM stops WHERE route_id=?", (route_id,)).fetchone()[0]
+    db.close()
+    return jsonify({'ok': True, 'reset': count})
+
+
+@app.route('/api/mobile/v1/routes/<int:route_id>/clear', methods=['POST'])
+def mobile_v1_route_clear(route_id):
+    if 'driver_id' not in session:
+        return jsonify({'ok': False, 'error': 'not logged in'}), 401
+    db = get_db()
+    route = db.execute(
+        "SELECT * FROM routes WHERE id=? AND driver_id=?",
+        (route_id, session['driver_id']),
+    ).fetchone()
+    if route:
+        db.execute("DELETE FROM stops WHERE route_id=?", (route_id,))
+        db.execute("DELETE FROM routes WHERE id=?", (route_id,))
+        db.commit()
+    db.close()
+    return jsonify({'ok': True})
+
+
 # ─── LIVE EARNINGS API ─────────────────────────────────
 @app.route('/api/driver/earnings')
 def api_driver_earnings():
