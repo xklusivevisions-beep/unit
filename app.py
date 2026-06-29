@@ -3670,7 +3670,7 @@ def _build_mobile_dashboard(driver_id):
         'assignment_today': assignment_today,
         'schedule': {
             'days': _parse_days(sched_days),
-            'scheduled_today': _is_scheduled_today(sched_days),
+            'scheduled_today': bool(_is_scheduled_today(sched_days)),
         },
     }
 
