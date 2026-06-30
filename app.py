@@ -2744,6 +2744,11 @@ def init_db():
             notes TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )""",
+        "ALTER TABLE route_manual_log ADD COLUMN delivered INTEGER DEFAULT 0",
+        "ALTER TABLE route_manual_log ADD COLUMN failed INTEGER DEFAULT 0",
+        "ALTER TABLE route_manual_log ADD COLUMN not_completed INTEGER DEFAULT 0",
+        "ALTER TABLE route_manual_log ADD COLUMN route_id INTEGER",
+        "ALTER TABLE routes ADD COLUMN completed_at TEXT",
         # ── Speed X POD (proof of delivery) ──
         "ALTER TABLE stops ADD COLUMN pod_photo_1 TEXT",
         "ALTER TABLE stops ADD COLUMN pod_photo_2 TEXT",
@@ -2828,6 +2833,18 @@ def init_db():
         "ALTER TABLE stops ADD COLUMN delivered_lat REAL",
         "ALTER TABLE stops ADD COLUMN delivered_lng REAL",
         "ALTER TABLE stops ADD COLUMN delivered_distance_ft REAL",
+        "ALTER TABLE stops ADD COLUMN delivery_timer_target_sec INTEGER",
+        "ALTER TABLE stops ADD COLUMN delivery_timer_elapsed_sec INTEGER",
+        "ALTER TABLE stops ADD COLUMN delivery_timer_met INTEGER",
+        """CREATE TABLE IF NOT EXISTS driver_day_tracker (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            driver_id INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            gas_spent REAL DEFAULT 0,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(driver_id, date)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_driver_day_tracker ON driver_day_tracker (driver_id, date)",
         # ── Geocode confidence (anti "sent to nowhere") ──
         "ALTER TABLE address_intel ADD COLUMN confidence TEXT",
         "ALTER TABLE stops ADD COLUMN geo_confidence TEXT",
@@ -3086,16 +3103,17 @@ def _mapbox_geocode(address):
         log.warning(f'Mapbox geocode failed for {address}: {e}')
     return None, None, None, 0
 
-def _mapbox_autocomplete(q, limit=5):
-    """Rooftop-grade address typeahead, biased to the Romulus/Detroit area."""
+def _mapbox_autocomplete(q, limit=5, proximity=None):
+    """Rooftop-grade address typeahead, biased to driver location or Romulus/Detroit area."""
     if not MAPBOX_TOKEN or not q:
         return []
     try:
+        prox = proximity if proximity else '-83.397,42.222'
         url = 'https://api.mapbox.com/geocoding/v5/mapbox.places/' + requests.utils.quote(q) + '.json'
         r = requests.get(url, params={
             'country': 'US', 'limit': limit, 'types': 'address',
             'autocomplete': 'true',
-            'proximity': '-83.397,42.222',  # Romulus, MI warehouse
+            'proximity': prox,
             'access_token': MAPBOX_TOKEN
         }, timeout=6)
         out = []
@@ -3835,12 +3853,13 @@ def mobile_v1_route_log():
         return jsonify({'ok': False, 'error': 'not logged in'}), 401
     db = get_db()
     driver_id = session['driver_id']
-    driver = db.execute("SELECT * FROM drivers WHERE id=?", (driver_id,)).fetchone()
-    pay_rate = float(driver['pay_rate']) if driver and driver['pay_rate'] else 1.50
+    pay_rate = _driver_pay_rate(db, driver_id)
     days = db.execute("""
         SELECT r.date,
                COUNT(s.id) AS total,
-               SUM(CASE WHEN s.status='delivered' THEN 1 ELSE 0 END) AS delivered
+               SUM(CASE WHEN s.status='delivered' THEN 1 ELSE 0 END) AS delivered,
+               SUM(CASE WHEN s.status='failed' THEN 1 ELSE 0 END) AS failed,
+               SUM(CASE WHEN s.status IN ('pending', 'en_route') THEN 1 ELSE 0 END) AS not_completed
         FROM routes r
         LEFT JOIN stops s ON s.route_id = r.id
         WHERE r.driver_id = ?
@@ -3848,17 +3867,127 @@ def mobile_v1_route_log():
         ORDER BY r.date DESC
         LIMIT 30
     """, (driver_id,)).fetchall()
-    db.close()
+    manual = db.execute(
+        "SELECT id, date, packages, notes, delivered, failed, not_completed, route_id FROM route_manual_log WHERE driver_id=? ORDER BY date DESC LIMIT 30",
+        (driver_id,)
+    ).fetchall()
     entries = []
+    manual_by_date = {m['date']: m for m in manual}
+    seen_dates = set()
     for d in days:
         delivered = d['delivered'] or 0
+        failed = d['failed'] or 0
+        not_completed = d['not_completed'] or 0
+        manual_row = manual_by_date.get(d['date'])
+        manual_pkgs = manual_row['packages'] if manual_row else 0
+        earnings = round(delivered * pay_rate, 2)
+        gas = _driver_day_gas(db, driver_id, d['date'])
         entries.append({
             'date': d['date'],
             'delivered': delivered,
+            'failed': failed,
+            'not_completed': not_completed,
             'total': d['total'] or 0,
-            'earnings': round(delivered * pay_rate, 2),
+            'earnings': earnings,
+            'gas_spent': gas,
+            'take_home': round(earnings - gas, 2),
+            'manual_packages': manual_pkgs,
+            'manual_id': manual_row['id'] if manual_row else None,
+            'manual_notes': manual_row['notes'] if manual_row else None,
+            'completed': bool(manual_row and _ss_val(manual_row, 'route_id')),
         })
-    return jsonify({'ok': True, 'pay_rate': pay_rate, 'days': entries})
+        seen_dates.add(d['date'])
+    for m in manual:
+        if m['date'] not in seen_dates:
+            delivered = m['delivered'] or m['packages'] or 0
+            failed = m['failed'] or 0
+            not_completed = m['not_completed'] or 0
+            earnings = round(delivered * pay_rate, 2)
+            gas = _driver_day_gas(db, driver_id, m['date'])
+            entries.append({
+                'date': m['date'],
+                'delivered': delivered,
+                'failed': failed,
+                'not_completed': not_completed,
+                'total': delivered + failed + not_completed,
+                'earnings': earnings,
+                'gas_spent': gas,
+                'take_home': round(earnings - gas, 2),
+                'manual_packages': m['packages'],
+                'manual_id': m['id'],
+                'manual_notes': m['notes'],
+                'completed': True,
+            })
+    today_snap = _driver_today_earnings(db, driver_id, pay_rate)
+    db.close()
+    entries.sort(key=lambda x: x['date'], reverse=True)
+    return jsonify({'ok': True, 'pay_rate': pay_rate, 'days': entries[:30], 'today': today_snap})
+
+
+def _driver_pay_rate(db, driver_id):
+    driver = db.execute("SELECT pay_rate FROM drivers WHERE id=?", (driver_id,)).fetchone()
+    return float(driver['pay_rate']) if driver and driver['pay_rate'] else 1.50
+
+
+def _driver_day_gas(db, driver_id, date_str):
+    try:
+        row = db.execute(
+            "SELECT gas_spent FROM driver_day_tracker WHERE driver_id=? AND date=?",
+            (driver_id, date_str),
+        ).fetchone()
+        return round(float(row['gas_spent']), 2) if row and row['gas_spent'] is not None else 0.0
+    except Exception:
+        return 0.0
+
+
+def _set_driver_day_gas(db, driver_id, date_str, amount):
+    amount = round(max(0.0, float(amount)), 2)
+    now_iso = _now_local().isoformat()
+    existing = db.execute(
+        "SELECT id FROM driver_day_tracker WHERE driver_id=? AND date=?",
+        (driver_id, date_str),
+    ).fetchone()
+    if existing:
+        db.execute(
+            "UPDATE driver_day_tracker SET gas_spent=?, updated_at=? WHERE id=?",
+            (amount, now_iso, existing['id']),
+        )
+    else:
+        db.execute(
+            "INSERT INTO driver_day_tracker (driver_id, date, gas_spent, updated_at) VALUES (?,?,?,?)",
+            (driver_id, date_str, amount, now_iso),
+        )
+
+
+def _driver_today_earnings(db, driver_id, pay_rate=None):
+    if pay_rate is None:
+        pay_rate = _driver_pay_rate(db, driver_id)
+    today = _today_local().strftime('%Y-%m-%d')
+    row = db.execute("""
+        SELECT SUM(CASE WHEN s.status='delivered' THEN 1 ELSE 0 END) AS delivered,
+               COUNT(s.id) AS total
+        FROM routes r
+        LEFT JOIN stops s ON s.route_id = r.id
+        WHERE r.driver_id=? AND r.date=?
+    """, (driver_id, today)).fetchone()
+    delivered = row['delivered'] or 0
+    total = row['total'] or 0
+    manual = db.execute(
+        "SELECT packages FROM route_manual_log WHERE driver_id=? AND date=? ORDER BY id DESC LIMIT 1",
+        (driver_id, today),
+    ).fetchone()
+    manual_pkgs = manual['packages'] if manual else 0
+    earnings = round((delivered + manual_pkgs) * pay_rate, 2)
+    gas = _driver_day_gas(db, driver_id, today)
+    return {
+        'date': today,
+        'today_delivered': delivered,
+        'today_total': total,
+        'today_earnings': earnings,
+        'gas_spent': gas,
+        'take_home': round(earnings - gas, 2),
+        'pay_rate': pay_rate,
+    }
 
 
 def _build_mobile_stop_detail(stop_id, driver_id):
@@ -3981,11 +4110,28 @@ def mobile_v1_stop_deliver(stop_id):
             'error': f'You are {int(dist_ft)} ft away. Move closer before delivering.',
         }), 403
     now_iso = _now_local().isoformat()
+    timer_target = data.get('delivery_timer_target_sec')
+    timer_elapsed = data.get('delivery_timer_elapsed_sec')
+    timer_met = data.get('delivery_timer_met')
+    try:
+        timer_target = int(timer_target) if timer_target is not None else None
+    except Exception:
+        timer_target = None
+    try:
+        timer_elapsed = int(timer_elapsed) if timer_elapsed is not None else None
+    except Exception:
+        timer_elapsed = None
+    try:
+        timer_met = 1 if timer_met in (True, 1, '1', 'true') else (0 if timer_met in (False, 0, '0', 'false') else None)
+    except Exception:
+        timer_met = None
     try:
         db.execute(
             """UPDATE stops SET status='delivered', delivered_at=?, pod_photo_1=?, pod_photo_2=?,
-               pod_photo_3=?, pod_captured_at=?, delivered_lat=?, delivered_lng=?, delivered_distance_ft=? WHERE id=?""",
-            (now_iso, photos[0], photos[1], photos[2], now_iso, d_lat, d_lng, dist_ft, stop_id),
+               pod_photo_3=?, pod_captured_at=?, delivered_lat=?, delivered_lng=?, delivered_distance_ft=?,
+               delivery_timer_target_sec=?, delivery_timer_elapsed_sec=?, delivery_timer_met=? WHERE id=?""",
+            (now_iso, photos[0], photos[1], photos[2], now_iso, d_lat, d_lng, dist_ft,
+             timer_target, timer_elapsed, timer_met, stop_id),
         )
         db.commit()
     except Exception as e:
@@ -4000,13 +4146,22 @@ def mobile_v1_stop_deliver(stop_id):
     if off_location:
         log.warning(f'[POD] Mobile off-location: stop {stop_id} {dist_ft:.0f}ft')
     _audit_log(db, stop_id, 'delivered_photo', f'mobile dist_ft={dist_ft}')
+    if timer_elapsed is not None:
+        _audit_log(db, stop_id, 'delivery_timer', f'elapsed={timer_elapsed}s target={timer_target}s met={timer_met}')
     route_id = _finalize_stop_delivery(db, stop, stop_id, now_iso)
     db.commit()
     next_id = _next_pending_stop_id(db, route_id) if route_id else None
+    pay_rate = _driver_pay_rate(db, session['driver_id'])
+    snap = _driver_today_earnings(db, session['driver_id'], pay_rate)
     db.close()
     return jsonify({
         'ok': True, 'next_stop_id': next_id, 'route_id': route_id,
         'distance_ft': dist_ft, 'off_location': off_location,
+        'stop_earnings': pay_rate,
+        'today_delivered': snap['today_delivered'],
+        'today_earnings': snap['today_earnings'],
+        'gas_spent': snap['gas_spent'],
+        'take_home': snap['take_home'],
     })
 
 
@@ -4277,9 +4432,112 @@ def mobile_v1_route_clear(route_id):
     if route:
         db.execute("DELETE FROM stops WHERE route_id=?", (route_id,))
         db.execute("DELETE FROM routes WHERE id=?", (route_id,))
+        db.execute(
+            "DELETE FROM route_manual_log WHERE driver_id=? AND route_id=?",
+            (session['driver_id'], route_id),
+        )
         db.commit()
     db.close()
     return jsonify({'ok': True})
+
+
+@app.route('/api/mobile/v1/routes/<int:route_id>/complete', methods=['POST'])
+def mobile_v1_route_complete(route_id):
+    """End delivery — tally delivered/failed/not done and save to pay log."""
+    if 'driver_id' not in session:
+        return jsonify({'ok': False, 'error': 'not logged in'}), 401
+    db = get_db()
+    driver_id = session['driver_id']
+    route = db.execute(
+        "SELECT * FROM routes WHERE id=? AND driver_id=?",
+        (route_id, driver_id),
+    ).fetchone()
+    if not route:
+        db.close()
+        return jsonify({'ok': False, 'error': 'route not found'}), 404
+    row = db.execute("""
+        SELECT
+            COUNT(*) AS total,
+            SUM(CASE WHEN status='delivered' THEN 1 ELSE 0 END) AS delivered,
+            SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed,
+            SUM(CASE WHEN status IN ('pending', 'en_route') THEN 1 ELSE 0 END) AS not_completed
+        FROM stops WHERE route_id=?
+    """, (route_id,)).fetchone()
+    delivered = row['delivered'] or 0
+    failed = row['failed'] or 0
+    not_completed = row['not_completed'] or 0
+    total = row['total'] or 0
+    pay_rate = _driver_pay_rate(db, driver_id)
+    earnings = round(delivered * pay_rate, 2)
+    now_iso = _now_local().isoformat()
+    route_date = route['date'] or _today_local().strftime('%Y-%m-%d')
+    db.execute("UPDATE routes SET completed_at=? WHERE id=?", (now_iso, route_id))
+    notes = f"Route ended: {delivered} delivered, {failed} failed, {not_completed} not done"
+    existing = db.execute(
+        "SELECT id FROM route_manual_log WHERE driver_id=? AND route_id=?",
+        (driver_id, route_id),
+    ).fetchone()
+    if existing:
+        db.execute(
+            """UPDATE route_manual_log SET date=?, packages=?, delivered=?, failed=?,
+               not_completed=?, notes=? WHERE id=?""",
+            (route_date, delivered, delivered, failed, not_completed, notes, existing['id']),
+        )
+    else:
+        db.execute(
+            """INSERT INTO route_manual_log
+               (driver_id, date, packages, delivered, failed, not_completed, route_id, notes)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (driver_id, route_date, delivered, delivered, failed, not_completed, route_id, notes),
+        )
+    db.commit()
+    gas = _driver_day_gas(db, driver_id, route_date)
+    db.close()
+    return jsonify({
+        'ok': True,
+        'route_id': route_id,
+        'date': route_date,
+        'delivered': delivered,
+        'failed': failed,
+        'not_completed': not_completed,
+        'total': total,
+        'earnings': earnings,
+        'pay_rate': pay_rate,
+        'gas_spent': gas,
+        'take_home': round(earnings - gas, 2),
+        'completed_at': now_iso,
+    })
+
+
+@app.route('/api/mobile/v1/stops/<int:stop_id>', methods=['DELETE'])
+def mobile_v1_stop_delete(stop_id):
+    """Remove a single stop from the route (for testing / corrections)."""
+    if 'driver_id' not in session:
+        return jsonify({'ok': False, 'error': 'not logged in'}), 401
+    db = get_db()
+    stop = db.execute("SELECT * FROM stops WHERE id=?", (stop_id,)).fetchone()
+    if not stop:
+        db.close()
+        return jsonify({'ok': False, 'error': 'stop not found'}), 404
+    route = db.execute(
+        "SELECT * FROM routes WHERE id=? AND driver_id=?",
+        (stop['route_id'], session['driver_id']),
+    ).fetchone()
+    if not route:
+        db.close()
+        return jsonify({'ok': False, 'error': 'unauthorized'}), 403
+    route_id = stop['route_id']
+    db.execute("DELETE FROM stops WHERE id=?", (stop_id,))
+    remaining = db.execute("SELECT COUNT(*) FROM stops WHERE route_id=?", (route_id,)).fetchone()[0]
+    if remaining == 0:
+        db.execute("DELETE FROM routes WHERE id=?", (route_id,))
+        db.execute(
+            "DELETE FROM route_manual_log WHERE driver_id=? AND route_id=?",
+            (session['driver_id'], route_id),
+        )
+    db.commit()
+    db.close()
+    return jsonify({'ok': True, 'route_id': route_id, 'remaining': remaining, 'route_deleted': remaining == 0})
 
 
 @app.route('/api/mobile/v1/stops/<int:stop_id>/pin', methods=['POST'])
@@ -4322,6 +4580,518 @@ def mobile_v1_stop_pin(stop_id):
     return jsonify({'ok': True, 'lat': lat, 'lng': lng})
 
 
+# ─── MOBILE API EXTENSIONS (web parity) ───────────────────────
+
+def _mobile_auth():
+    if 'driver_id' not in session:
+        return jsonify({'ok': False, 'error': 'not logged in'}), 401
+    return None
+
+
+@app.route('/api/mobile/v1/scan/label-memory', methods=['GET'])
+def mobile_v1_scan_label_memory():
+    if err := _mobile_auth():
+        return err
+    return scan_label_memory()
+
+
+@app.route('/api/mobile/v1/scan/validate-addresses', methods=['POST'])
+def mobile_v1_scan_validate_addresses():
+    if err := _mobile_auth():
+        return err
+    return scan_validate_addresses()
+
+
+@app.route('/api/mobile/v1/scan/item/<int:item_id>', methods=['PATCH'])
+def mobile_v1_scan_update_item(item_id):
+    if err := _mobile_auth():
+        return err
+    return scan_update_item(item_id)
+
+
+@app.route('/api/mobile/v1/scan/item/<int:item_id>/unit', methods=['POST'])
+def mobile_v1_scan_set_unit(item_id):
+    if err := _mobile_auth():
+        return err
+    return scan_set_unit(item_id)
+
+
+@app.route('/api/mobile/v1/scan/infer-address', methods=['POST'])
+def mobile_v1_scan_infer_address():
+    if err := _mobile_auth():
+        return err
+    return scan_infer_address()
+
+
+@app.route('/api/mobile/v1/scan/process', methods=['POST'])
+def mobile_v1_scan_process():
+    if err := _mobile_auth():
+        return err
+    return scan_process()
+
+
+@app.route('/api/mobile/v1/scan/add', methods=['POST'])
+def mobile_v1_scan_add():
+    if err := _mobile_auth():
+        return err
+    return scan_add()
+
+
+@app.route('/api/mobile/v1/scan/remove/<int:item_id>', methods=['POST'])
+def mobile_v1_scan_remove(item_id):
+    if err := _mobile_auth():
+        return err
+    return scan_remove(item_id)
+
+
+@app.route('/api/mobile/v1/scan/quick-navigate', methods=['POST'])
+def mobile_v1_scan_quick_navigate():
+    if err := _mobile_auth():
+        return err
+    return scan_quick_navigate()
+
+
+@app.route('/api/mobile/v1/vehicle-setup', methods=['GET', 'POST'])
+def mobile_v1_vehicle_setup():
+    if err := _mobile_auth():
+        return err
+    if request.method == 'GET':
+        return vehicle_setup_get()
+    return vehicle_setup()
+
+
+@app.route('/api/mobile/v1/routes/<int:route_id>/optimize', methods=['POST'])
+def mobile_v1_route_optimize(route_id):
+    if err := _mobile_auth():
+        return err
+    return optimize_route(route_id)
+
+
+@app.route('/api/mobile/v1/routes/<int:route_id>/eta', methods=['GET'])
+def mobile_v1_route_eta(route_id):
+    if err := _mobile_auth():
+        return err
+    return route_eta(route_id)
+
+
+@app.route('/api/mobile/v1/routes/<int:route_id>/add-stop', methods=['POST'])
+def mobile_v1_route_add_stop(route_id):
+    if err := _mobile_auth():
+        return err
+    return route_add_stop(route_id)
+
+
+@app.route('/api/mobile/v1/routes/manual', methods=['POST'])
+def mobile_v1_route_manual():
+    """Create route from JSON stop list (manual entry)."""
+    if err := _mobile_auth():
+        return err
+    data = request.get_json(silent=True) or {}
+    stops_in = data.get('stops') or []
+    route_name = (data.get('route_name') or f"Route {_now_local().strftime('%Y-%m-%d')}").strip()
+    if not stops_in:
+        return jsonify({'ok': False, 'error': 'At least one stop required'}), 400
+    db = get_db()
+    today = _now_local().strftime('%Y-%m-%d')
+    if USE_PG:
+        route_id = db.execute(
+            "INSERT INTO routes (driver_id, driver_name, name, date) VALUES (%s,%s,%s,%s) RETURNING id",
+            (session['driver_id'], session['driver_name'], route_name, today)
+        ).fetchone()['id']
+    else:
+        db.execute(
+            "INSERT INTO routes (driver_id, driver_name, name, date) VALUES (?,?,?,?)",
+            (session['driver_id'], session['driver_name'], route_name, today)
+        )
+        db.commit()
+        route_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    db.commit()
+    created = 0
+    for i, s in enumerate(stops_in):
+        addr = (s.get('address') or '').strip()
+        if not addr:
+            continue
+        name = (s.get('name') or '').strip()
+        phone = format_phone((s.get('phone') or '').strip()) if (s.get('phone') or '').strip() else ''
+        unit = (s.get('unit') or '').strip()
+        token = secrets.token_urlsafe(12)
+        street_m = addr.split(',')[0].strip()
+        resident_m = db.execute(
+            "SELECT * FROM residents WHERE LOWER(address) LIKE LOWER(?)", (f'%{street_m}%',)
+        ).fetchone()
+        drop_spot = resident_m['drop_spot'] if resident_m else ''
+        notes = resident_m['door_notes'] if resident_m else ''
+        if not phone and resident_m:
+            phone = resident_m['phone'] or ''
+        correction = db.execute(
+            "SELECT lat, lng FROM pin_corrections WHERE address=?", (addr,)
+        ).fetchone()
+        lat = correction['lat'] if correction else None
+        lng = correction['lng'] if correction else None
+        try:
+            slat = s.get('lat')
+            slng = s.get('lng')
+            if slat is not None and slng is not None:
+                lat, lng = float(slat), float(slng)
+        except (TypeError, ValueError):
+            pass
+        if not lat or not lng:
+            try:
+                coords = geocode_address(addr)
+                if coords:
+                    lat, lng = coords
+            except Exception as e:
+                log.warning(f'manual route geocode failed for {addr}: {e}')
+        db.execute(
+            """INSERT INTO stops (route_id, stop_number, address, unit, customer_name, phone,
+               drop_spot, notes, token, dest_lat, dest_lng) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (route_id, i + 1, addr, unit, name, phone, drop_spot, notes, token, lat, lng)
+        )
+        created += 1
+    db.commit()
+    db.close()
+    return jsonify({'ok': True, 'route_id': route_id, 'stops': created})
+
+
+@app.route('/api/mobile/v1/stops/<int:stop_id>/edit', methods=['POST'])
+def mobile_v1_stop_edit(stop_id):
+    if err := _mobile_auth():
+        return err
+    data = request.get_json(silent=True) or {}
+    db = get_db()
+    stop = db.execute("SELECT * FROM stops WHERE id=?", (stop_id,)).fetchone()
+    if not stop:
+        db.close()
+        return jsonify({'ok': False, 'error': 'Stop not found'}), 404
+    route = db.execute("SELECT * FROM routes WHERE id=?", (stop['route_id'],)).fetchone()
+    if not route or route['driver_id'] != session['driver_id']:
+        db.close()
+        return jsonify({'ok': False, 'error': 'Unauthorized'}), 403
+    address = (data.get('address') or stop['address'] or '').strip()
+    unit = (data.get('unit') or stop['unit'] or '').strip()
+    name = (data.get('name') or stop['customer_name'] or '').strip()
+    phone_raw = (data.get('phone') or stop['phone'] or '').strip()
+    phone = format_phone(phone_raw) if phone_raw else ''
+    notes = (data.get('notes') or stop['notes'] or '').strip()
+    drop_spot = (data.get('drop_spot') or stop['drop_spot'] or '').strip()
+    lat, lng = stop['dest_lat'], stop['dest_lng']
+    if address != (stop['address'] or ''):
+        coords = geocode_address(address)
+        if coords:
+            lat, lng = coords
+    if data.get('pin_lat') is not None and data.get('pin_lng') is not None:
+        try:
+            lat, lng = float(data['pin_lat']), float(data['pin_lng'])
+            db.execute(
+                '''INSERT INTO pin_corrections (address, lat, lng, corrected_by, corrected_at)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(address) DO UPDATE SET lat=excluded.lat, lng=excluded.lng,
+                   corrected_by=excluded.corrected_by, corrected_at=excluded.corrected_at''',
+                (address, lat, lng, session.get('driver_name', 'driver'), _now_local().isoformat())
+            )
+            upsert_address_intel(address, lat, lng, confidence='verified')
+        except (ValueError, TypeError):
+            pass
+    db.execute(
+        """UPDATE stops SET address=?, unit=?, customer_name=?, phone=?, notes=?, drop_spot=?,
+           dest_lat=?, dest_lng=?, status='pending', approach_sms_sent=0 WHERE id=?""",
+        (address, unit, name, phone, notes, drop_spot, lat, lng, stop_id)
+    )
+    if phone or drop_spot or notes:
+        street = address.split(',')[0].strip()
+        existing_res = db.execute(
+            "SELECT id FROM residents WHERE LOWER(address) LIKE LOWER(?)", (f'%{street}%',)
+        ).fetchone()
+        if existing_res:
+            db.execute(
+                """UPDATE residents SET customer_name=?, phone=COALESCE(NULLIF(?,''),phone),
+                   drop_spot=COALESCE(NULLIF(?,''),drop_spot), door_notes=COALESCE(NULLIF(?,''),door_notes)
+                   WHERE id=?""",
+                (name or None, phone or None, drop_spot or None, notes or None, existing_res['id'])
+            )
+        elif phone and address:
+            db.execute(
+                "INSERT OR IGNORE INTO residents (address, unit, phone, customer_name, drop_spot, door_notes) VALUES (?,?,?,?,?,?)",
+                (address, unit, phone, name, drop_spot, notes)
+            )
+    db.commit()
+    db.close()
+    return jsonify({'ok': True})
+
+
+@app.route('/api/mobile/v1/live/start', methods=['POST'])
+def mobile_v1_live_start():
+    if err := _mobile_auth():
+        return err
+    return live_start()
+
+
+@app.route('/api/mobile/v1/live/<token>/location', methods=['POST'])
+def mobile_v1_live_location(token):
+    return live_update_location(token)
+
+
+@app.route('/api/mobile/v1/live/<token>/status', methods=['GET'])
+def mobile_v1_live_status(token):
+    return live_session_status(token)
+
+
+@app.route('/api/mobile/v1/live/<token>/end', methods=['POST'])
+def mobile_v1_live_end(token):
+    if err := _mobile_auth():
+        return err
+    return live_end(token)
+
+
+@app.route('/api/mobile/v1/live/<token>/failed', methods=['POST'])
+def mobile_v1_live_failed(token):
+    if err := _mobile_auth():
+        return err
+    return live_fail(token)
+
+
+@app.route('/api/mobile/v1/history', methods=['POST'])
+def mobile_v1_delivery_history():
+    if err := _mobile_auth():
+        return err
+    data = request.get_json(silent=True) or {}
+    query = (data.get('query') or data.get('address') or '').strip()
+    if not query:
+        return jsonify({'ok': True, 'results': []})
+    street = query.split(',')[0].strip()
+    db = get_db()
+    rows = db.execute(
+        """SELECT s.*, r.name as route_name, r.date as route_date,
+                  res.drop_spot as res_drop_spot, res.door_notes as res_door_notes, res.phone as res_phone
+           FROM stops s
+           LEFT JOIN routes r ON s.route_id = r.id
+           LEFT JOIN residents res ON s.address LIKE '%' || res.address || '%'
+                                  OR res.address LIKE '%' || s.address || '%'
+           WHERE r.driver_id=? AND (LOWER(s.address) LIKE LOWER(?) OR LOWER(s.customer_name) LIKE LOWER(?))
+           ORDER BY s.created_at DESC LIMIT 50""",
+        (session['driver_id'], f'%{street}%', f'%{query}%')
+    ).fetchall()
+    db.close()
+    return jsonify({'ok': True, 'results': [_json_row(r) for r in rows], 'query': query})
+
+
+@app.route('/api/mobile/v1/route-log/manual', methods=['POST'])
+def mobile_v1_route_log_manual():
+    if err := _mobile_auth():
+        return err
+    data = request.get_json(silent=True) or {}
+    date_val = (data.get('date') or '').strip()
+    packages = data.get('packages', 0)
+    notes = (data.get('notes') or '').strip()
+    try:
+        packages = int(packages)
+    except (TypeError, ValueError):
+        return jsonify({'ok': False, 'error': 'Invalid package count'}), 400
+    if not date_val or packages < 0:
+        return jsonify({'ok': False, 'error': 'Date and packages required'}), 400
+    db = get_db()
+    db.execute(
+        "INSERT INTO route_manual_log (driver_id, date, packages, notes) VALUES (?,?,?,?)",
+        (session['driver_id'], date_val, packages, notes)
+    )
+    db.commit()
+    db.close()
+    return jsonify({'ok': True})
+
+
+@app.route('/api/mobile/v1/route-log/manual/<int:entry_id>', methods=['DELETE'])
+def mobile_v1_route_log_manual_delete(entry_id):
+    if err := _mobile_auth():
+        return err
+    db = get_db()
+    db.execute("DELETE FROM route_manual_log WHERE id=? AND driver_id=?",
+               (entry_id, session['driver_id']))
+    db.commit()
+    db.close()
+    return jsonify({'ok': True})
+
+
+@app.route('/api/mobile/v1/route-log/clear', methods=['POST'])
+def mobile_v1_route_log_clear():
+    """Reset entire pay log — all routes, stops, manual entries for this driver."""
+    if err := _mobile_auth():
+        return err
+    driver_id = session['driver_id']
+    db = get_db()
+    db.execute(
+        "DELETE FROM stops WHERE route_id IN (SELECT id FROM routes WHERE driver_id=?)",
+        (driver_id,),
+    )
+    db.execute("DELETE FROM routes WHERE driver_id=?", (driver_id,))
+    db.execute("DELETE FROM route_manual_log WHERE driver_id=?", (driver_id,))
+    db.commit()
+    db.close()
+    return jsonify({'ok': True})
+
+
+@app.route('/api/mobile/v1/route-log/day', methods=['DELETE'])
+def mobile_v1_route_log_day_delete():
+    """Remove one day from pay log."""
+    if err := _mobile_auth():
+        return err
+    data = request.get_json(silent=True) or {}
+    date_val = (data.get('date') or request.args.get('date') or '').strip()
+    if not date_val:
+        return jsonify({'ok': False, 'error': 'date required'}), 400
+    driver_id = session['driver_id']
+    db = get_db()
+    db.execute(
+        "DELETE FROM stops WHERE route_id IN (SELECT id FROM routes WHERE driver_id=? AND date=?)",
+        (driver_id, date_val),
+    )
+    db.execute("DELETE FROM routes WHERE driver_id=? AND date=?", (driver_id, date_val))
+    db.execute("DELETE FROM route_manual_log WHERE driver_id=? AND date=?", (driver_id, date_val))
+    db.commit()
+    db.close()
+    return jsonify({'ok': True})
+
+
+@app.route('/api/mobile/v1/day-tracker/gas', methods=['POST'])
+def mobile_v1_day_tracker_gas():
+    """Log gas spend for a work day."""
+    if err := _mobile_auth():
+        return err
+    data = request.get_json(silent=True) or {}
+    date_val = (data.get('date') or _today_local().strftime('%Y-%m-%d')).strip()
+    try:
+        amount = float(data.get('gas_spent', 0))
+    except (TypeError, ValueError):
+        return jsonify({'ok': False, 'error': 'Invalid gas amount'}), 400
+    if amount < 0 or amount > 9999:
+        return jsonify({'ok': False, 'error': 'Gas amount out of range'}), 400
+    db = get_db()
+    _set_driver_day_gas(db, session['driver_id'], date_val, amount)
+    db.commit()
+    snap = _driver_today_earnings(db, session['driver_id'])
+    db.close()
+    return jsonify({'ok': True, **snap})
+
+
+@app.route('/api/mobile/v1/account', methods=['GET', 'POST'])
+def mobile_v1_account():
+    if err := _mobile_auth():
+        return err
+    db = get_db()
+    driver = db.execute("SELECT * FROM drivers WHERE id=?", (session['driver_id'],)).fetchone()
+    if not driver:
+        db.close()
+        return jsonify({'ok': False, 'error': 'Driver not found'}), 404
+    if request.method == 'GET':
+        onboarded = db.execute(
+            "SELECT completed_at FROM driver_onboarding WHERE driver_id=?",
+            (session['driver_id'],)
+        ).fetchone()
+        db.close()
+        return jsonify({
+            'ok': True,
+            'name': driver['name'],
+            'phone': driver['phone'] or '',
+            'pay_rate': float(driver['pay_rate']) if driver['pay_rate'] else 1.50,
+            'vehicle_type': _ss_val(driver, 'vehicle_type', 'suv_midsize'),
+            'walkthrough_done': onboarded is not None,
+        })
+    data = request.get_json(silent=True) or {}
+    name = (data.get('name') or driver['name'] or '').strip()
+    phone = (data.get('phone') or driver['phone'] or '').strip()
+    pay_rate_str = data.get('pay_rate')
+    new_pay_rate = None
+    if pay_rate_str is not None:
+        try:
+            new_pay_rate = float(pay_rate_str)
+            if new_pay_rate <= 0 or new_pay_rate > 99:
+                new_pay_rate = None
+        except (TypeError, ValueError):
+            new_pay_rate = None
+    if new_pay_rate is not None:
+        db.execute("UPDATE drivers SET name=?, phone=?, pay_rate=? WHERE id=?",
+                   (name, format_phone(phone), new_pay_rate, session['driver_id']))
+    else:
+        db.execute("UPDATE drivers SET name=?, phone=? WHERE id=?",
+                   (name, format_phone(phone), session['driver_id']))
+    if data.get('vehicle_type'):
+        vt = (data.get('vehicle_type') or '').strip()
+        if vt in VEHICLE_ZONES:
+            db.execute("UPDATE drivers SET vehicle_type=? WHERE id=?", (vt, session['driver_id']))
+    db.commit()
+    db.close()
+    session['driver_name'] = name
+    return jsonify({'ok': True, 'name': name})
+
+
+@app.route('/api/mobile/v1/walkthrough/complete', methods=['POST'])
+def mobile_v1_walkthrough_complete():
+    if err := _mobile_auth():
+        return err
+    db = get_db()
+    try:
+        db.execute(
+            "INSERT INTO driver_onboarding (driver_id) VALUES (?)",
+            (session['driver_id'],)
+        )
+        db.commit()
+    except Exception:
+        pass
+    db.close()
+    return jsonify({'ok': True})
+
+
+@app.route('/api/mobile/v1/earnings')
+def mobile_v1_earnings():
+    if err := _mobile_auth():
+        return err
+    return api_driver_earnings()
+
+
+@app.route('/api/mobile/v1/version')
+def mobile_v1_version():
+    return app_version()
+
+
+@app.route('/api/mobile/v1/address-suggest')
+def mobile_v1_address_suggest():
+    if err := _mobile_auth():
+        return err
+    return address_suggest()
+
+
+@app.route('/api/mobile/v1/proximity-test', methods=['POST'])
+def mobile_v1_proximity_test():
+    if err := _mobile_auth():
+        return err
+    return test_proximity_alert()
+
+
+@app.route('/api/mobile/v1/stops/<int:stop_id>/track-message', methods=['GET'])
+def mobile_v1_stop_track_message(stop_id):
+    """Speed X copy-paste tracking message for a stop."""
+    if err := _mobile_auth():
+        return err
+    db = get_db()
+    stop = db.execute("SELECT * FROM stops WHERE id=?", (stop_id,)).fetchone()
+    if not stop:
+        db.close()
+        return jsonify({'ok': False, 'error': 'Stop not found'}), 404
+    route = db.execute("SELECT * FROM routes WHERE id=?", (stop['route_id'],)).fetchone()
+    if not route or route['driver_id'] != session['driver_id']:
+        db.close()
+        return jsonify({'ok': False, 'error': 'Unauthorized'}), 403
+    db.close()
+    track_url = f"{get_base_url()}/track/{stop['token']}"
+    name_part = f"Hi {stop['customer_name'].split()[0]}! " if stop['customer_name'] else "Hi! "
+    customer_msg = f"{name_part}Your driver is on the way! Track live \U0001F4CD {track_url}"
+    return jsonify({
+        'ok': True,
+        'track_url': track_url,
+        'speed_x_message': customer_msg,
+        'token': stop['token'],
+    })
+
+
 # ─── LIVE EARNINGS API ─────────────────────────────────
 @app.route('/api/driver/earnings')
 def api_driver_earnings():
@@ -4329,37 +5099,32 @@ def api_driver_earnings():
     if 'driver_id' not in session:
         return jsonify({'error': 'unauthorized'}), 401
     db       = get_db()
-    driver   = db.execute("SELECT pay_rate FROM drivers WHERE id=?", (session['driver_id'],)).fetchone()
-    pay_rate = float(driver['pay_rate']) if driver and driver['pay_rate'] else 1.50
-    today    = _today_local().strftime('%Y-%m-%d')
-    today_delivered = db.execute(
-        """SELECT COUNT(*) FROM stops s JOIN routes r ON s.route_id=r.id
-           WHERE r.driver_id=? AND r.date=? AND s.status='delivered'""",
-        (session['driver_id'], today)
-    ).fetchone()[0]
-    today_total = db.execute(
-        """SELECT COUNT(*) FROM stops s JOIN routes r ON s.route_id=r.id
-           WHERE r.driver_id=? AND r.date=?""",
-        (session['driver_id'], today)
-    ).fetchone()[0]
+    driver_id = session['driver_id']
+    snap = _driver_today_earnings(db, driver_id)
+    pay_rate = snap['pay_rate']
+    today    = snap['date']
+    today_delivered = snap['today_delivered']
+    today_total = snap['today_total']
     week_start = (_today_local() - timedelta(days=_today_local().weekday())).strftime('%Y-%m-%d')
     week_delivered = db.execute(
         """SELECT COUNT(*) FROM stops s JOIN routes r ON s.route_id=r.id
            WHERE r.driver_id=? AND r.date>=? AND s.status='delivered'""",
-        (session['driver_id'], week_start)
+        (driver_id, week_start)
     ).fetchone()[0]
     month_start = _today_local().replace(day=1).strftime('%Y-%m-%d')
     month_delivered = db.execute(
         """SELECT COUNT(*) FROM stops s JOIN routes r ON s.route_id=r.id
            WHERE r.driver_id=? AND r.date>=? AND s.status='delivered'""",
-        (session['driver_id'], month_start)
+        (driver_id, month_start)
     ).fetchone()[0]
     db.close()
     return jsonify({
         'pay_rate':        pay_rate,
         'today_delivered': today_delivered,
         'today_total':     today_total,
-        'today_earnings':  round(today_delivered  * pay_rate, 2),
+        'today_earnings':  snap['today_earnings'],
+        'gas_spent':       snap['gas_spent'],
+        'take_home':       snap['take_home'],
         'week_earnings':   round(week_delivered   * pay_rate, 2),
         'month_earnings':  round(month_delivered  * pay_rate, 2),
     })
@@ -4809,14 +5574,22 @@ def scan_add():
             })
     db0.close()
 
-    # Geocode immediately so live-sort works right away
+    # Geocode immediately so live-sort works right away (client may pass rooftop coords)
     lat, lng = None, None
     try:
-        coords = geocode_address(address)
-        if coords:
-            lat, lng = coords
-    except Exception as e:
-        log.warning(f'Live geocode failed for {address}: {e}')
+        slat = data.get('lat')
+        slng = data.get('lng')
+        if slat is not None and slng is not None:
+            lat, lng = float(slat), float(slng)
+    except (TypeError, ValueError):
+        pass
+    if not lat or not lng:
+        try:
+            coords = geocode_address(address)
+            if coords:
+                lat, lng = coords
+        except Exception as e:
+            log.warning(f'Live geocode failed for {address}: {e}')
 
     db = get_db()
     ss_id = _get_or_create_scan_session(db, session['driver_id'])
@@ -4983,39 +5756,66 @@ def scan_live_sort():
         )
         naive_miles = round(naive_dist_m * 0.000621371, 2)
 
-    # ─ OPTIMIZED PHASE: zones locked — run route optimization once ─
-    start = end = None
-    if ss_full and _ss_val(ss_full, 'route_start_lat') is not None:
-        start = {'lat': float(ss_full['route_start_lat']), 'lng': float(ss_full['route_start_lng'])}
-    if ss_full and _ss_val(ss_full, 'route_end_lat') is not None:
-        end = {'lat': float(ss_full['route_end_lat']), 'lng': float(ss_full['route_end_lng'])}
-    sorted_pkgs, total_dist_m, total_dur_s = build_optimized_route(geocoded, start=start, end=end)
+    has_persisted_order = zones_locked and any(
+        (_ss_val(item, 'delivery_order', 0) or 0) > 0 for item in items
+    )
 
-    # Add ungeocoded at end
-    seen_ids = {p['id'] for p in sorted_pkgs}
-    for p in ungeoced:
-        if p['id'] not in seen_ids:
-            p.update({'zone_letter':'?','zone_num':0,'zone_label_full':'?',
-                      'zone_color':'#6b7280','zone_emoji':'⚪',
-                      'bag_num':0,'bag_label':'?',
-                      'delivery_order': len(sorted_pkgs)+1,
-                      'load_position': 0})
-            sorted_pkgs.append(p)
+    if has_persisted_order:
+        # Fast path: read persisted zone/order — skip OSRM on every refresh
+        sorted_pkgs = reconstruct_scan_pkg_meta(items, vehicle_type)
+        sorted_pkgs.sort(key=lambda p: (p.get('delivery_order') or 9999, p.get('id', 0)))
+        if stored_cents:
+            sorted_pkgs = assign_zones_from_centroids(sorted_pkgs, stored_cents)
+            sorted_pkgs = assign_vehicle_zones(sorted_pkgs, vehicle_type)
+        _attach_scan_orders(sorted_pkgs, order_map)
+
+        geocoded_sorted = [p for p in sorted_pkgs if p.get('lat') and p.get('lng')]
+        if len(geocoded_sorted) >= 2:
+            road_dist_m = sum(
+                geodesic(
+                    (geocoded_sorted[i]['lat'], geocoded_sorted[i]['lng']),
+                    (geocoded_sorted[i + 1]['lat'], geocoded_sorted[i + 1]['lng']),
+                ).meters
+                for i in range(len(geocoded_sorted) - 1)
+            )
+            if road_dist_m > 0:
+                route_miles = round(road_dist_m * 0.000621371 * 1.28, 2)
+                route_drive_mins = round(route_miles / 28 * 60, 1)
+                savings_miles = round(naive_miles - route_miles, 2) if naive_miles else None
+    else:
+        # ─ OPTIMIZED PHASE: run route optimization (first lock or legacy session) ─
+        start = end = None
+        if ss_full and _ss_val(ss_full, 'route_start_lat') is not None:
+            start = {'lat': float(ss_full['route_start_lat']), 'lng': float(ss_full['route_start_lng'])}
+        if ss_full and _ss_val(ss_full, 'route_end_lat') is not None:
+            end = {'lat': float(ss_full['route_end_lat']), 'lng': float(ss_full['route_end_lng'])}
+        sorted_pkgs, total_dist_m, total_dur_s = build_optimized_route(geocoded, start=start, end=end)
+
+        # Add ungeocoded at end
+        seen_ids = {p['id'] for p in sorted_pkgs}
+        for p in ungeoced:
+            if p['id'] not in seen_ids:
+                p.update({'zone_letter':'?','zone_num':0,'zone_label_full':'?',
+                          'zone_color':'#6b7280','zone_emoji':'⚪',
+                          'bag_num':0,'bag_label':'?',
+                          'delivery_order': len(sorted_pkgs)+1,
+                          'load_position': 0})
+                sorted_pkgs.append(p)
+
+        if total_dist_m > 0:
+            route_miles      = round(total_dist_m * 0.000621371, 2)
+            route_drive_mins = round(total_dur_s / 60, 1)
+            savings_miles    = round(naive_miles - route_miles, 2) if naive_miles else None
+
+        if zones_locked and stored_cents:
+            # Re-snap to locked centroids to keep zone letters stable
+            sorted_pkgs = assign_zones_from_centroids(sorted_pkgs, stored_cents)
+
+        # ─ Assign vehicle cargo zones based on delivery zone letter ─
+        sorted_pkgs = assign_vehicle_zones(sorted_pkgs, vehicle_type)
+        _attach_scan_orders(sorted_pkgs, order_map)
 
     total = len(sorted_pkgs)
-
-    if total_dist_m > 0:
-        route_miles      = round(total_dist_m * 0.000621371, 2)
-        route_drive_mins = round(total_dur_s / 60, 1)
-        savings_miles    = round(naive_miles - route_miles, 2) if naive_miles else None
-
-    if zones_locked and stored_cents:
-        # Re-snap to locked centroids to keep zone letters stable
-        sorted_pkgs = assign_zones_from_centroids(sorted_pkgs, stored_cents)
-
-    # ─ Assign vehicle cargo zones based on delivery zone letter ─
-    sorted_pkgs = assign_vehicle_zones(sorted_pkgs, vehicle_type)
-    _attach_scan_orders(sorted_pkgs, order_map)
 
     # ─ Build zone summary ─
     zone_summary = {}
@@ -5899,6 +6699,30 @@ def scan_quick_navigate():
         'geocoded': bool(lat and lng),
     })
 
+def _auto_lock_scan_session_simple(db, session_id, items, vehicle_type='suv_midsize'):
+    """Assign scan order without full optimize — used when driver starts route without optimizing."""
+    rows = [dict(i) for i in items]
+    for i, item in enumerate(rows):
+        db.execute(
+            """UPDATE scan_items SET delivery_order=?, zone_letter='A', zone_num=1,
+               zone_label_full='Zone A', zone_color='#00ff88', zone_emoji='🟢',
+               bag_num=1, bag_label='Bag 1', load_position=1 WHERE id=?""",
+            (i + 1, item['id']),
+        )
+    db.commit()
+    refreshed = db.execute(
+        "SELECT * FROM scan_items WHERE session_id=? ORDER BY id ASC", (session_id,)
+    ).fetchall()
+    pkg_meta = reconstruct_scan_pkg_meta(refreshed, vehicle_type)
+    cents = compute_centroids(list(pkg_meta.values()))
+    now_iso = _now_local().isoformat()
+    db.execute(
+        """UPDATE scan_sessions SET zones_locked=1, zone_centroids=?, locked_at=?,
+           phase='optimized' WHERE id=?""",
+        (json.dumps(cents or []), now_iso, session_id),
+    )
+    db.commit()
+
 @app.route('/driver/scan/build-route', methods=['POST'])
 def scan_build_route():
     """Create route from locked scan session using optimized stop order."""
@@ -5914,9 +6738,6 @@ def scan_build_route():
         db.close()
         return jsonify({'ok': False, 'error': 'No scan session found'})
     ss = _unlock_stale_scan_session(db, ss)
-    if not _ss_val(ss, 'zones_locked', 0):
-        db.close()
-        return jsonify({'ok': False, 'error': 'Tap OPTIMIZE to lock zones before building route'})
     ss_id = ss['id']
     items = db.execute(
         """SELECT * FROM scan_items WHERE session_id=?
@@ -5931,6 +6752,19 @@ def scan_build_route():
         "SELECT vehicle_type FROM drivers WHERE id=?", (session['driver_id'],)
     ).fetchone()
     vehicle_type = _ss_val(driver_row, 'vehicle_type', 'suv_midsize') or 'suv_midsize'
+
+    if not _ss_val(ss, 'zones_locked', 0):
+        _auto_lock_scan_session_simple(db, ss_id, items, vehicle_type)
+        ss = db.execute("SELECT * FROM scan_sessions WHERE id=?", (ss_id,)).fetchone()
+    items = db.execute(
+        """SELECT * FROM scan_items WHERE session_id=?
+           ORDER BY COALESCE(delivery_order, 9999), id ASC""",
+        (ss_id,)
+    ).fetchall()
+    if not items:
+        db.close()
+        return jsonify({'ok': False, 'error': 'No packages scanned yet'})
+
     pkg_meta = {p['id']: p for p in reconstruct_scan_pkg_meta(items, vehicle_type)}
     centroids = compute_centroids(list(pkg_meta.values()))
     stored_cents = json.loads(ss['zone_centroids']) if _ss_val(ss, 'zone_centroids') else centroids
@@ -7134,6 +7968,14 @@ def address_suggest():
     q = request.args.get('q', '').strip()
     if len(q) < 2:
         return jsonify([])
+    proximity = None
+    try:
+        lat = request.args.get('lat')
+        lng = request.args.get('lng')
+        if lat is not None and lng is not None:
+            proximity = f'{float(lng)},{float(lat)}'
+    except (TypeError, ValueError):
+        proximity = None
     db = get_db()
     rows = db.execute(
         """SELECT address, unit, customer_name FROM stops
@@ -7145,12 +7987,32 @@ def address_suggest():
     out = [{'address': r['address'], 'unit': r['unit'] or '', 'name': r['customer_name'] or '',
             'lat': None, 'lng': None, 'source': 'history'} for r in rows]
     seen = {(_normalize_addr_key(o['address'])) for o in out}
-    for m in _mapbox_autocomplete(q, limit=6):
+    for m in _mapbox_autocomplete(q, limit=6, proximity=proximity):
         if _normalize_addr_key(m['address']) in seen:
             continue
         seen.add(_normalize_addr_key(m['address']))
         out.append(m)
     return jsonify(out[:10])
+
+@app.route('/api/geocode-verify')
+def geocode_verify():
+    """Verify an address resolves on the map (Mapbox/Census). Used before geofence test routes."""
+    q = (request.args.get('q') or '').strip()
+    if len(q) < 5:
+        return jsonify({'ok': False, 'error': 'Enter a full street address with city, state ZIP'})
+    lat, lng, conf = geocode_address_full(q)
+    if lat and lng:
+        return jsonify({'ok': True, 'lat': lat, 'lng': lng, 'address': q, 'confidence': conf})
+    return jsonify({
+        'ok': False,
+        'error': 'Address not found on map — tap a suggestion from the list or add city, state ZIP',
+    })
+
+@app.route('/api/mobile/v1/geocode-verify')
+def mobile_v1_geocode_verify():
+    if err := _mobile_auth():
+        return err
+    return geocode_verify()
 
 @app.route('/api/name-suggest')
 def name_suggest():
@@ -9049,41 +9911,51 @@ def route_log():
         WHERE r.driver_id=? AND r.date >= ?
     """, (driver_id, week_start)).fetchone()
 
-    db.close()
-
     week_delivered = week_row['week_delivered'] or 0
     week_total     = week_row['week_total']     or 0
     week_earnings  = round(week_delivered * pay_rate, 2)
+    today_str = today.strftime('%Y-%m-%d')
+    today_snap = _driver_today_earnings(db, driver_id, pay_rate)
 
     # Build combined day list with earnings
     log_days = []
     for d in days:
         delivered = d['delivered'] or 0
+        earnings = round(delivered * pay_rate, 2)
+        gas = _driver_day_gas(db, driver_id, d['date'])
         log_days.append({
             'date':       d['date'],
             'total':      d['total'] or 0,
             'delivered':  delivered,
             'failed':     d['failed'] or 0,
             'pending':    d['pending'] or 0,
-            'earnings':   round(delivered * pay_rate, 2),
+            'earnings':   earnings,
+            'gas_spent':  gas,
+            'take_home':  round(earnings - gas, 2),
             'route_name': d['route_name'] or '',
             'source':     'scan'
         })
 
     for m in manual:
+        earnings = round((m['packages'] or 0) * pay_rate, 2)
+        gas = _driver_day_gas(db, driver_id, m['date'])
         log_days.append({
             'date':      m['date'],
             'total':     m['packages'] or 0,
             'delivered': m['packages'] or 0,
             'failed':    0,
             'pending':   0,
-            'earnings':  round((m['packages'] or 0) * pay_rate, 2),
+            'earnings':  earnings,
+            'gas_spent': gas,
+            'take_home': round(earnings - gas, 2),
             'route_name': m['notes'] or 'Manual entry',
             'source':    'manual'
         })
 
     # Sort combined by date desc
     log_days.sort(key=lambda x: x['date'], reverse=True)
+
+    db.close()
 
     return render_template('route_log.html',
                            log_days=log_days,
@@ -9092,7 +9964,27 @@ def route_log():
                            week_total=week_total,
                            week_earnings=week_earnings,
                            week_start=week_start,
-                           today=today.strftime('%Y-%m-%d'))
+                           today=today_str,
+                           today_earnings=today_snap['today_earnings'],
+                           today_gas=today_snap['gas_spent'],
+                           today_take_home=today_snap['take_home'])
+
+
+@app.route('/driver/route-log/gas', methods=['POST'])
+def route_log_gas():
+    """Log gas spend for today (or given date)."""
+    if 'driver_id' not in session:
+        return redirect(url_for('driver_login'))
+    date_val = request.form.get('date', '').strip() or _today_local().strftime('%Y-%m-%d')
+    try:
+        amount = float(request.form.get('gas_spent', '0'))
+    except (TypeError, ValueError):
+        return redirect(url_for('route_log'))
+    db = get_db()
+    _set_driver_day_gas(db, session['driver_id'], date_val, amount)
+    db.commit()
+    db.close()
+    return redirect(url_for('route_log'))
 
 
 @app.route('/driver/route-log/manual', methods=['POST'])
