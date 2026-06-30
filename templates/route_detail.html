@@ -346,6 +346,30 @@
 
 <!-- MAP VIEW -->
 <div id="map-view" style="display:none;">
+  <!-- Re-optimize segment toolbar -->
+  <div id="reoptim-bar" style="padding:10px 14px;background:#0f172a;border-bottom:1px solid #1e293b;">
+    <div id="reoptim-idle" style="display:flex;align-items:center;gap:10px;">
+      <button onclick="enterReoptimMode()" style="flex:1;padding:10px;background:#ffaa0022;color:#ffaa00;border:1px solid #ffaa0044;border-radius:10px;font-size:0.82rem;font-weight:700;">
+        <i class="fas fa-sliders-h me-2"></i>Re-optimize Segment
+      </button>
+    </div>
+    <div id="reoptim-active" style="display:none;">
+      <div style="font-size:0.78rem;color:#9ca3af;margin-bottom:8px;text-align:center;">
+        Tap a stop to set <span id="reoptim-next-label" style="color:#ffaa00;font-weight:700;">Start</span>
+      </div>
+      <div style="display:flex;gap:8px;margin-bottom:8px;">
+        <div style="flex:1;padding:8px 10px;background:#0f2;color:#000;border-radius:8px;font-size:0.75rem;font-weight:700;text-align:center;" id="reoptim-start-box">START: —</div>
+        <div style="flex:1;padding:8px 10px;background:#ff333322;color:#ff6666;border:1px solid #ff333344;border-radius:8px;font-size:0.75rem;font-weight:700;text-align:center;" id="reoptim-end-box">END: —</div>
+      </div>
+      <div style="display:flex;gap:8px;">
+        <button onclick="cancelReoptim()" style="flex:1;padding:10px;background:#1f2937;color:#9ca3af;border:none;border-radius:10px;font-size:0.82rem;font-weight:700;">Cancel</button>
+        <button id="reoptim-save-btn" onclick="saveReoptim()" disabled style="flex:2;padding:10px;background:#3b82f6;color:#fff;border:none;border-radius:10px;font-size:0.82rem;font-weight:700;opacity:0.5;">
+          <i class="fas fa-check me-1"></i>Save New Order
+        </button>
+      </div>
+      <div id="reoptim-status" style="text-align:center;font-size:0.75rem;margin-top:6px;display:none;"></div>
+    </div>
+  </div>
   <div id="route-map"></div>
 </div>
 
@@ -637,7 +661,14 @@ function initRouteMap() {
       el.style.background = pinColor;
       el.textContent = stop.sticker;
       el.title = (stop.zoneEmoji || '') + ' ' + (stop.zoneLabel || '') + ' · ' + stop.address;
-      el.addEventListener('click', () => openSheet(stop));
+      el.addEventListener('click', () => {
+        if (reoptimMode) {
+          reoptimSelectStop(stop, el);
+        } else {
+          openSheet(stop);
+        }
+      });
+      reoptimMarkers[stop.id] = el;
       new mapboxgl.Marker({element: el, anchor:'center'})
         .setLngLat([stop.lng, stop.lat])
         .addTo(routeMap);
@@ -725,6 +756,107 @@ function refreshEta() {
 // Poll every 60 seconds while on this page
 refreshEta();
 setInterval(refreshEta, 60000);
+
+// ── SEGMENT RE-OPTIMIZER ────────────────────────────────────────────
+let reoptimMode = false;
+let reoptimStart = null;  // {id, num, address, marker}
+let reoptimEnd   = null;
+let reoptimMarkers = {};  // stopId -> marker element
+
+function enterReoptimMode() {
+  reoptimMode  = true;
+  reoptimStart = null;
+  reoptimEnd   = null;
+  document.getElementById('reoptim-idle').style.display   = 'none';
+  document.getElementById('reoptim-active').style.display = 'block';
+  document.getElementById('reoptim-status').style.display = 'none';
+  document.getElementById('reoptim-next-label').textContent = 'Start';
+  document.getElementById('reoptim-start-box').textContent = 'START: —';
+  document.getElementById('reoptim-end-box').textContent   = 'END: —';
+  document.getElementById('reoptim-save-btn').disabled     = true;
+  document.getElementById('reoptim-save-btn').style.opacity = '0.5';
+  // Highlight all pins as selectable
+  document.querySelectorAll('.stop-pin').forEach(el => {
+    el.style.outline = '2px dashed #ffaa00';
+    el.style.cursor  = 'pointer';
+  });
+}
+
+function cancelReoptim() {
+  reoptimMode  = false;
+  reoptimStart = null;
+  reoptimEnd   = null;
+  document.getElementById('reoptim-idle').style.display   = 'flex';
+  document.getElementById('reoptim-active').style.display = 'none';
+  // Reset pin styles
+  document.querySelectorAll('.stop-pin').forEach(el => {
+    el.style.outline = '';
+    el.style.cursor  = '';
+  });
+}
+
+function reoptimSelectStop(stop, pinEl) {
+  if (!reoptimMode) return;
+  if (!reoptimStart) {
+    reoptimStart = stop;
+    pinEl.style.outline     = '3px solid #00ff88';
+    pinEl.style.background  = '#00ff88';
+    pinEl.style.color       = '#000';
+    document.getElementById('reoptim-next-label').textContent  = 'End';
+    document.getElementById('reoptim-start-box').textContent   = 'START: #' + stop.num;
+    document.getElementById('reoptim-start-box').style.background = '#00ff8833';
+  } else if (!reoptimEnd && stop.id !== reoptimStart.id) {
+    reoptimEnd = stop;
+    pinEl.style.outline     = '3px solid #ff3333';
+    pinEl.style.background  = '#ff3333';
+    pinEl.style.color       = '#fff';
+    document.getElementById('reoptim-end-box').textContent   = 'END: #' + stop.num;
+    document.getElementById('reoptim-end-box').style.background = '#ff333333';
+    document.getElementById('reoptim-end-box').style.color      = '#ff6666';
+    document.getElementById('reoptim-save-btn').disabled        = false;
+    document.getElementById('reoptim-save-btn').style.opacity   = '1';
+  }
+}
+
+function saveReoptim() {
+  if (!reoptimStart || !reoptimEnd) return;
+  const btn    = document.getElementById('reoptim-save-btn');
+  const status = document.getElementById('reoptim-status');
+  btn.disabled = true;
+  btn.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Optimizing...';
+  status.style.display  = 'block';
+  status.style.color    = '#ffaa00';
+  status.textContent    = 'Re-ordering segment...';
+
+  fetch('/driver/route/{{ route.id }}/optimize', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      start_stop_id: reoptimStart.id,
+      end_stop_id:   reoptimEnd.id
+    })
+  })
+  .then(r => r.json())
+  .then(d => {
+    if (d.ok) {
+      status.style.color  = '#00ff88';
+      status.textContent  = '✓ ' + d.reordered + ' stops reordered';
+      btn.innerHTML = '<i class="fas fa-check me-1"></i>Done';
+      setTimeout(() => location.reload(), 600);
+    } else {
+      status.style.color  = '#ff6666';
+      status.textContent  = 'Error: ' + (d.error || 'unknown');
+      btn.disabled = false;
+      btn.innerHTML = '<i class="fas fa-check me-1"></i>Save New Order';
+    }
+  })
+  .catch(() => {
+    status.style.color  = '#ff6666';
+    status.textContent  = 'Network error — try again';
+    btn.disabled = false;
+    btn.innerHTML = '<i class="fas fa-check me-1"></i>Save New Order';
+  });
+}
 
 // ── Live Earnings ──
 const PAY_RATE     = {{ pay_rate }};

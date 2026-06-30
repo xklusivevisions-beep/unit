@@ -8286,26 +8286,91 @@ def update_location():
 
 @app.route('/driver/route/<int:route_id>/optimize', methods=['POST'])
 def optimize_route(route_id):
-    """Reorder stops using nearest-neighbor from driver's current GPS, or OSRM trip."""
+    """Reorder stops using nearest-neighbor from driver's current GPS, or OSRM trip.
+    Optional: start_stop_id / end_stop_id for segment re-optimization."""
     if 'driver_id' not in session:
         return jsonify({'ok': False, 'error': 'not logged in'}), 401
     db = get_db()
     data = request.get_json() or {}
     driver_lat = data.get('lat')
     driver_lng = data.get('lng')
+    start_stop_id = data.get('start_stop_id')  # segment re-optimize
+    end_stop_id   = data.get('end_stop_id')    # segment re-optimize
 
-    stops = db.execute(
+    all_pending = db.execute(
         """SELECT id, dest_lat, dest_lng, stop_number FROM stops
            WHERE route_id=? AND status='pending' AND dest_lat IS NOT NULL
            ORDER BY stop_number ASC""",
         (route_id,)
     ).fetchall()
 
-    if not stops:
+    if not all_pending:
         db.close()
         return jsonify({'ok': False, 'error': 'No geocoded stops to optimize'})
 
-    # Try OSRM trip optimization
+    # ── Segment re-optimize: only touch stops between start and end (inclusive) ──
+    if start_stop_id and end_stop_id:
+        id_list = [s['id'] for s in all_pending]
+        try:
+            start_idx = id_list.index(int(start_stop_id))
+            end_idx   = id_list.index(int(end_stop_id))
+        except ValueError:
+            db.close()
+            return jsonify({'ok': False, 'error': 'Start or end stop not found in pending stops'})
+        if start_idx > end_idx:
+            start_idx, end_idx = end_idx, start_idx  # auto-swap if reversed
+        segment = list(all_pending[start_idx:end_idx + 1])
+        before  = list(all_pending[:start_idx])
+        after   = list(all_pending[end_idx + 1:])
+
+        # Optimize just the segment
+        seg_start = all_pending[start_idx]
+        seg_end   = all_pending[end_idx]
+        optimized_segment_ids = []
+        try:
+            coords = ';'.join(f"{s['dest_lng']},{s['dest_lat']}" for s in segment)
+            osrm_url = (f"http://router.project-osrm.org/trip/v1/driving/{coords}"
+                        f"?roundtrip=false&source=first&destination=last&overview=false")
+            resp = requests.get(osrm_url, timeout=8)
+            if resp.status_code == 200:
+                trip = resp.json()
+                if trip.get('code') == 'Ok' and trip.get('waypoints'):
+                    order = sorted(trip['waypoints'], key=lambda w: w['waypoint_index'])
+                    optimized_segment_ids = [
+                        segment[w['trips_index'] if 'trips_index' in w else segment.index(
+                            min(segment, key=lambda s: abs(s['dest_lat'] - w['location'][1]) + abs(s['dest_lng'] - w['location'][0]))
+                        )]['id'] for w in order
+                    ]
+        except Exception as e:
+            log.warning(f'OSRM segment optimize failed: {e}')
+
+        # Fallback nearest-neighbor for segment
+        if not optimized_segment_ids:
+            remaining = list(segment)
+            cur_lat = seg_start['dest_lat']
+            cur_lng = seg_start['dest_lng']
+            while remaining:
+                closest = min(remaining, key=lambda s: miles_away(cur_lat, cur_lng, s['dest_lat'], s['dest_lng']))
+                optimized_segment_ids.append(closest['id'])
+                cur_lat, cur_lng = closest['dest_lat'], closest['dest_lng']
+                remaining.remove(closest)
+
+        # Build final ordered list: before + optimized segment + after
+        final_order = ([s['id'] for s in before] +
+                       optimized_segment_ids +
+                       [s['id'] for s in after])
+        delivered_count = db.execute(
+            "SELECT COUNT(*) FROM stops WHERE route_id=? AND status!='pending'", (route_id,)
+        ).fetchone()[0]
+        for i, stop_id in enumerate(final_order):
+            db.execute("UPDATE stops SET stop_number=? WHERE id=?", (delivered_count + i + 1, stop_id))
+        db.commit()
+        db.close()
+        log.info(f'Route {route_id} segment re-optimized: {len(optimized_segment_ids)} stops reordered')
+        return jsonify({'ok': True, 'reordered': len(optimized_segment_ids)})
+
+    # ── Full route optimization (original behavior) ──
+    stops = all_pending
     optimized_ids = []
     try:
         coords = ';'.join(f"{s['dest_lng']},{s['dest_lat']}" for s in stops)
