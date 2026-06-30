@@ -923,12 +923,14 @@
 
   <!-- Actions -->
   <div id="route-endpoints">
-    <h3>🚗 Route start &amp; end</h3>
+    <h3>🚗 Route start &amp; end <span style="font-size:0.72rem;color:#6b7280;font-weight:400;">(tap a map pin to set start/end stop)</span></h3>
     <div class="ep-row">
       <div class="ep-label">START</div>
       <div class="ep-val" id="route-start-label">📍 Detecting your location…</div>
+      <button id="seg-clear-btn" onclick="_clearSegmentSelection()" style="display:none;margin-top:6px;font-size:0.72rem;color:#9ca3af;background:none;border:1px solid #374151;border-radius:6px;padding:3px 8px;cursor:pointer;">✕ Clear selection</button>
     </div>
-    <div class="ep-row">
+    <div id="seg-end-row" style="display:none;" class="ep-row"></div>
+    <div id="ep-default-end" class="ep-row">
       <div class="ep-label">END</div>
       <div class="ep-options">
         <label class="ep-opt"><input type="radio" name="end-mode" value="none" checked> Last delivery (no return)</label>
@@ -997,6 +999,8 @@ let pkgCount = {{ items|length }};
 let liveMap = null;
 let mapMarkers = [];
 let mapPolyline = null;
+let _segStart = null;  // { id, lat, lng, label, markerEl }
+let _segEnd   = null;  // { id, lat, lng, label, markerEl }
 let currentVehicleType = 'suv_midsize';
 let lastScannedZone    = null;
 let lastAddedItemId    = null;
@@ -1354,15 +1358,91 @@ function captureRouteStart() {
   );
 }
 
+// ── MAP PIN TAP-TO-SELECT (start/end stop for optimization) ────────────────
+function _handleSegmentTap(stopData, markerObj) {
+  if (!_segStart) {
+    // Set as START
+    _segStart = { ...stopData, markerObj };
+    _updateSegmentPin(markerObj, '#00ff88', '#000', stopData.label);
+    _updateSegmentUI();
+  } else if (!_segEnd && stopData.id !== _segStart.id) {
+    // Set as END
+    _segEnd = { ...stopData, markerObj };
+    _updateSegmentPin(markerObj, '#ef4444', '#fff', stopData.label);
+    _updateSegmentUI();
+  } else if (stopData.id === _segStart.id || stopData.id === (_segEnd && _segEnd.id)) {
+    // Tapped same pin again — reset
+    _clearSegmentSelection();
+  }
+}
+
+function _updateSegmentPin(markerObj, bg, fg, label) {
+  const el = markerObj.getElement && markerObj.getElement();
+  if (!el) return;
+  const inner = el.querySelector('div');
+  if (!inner) return;
+  inner.style.background  = bg;
+  inner.style.color       = fg;
+  inner.style.border      = '3px solid #fff';
+  inner.style.boxShadow   = '0 0 10px ' + bg;
+  inner.textContent       = label;
+}
+
+function _clearSegmentSelection() {
+  _segStart = null;
+  _segEnd   = null;
+  _updateSegmentUI();
+  // Redraw map to restore original colors
+  setTimeout(refreshLiveSort, 50);
+}
+
+function _updateSegmentUI() {
+  const startBox    = document.getElementById('route-start-label');
+  const endRow      = document.getElementById('seg-end-row');
+  const defaultEnd  = document.getElementById('ep-default-end');
+  const clearBtn    = document.getElementById('seg-clear-btn');
+  if (_segStart) {
+    if (startBox) startBox.innerHTML = `✅ <strong>Start: Stop #${_segStart.label}</strong> <span style="color:#9ca3af;font-size:0.78rem;">— tap another stop to set end</span>`;
+    if (clearBtn) clearBtn.style.display = 'inline-block';
+  } else {
+    if (startBox) startBox.textContent = window._routeStart ? '📍 Your current GPS location' : '📍 Start from first delivery area';
+    if (clearBtn) clearBtn.style.display = 'none';
+  }
+  // Show map-selected end row, hide default end options when stop is tapped
+  if (endRow)     endRow.style.display    = _segStart ? 'block' : 'none';
+  if (defaultEnd) defaultEnd.style.display = _segEnd   ? 'none'  : '';
+  if (_segEnd && endRow) {
+    endRow.innerHTML = `<div class="ep-label">END</div><div class="ep-val" style="color:#ef4444;">✅ <strong>End: Stop #${_segEnd.label}</strong></div>`;
+  } else if (endRow && _segStart) {
+    endRow.innerHTML = `<div class="ep-label">END</div><div class="ep-val" style="color:#9ca3af;">📍 Tap a map pin to set end point</div>`;
+  }
+}
+
 function getRouteEndpoints() {
-  const mode = document.querySelector('input[name=end-mode]:checked')?.value || 'none';
-  const payload = { end_mode: mode };
-  if (window._routeStart) {
+  const payload = {};
+
+  // If driver tapped a start stop on the map, use that stop as first delivery
+  if (_segStart) {
+    payload.start_scan_item_id = _segStart.id;
+    payload.start_lat = _segStart.lat;
+    payload.start_lng = _segStart.lng;
+  } else if (window._routeStart) {
     payload.start_lat = window._routeStart.lat;
     payload.start_lng = window._routeStart.lng;
   }
-  const endAddr = document.getElementById('route-end-address')?.value?.trim();
-  if (mode === 'custom' && endAddr) payload.end_address = endAddr;
+
+  // If driver tapped an end stop, use its coords as the end anchor
+  if (_segEnd) {
+    payload.end_lat = _segEnd.lat;
+    payload.end_lng = _segEnd.lng;
+    payload.end_mode = 'custom_stop';
+  } else {
+    const mode = document.querySelector('input[name=end-mode]:checked')?.value || 'none';
+    payload.end_mode = mode;
+    const endAddr = document.getElementById('route-end-address')?.value?.trim();
+    if (mode === 'custom' && endAddr) payload.end_address = endAddr;
+  }
+
   return payload;
 }
 
@@ -1795,6 +1875,13 @@ function refreshLiveSort() {
           const popupExtra = isScanPhase ? '' : `<br>${pkg.zone_label_full || ''}${atStop > 1 ? ' · ' + atStop + ' pkgs' : ''}`;
           const marker = L.marker([pkg.lat, pkg.lng], { icon })
             .bindPopup(`<b>${atStop > 1 ? atStop + ' packages' : 'Sticker #' + (pkg.scan_order || label)}</b>${isScanPhase ? '' : '<br>' + (pkg.zone_emoji||'') + ' ' + (pkg.zone_label_full||'')}${popupExtra}<br>${pkg.name || ''}<br><small>${pkg.address}</small>`);
+          // Tap-to-select for segment re-optimize (scan phase only)
+          if (isScanPhase) {
+            marker.on('click', function() {
+              const stopData = { id: pkg.id, lat: pkg.lat, lng: pkg.lng, label: pkg.scan_order || label };
+              _handleSegmentTap(stopData, this);
+            });
+          }
           marker.addTo(liveMap);
           mapMarkers.push(marker);
         }
