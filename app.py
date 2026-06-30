@@ -225,8 +225,56 @@ _TRACKING_RES = [
     re.compile(r'\b(JJD\d{10,})\b', re.I),
 ]
 _SHIP_TO_MARKERS = re.compile(
-    r'ship\s*to|deliver\s*to|recipient|consignee|^to\s*:$', re.I
+    r'ship\s*to|deliver\s*to|recipient|consignee|delivery\s*address|^to\s*:$', re.I
 )
+_FROM_MARKERS = re.compile(
+    r'warehouse|ship\s*from|return\s*address|sender|merchant\s*address|fulfillment', re.I
+)
+_US_STATE_NAMES = (
+    r'Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|Delaware|Florida|Georgia|'
+    r'Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|Kentucky|Louisiana|Maine|Maryland|'
+    r'Massachusetts|Michigan|Minnesota|Mississippi|Missouri|Montana|Nebraska|Nevada|'
+    r'New Hampshire|New Jersey|New Mexico|New York|North Carolina|North Dakota|Ohio|'
+    r'Oklahoma|Oregon|Pennsylvania|Rhode Island|South Carolina|South Dakota|Tennessee|Texas|'
+    r'Utah|Vermont|Virginia|Washington|West Virginia|Wisconsin|Wyoming|District of Columbia'
+)
+_STATE_TOKEN = rf'(?:{_US_STATES_RE}|{_US_STATE_NAMES})'
+_STATE_ABBR = {
+    'ALABAMA': 'AL', 'ALASKA': 'AK', 'ARIZONA': 'AZ', 'ARKANSAS': 'AR', 'CALIFORNIA': 'CA',
+    'COLORADO': 'CO', 'CONNECTICUT': 'CT', 'DELAWARE': 'DE', 'FLORIDA': 'FL', 'GEORGIA': 'GA',
+    'HAWAII': 'HI', 'IDAHO': 'ID', 'ILLINOIS': 'IL', 'INDIANA': 'IN', 'IOWA': 'IA',
+    'KANSAS': 'KS', 'KENTUCKY': 'KY', 'LOUISIANA': 'LA', 'MAINE': 'ME', 'MARYLAND': 'MD',
+    'MASSACHUSETTS': 'MA', 'MICHIGAN': 'MI', 'MINNESOTA': 'MN', 'MISSISSIPPI': 'MS',
+    'MISSOURI': 'MO', 'MONTANA': 'MT', 'NEBRASKA': 'NE', 'NEVADA': 'NV', 'NEW HAMPSHIRE': 'NH',
+    'NEW JERSEY': 'NJ', 'NEW MEXICO': 'NM', 'NEW YORK': 'NY', 'NORTH CAROLINA': 'NC',
+    'NORTH DAKOTA': 'ND', 'OHIO': 'OH', 'OKLAHOMA': 'OK', 'OREGON': 'OR', 'PENNSYLVANIA': 'PA',
+    'RHODE ISLAND': 'RI', 'SOUTH CAROLINA': 'SC', 'SOUTH DAKOTA': 'SD', 'TENNESSEE': 'TN',
+    'TEXAS': 'TX', 'UTAH': 'UT', 'VERMONT': 'VT', 'VIRGINIA': 'VA', 'WASHINGTON': 'WA',
+    'WEST VIRGINIA': 'WV', 'WISCONSIN': 'WI', 'WYOMING': 'WY', 'DISTRICT OF COLUMBIA': 'DC',
+}
+
+
+def _normalize_state_token(token):
+    t = (token or '').strip().upper()
+    if len(t) == 2:
+        return t
+    return _STATE_ABBR.get(t, t[:2] if len(t) >= 2 else t)
+
+
+def _merge_split_house_lines(lines):
+    """Join '19604,' + 'Aqueduct Ct' style splits common on marketplace labels."""
+    merged = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if re.match(r'^\d{3,6},?\s*$', line.strip()) and i + 1 < len(lines):
+            num = line.strip().rstrip(',')
+            merged.append(f'{num} {lines[i + 1].strip()}')
+            i += 2
+            continue
+        merged.append(line)
+        i += 1
+    return merged
 
 
 def _extract_tracking_from_text(raw):
@@ -299,11 +347,12 @@ def parse_label_text(text):
                 break
 
     state_zip_re = re.compile(
-        rf'^(.+?),\s*({_US_STATES_RE})\s*(\d{{5}})(?:-\d{{4}})?\s*$', re.I
+        rf'^(.+?),\s*({_STATE_TOKEN})\s*(\d{{5}})(?:-\d{{4}})?\s*$', re.I
     )
-    state_zip_alt = re.compile(rf'^(.+?)\s+({_US_STATES_RE})\s+(\d{{5}})', re.I)
+    state_zip_alt = re.compile(rf'^(.+?)\s+({_STATE_TOKEN})\s+(\d{{5}})(?:-\d{{4}})?\s*$', re.I)
 
     if block:
+        block = _merge_split_house_lines(block)
         city_line = None
         city, state = '', ''
         for i, line in enumerate(block):
@@ -311,7 +360,7 @@ def parse_label_text(text):
             if m:
                 city_line = i
                 city = re.sub(r'[,.\s]+$', '', m.group(1)).strip()
-                state = m.group(2).upper()
+                state = _normalize_state_token(m.group(2))
                 zip_code = m.group(3)
                 break
         if city_line is not None:
@@ -339,18 +388,27 @@ def parse_label_text(text):
                         name = l
                         break
 
+    if not address and ship_idx >= 0:
+        address = _extract_loose_from_lines(lines[ship_idx + 1:])
+
+    if not address:
+        address = _extract_loose_from_lines(lines)
+
     if not address:
         inline = re.search(
-            rf'\b([A-Za-z][A-Za-z\s.\'-]{{1,35}}),\s*({_US_STATES_RE})\s*(\d{{5}})', raw, re.I
+            rf'\b([A-Za-z][A-Za-z\s.\'-]{{1,35}}),\s*({_STATE_TOKEN})\s*(\d{{5}})', raw, re.I
         )
         if inline:
             zip_code = inline.group(3)
-            for line in lines:
+            state = _normalize_state_token(inline.group(2))
+            for line in reversed(lines):
                 if re.match(r'^\d+\s+[A-Za-z]', line) and len(line) > 8 and not _is_junk_label_line(line):
-                    address = f'{line}, {inline.group(1).strip()}, {inline.group(2).upper()} {zip_code}'
-                    break
+                    candidate = f'{line}, {inline.group(1).strip()}, {state} {zip_code}'
+                    if not _is_sender_address(candidate):
+                        address = candidate
+                        break
 
-    if _looks_like_city_state_zip(name):
+    if _looks_like_city_state_zip(name) or (name and _FROM_MARKERS.search(name)):
         name = ''
     name = re.sub(r'[^\w\s.\'-]', ' ', name or '').strip()
     name = re.sub(r'\s+', ' ', name)
@@ -647,9 +705,10 @@ _RETURN_ADDRESS_MARKERS = (
     'SHEIN FULFILLMENT', 'NORTH AURORA', 'COMPTON, CA', 'ARTESIA BLVD', 'ARTESIA',
     'CITY OF INDUSTRY', 'COINER CT', 'WILMINGTON, MA', 'ONTARIO, CA', 'JURUPA ST',
     'POINT2POINT', 'RETURN:', 'RETURN ', 'MERCHANT', 'TEMU', 'YC - LOG', 'COMPTON',
-    'OVERLAND DRIVE', 'FULFILLMENT',
+    'OVERLAND DRIVE', 'FULFILLMENT', 'WAREHOUSE', 'WAVELAND AVE', 'WAVELAND',
+    'FRANKLIN PARK', 'SHIP FROM', 'SENDER', 'RETURN ADDRESS',
 )
-_RETURN_ZIPS = {'60542', '90220', '91748', '91761', '01887', '60642'}
+_RETURN_ZIPS = {'60542', '90220', '91748', '91761', '01887', '60642', '60131'}
 
 
 def _is_sender_address(addr):
@@ -658,8 +717,39 @@ def _is_sender_address(addr):
     u = addr.upper()
     if any(m in u for m in _RETURN_ADDRESS_MARKERS):
         return True
+    if _FROM_MARKERS.search(u):
+        return True
     zm = re.search(r'\b(\d{5})\b', u)
     return bool(zm and zm.group(1) in _RETURN_ZIPS)
+
+
+def _extract_loose_from_lines(lines):
+    """Last non-sender city/state/zip block — ship-to is usually below warehouse."""
+    merged = _merge_split_house_lines(lines)
+    state_zip_re = re.compile(rf'^(.+?),\s*({_STATE_TOKEN})\s*(\d{{5}})(?:-\d{{4}})?\s*$', re.I)
+    state_zip_alt = re.compile(rf'^(.+?)\s+({_STATE_TOKEN})\s+(\d{{5}})(?:-\d{{4}})?\s*$', re.I)
+    candidates = []
+    for i, line in enumerate(merged):
+        m = state_zip_re.match(line) or state_zip_alt.match(line)
+        if not m:
+            continue
+        city = re.sub(r'[,.\s]+$', '', m.group(1)).strip()
+        state = _normalize_state_token(m.group(2))
+        zip_code = m.group(3)
+        street = ''
+        if i > 0:
+            prev = merged[i - 1]
+            if re.match(r'^\d', prev) or re.search(r'\b(apt|unit|suite|#)\b', prev, re.I):
+                street = _normalize_informal_street(prev)
+        if not street:
+            for j in range(max(0, i - 3), i):
+                if re.match(r'^\d', merged[j]):
+                    street = _normalize_informal_street(merged[j])
+                    break
+        addr = f'{street}, {city}, {state} {zip_code}'.strip(', ') if street else f'{city}, {state} {zip_code}'
+        if not _is_sender_address(addr):
+            candidates.append(addr)
+    return candidates[-1] if candidates else ''
 
 
 def _normalize_informal_street(line):
@@ -1515,31 +1605,76 @@ def _street_name_key(address):
     return (m.group(1) if m else first).strip()
 
 
-def _group_same_street_runs(ordered):
-    """Pull stops on the same street together so they're delivered back-to-back.
+def _house_number(address):
+    """Leading street number for same-street sweep ordering."""
+    base = _street_base(address) or (address or '')
+    first = base.split(',')[0].strip()
+    m = re.match(r'^(\d+)', first)
+    return int(m.group(1)) if m else 999999
 
-    Keeps the optimizer's order for first occurrences; later stops on an
-    already-visited street are moved up to follow it. Only used within a
-    single compact zone so the distance cost is negligible.
+
+def _order_same_street_sweep(ordered, approach_from=None):
+    """Pull same-street stops together and order by house number — no backtracking.
+
+    When the optimizer scatters 100 Main → 300 Main → 150 Main, this reorders
+    to 100 → 150 → 300 (or reverse) based on approach direction.
     """
-    if len(ordered) <= 2:
+    if len(ordered) <= 1:
         return ordered
     result, used = [], set()
+    prev = approach_from
     for i, s in enumerate(ordered):
         if i in used:
             continue
-        result.append(s)
-        used.add(i)
         sk = _street_name_key(s.get('address', ''))
         if not sk:
+            result.append(s)
+            used.add(i)
+            if s.get('lat') and s.get('lng'):
+                prev = {'lat': s['lat'], 'lng': s['lng']}
             continue
+        block = [s]
+        used.add(i)
         for j in range(i + 1, len(ordered)):
             if j in used:
                 continue
             if _street_name_key(ordered[j].get('address', '')) == sk:
-                result.append(ordered[j])
+                block.append(ordered[j])
                 used.add(j)
+        block = sorted(block, key=lambda x: _house_number(x.get('address', '')))
+        if prev and len(block) > 1 and block[0].get('lat'):
+            if _dsq(prev, block[-1]) < _dsq(prev, block[0]):
+                block = list(reversed(block))
+        result.extend(block)
+        last = block[-1]
+        if last.get('lat') and last.get('lng'):
+            prev = {'lat': last['lat'], 'lng': last['lng']}
     return result
+
+
+def _group_same_street_runs(ordered):
+    """Legacy alias — use _order_same_street_sweep."""
+    return _order_same_street_sweep(ordered)
+
+
+def _rotate_stops_to_first(ordered_stops, first_item_id):
+    """Rotate optimized stop list so the chosen package/stop delivers first."""
+    if not first_item_id or not ordered_stops:
+        return ordered_stops
+    try:
+        fid = int(first_item_id)
+    except (TypeError, ValueError):
+        return ordered_stops
+    idx = None
+    for i, s in enumerate(ordered_stops):
+        group = s.get('_group') or {}
+        pkg_ids = [p.get('id') for p in group.get('packages', [s]) if p.get('id') is not None]
+        if fid in pkg_ids or s.get('id') == fid:
+            idx = i
+            break
+    if idx is None or idx == 0:
+        return ordered_stops
+    return ordered_stops[idx:] + ordered_stops[:idx]
 
 
 def _serpentine_zone_order(zone_lists, start=None, end=None):
@@ -1652,7 +1787,7 @@ def osrm_optimize_segment(pkgs):
     return osrm_optimize_full_route(pkgs)
 
 
-def build_optimized_route(geocoded, start=None, end=None):
+def build_optimized_route(geocoded, start=None, end=None, first_stop_item_id=None):
     """
     Cluster-first, route-second optimization (zone sweep):
     1. Group packages at same building into one routable stop
@@ -1734,7 +1869,7 @@ def build_optimized_route(geocoded, start=None, end=None):
         except Exception as e:
             log.warning(f'[zone_sweep] zone {zi} OSRM failed ({e}), using NN')
             ordered, dist, dur = _nn_sort(zone_stops, start=zone_start), 0, 0
-        ordered = _group_same_street_runs(ordered)
+        ordered = _order_same_street_sweep(ordered, approach_from=prev_pt)
         for s in ordered:
             s['_zone_seq'] = zi
         ordered_stops.extend(ordered)
@@ -1742,6 +1877,9 @@ def build_optimized_route(geocoded, start=None, end=None):
         total_dur += dur
         if ordered:
             prev_pt = {'lat': ordered[-1]['lat'], 'lng': ordered[-1]['lng']}
+
+    if first_stop_item_id:
+        ordered_stops = _rotate_stops_to_first(ordered_stops, first_stop_item_id)
 
     n_stops = len(ordered_stops)
     result = []
@@ -1784,7 +1922,7 @@ def build_optimized_route(geocoded, start=None, end=None):
                 'packages_at_stop': len(pkgs),
             })
             result.append(pkg)
-            delivery_order += 1
+        delivery_order += 1
 
     # Ungeocoded packages not in routable — append at end
     routed_ids = {p.get('id') for p in result}
@@ -5224,12 +5362,30 @@ def _ensure_unique_scan_orders(db, session_id):
         db.commit()
 
 
-def _parse_route_endpoints(data):
-    """Extract start/end depot from optimize request JSON."""
+def _parse_route_endpoints(data, scan_items=None):
+    """Extract start/end depot and optional first-delivery stop from optimize JSON."""
     data = data or {}
     start = end = None
+    first_stop_item_id = data.get('start_scan_item_id') or data.get('first_stop_id')
+
     if data.get('start_lat') is not None and data.get('start_lng') is not None:
         start = {'lat': float(data['start_lat']), 'lng': float(data['start_lng'])}
+
+    if first_stop_item_id and scan_items:
+        try:
+            fid = int(first_stop_item_id)
+            for item in scan_items:
+                iid = item['id'] if isinstance(item, dict) else item.get('id')
+                if iid != fid:
+                    continue
+                lat = item.get('dest_lat') if isinstance(item, dict) else item['dest_lat']
+                lng = item.get('dest_lng') if isinstance(item, dict) else item['dest_lng']
+                if lat and lng:
+                    start = {'lat': float(lat), 'lng': float(lng)}
+                break
+        except (TypeError, ValueError):
+            pass
+
     end_mode = (data.get('end_mode') or 'none').strip().lower()
     if end_mode == 'return_start' and start:
         end = dict(start)
@@ -5239,7 +5395,7 @@ def _parse_route_endpoints(data):
         coords = geocode_address(data['end_address'].strip())
         if coords:
             end = {'lat': coords[0], 'lng': coords[1]}
-    return start, end, end_mode
+    return start, end, end_mode, first_stop_item_id
 
 
 def _persist_optimized_scan_items(db, session_id, sorted_pkgs):
@@ -5876,7 +6032,6 @@ def scan_optimize():
         return jsonify({'ok': False, 'error': 'not logged in'}), 401
 
     req_data = request.get_json(silent=True) or {}
-    start, end, end_mode = _parse_route_endpoints(req_data)
 
     db = get_db()
     today = _now_local().strftime('%Y-%m-%d')
@@ -5906,7 +6061,26 @@ def scan_optimize():
         "SELECT * FROM scan_items WHERE session_id=? ORDER BY id ASC",
         (ss['id'],)
     ).fetchall()
+
+    for item in items:
+        if not item['dest_lat'] and item['address']:
+            try:
+                coords = geocode_address(item['address'])
+                if coords:
+                    db.execute(
+                        "UPDATE scan_items SET dest_lat=?, dest_lng=? WHERE id=?",
+                        (coords[0], coords[1], item['id']),
+                    )
+            except Exception as e:
+                log.warning(f'[scan_optimize] geocode failed for {item["address"]}: {e}')
+    db.commit()
+    items = db.execute(
+        "SELECT * FROM scan_items WHERE session_id=? ORDER BY id ASC",
+        (ss['id'],)
+    ).fetchall()
     db.close()
+
+    start, end, end_mode, first_stop_item_id = _parse_route_endpoints(req_data, scan_items=items)
 
     # Build packages list
     packages = []
@@ -5923,8 +6097,10 @@ def scan_optimize():
     geocoded = [p for p in packages if p['lat'] and p['lng']]
     ungeoced = [p for p in packages if not (p['lat'] and p['lng'])]
 
-    # Run optimization ONCE — group buildings, honor start/end depot
-    sorted_pkgs, total_dist_m, total_dur_s = build_optimized_route(geocoded, start=start, end=end)
+    # Run optimization ONCE — group buildings, shortest drive (OSRM), same-street sweep
+    sorted_pkgs, total_dist_m, total_dur_s = build_optimized_route(
+        geocoded, start=start, end=end, first_stop_item_id=first_stop_item_id,
+    )
 
     # Add ungeocoded at end
     seen_ids = {p['id'] for p in sorted_pkgs}
